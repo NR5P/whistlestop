@@ -1,0 +1,362 @@
+//! Kenwood ASCII CAT (`FA00014074000;`), and the radios that speak it:
+//! Elecraft (with its own extensions), QRP Labs QMX/QDX, truSDX and
+//! FlexRadio's CAT ports.
+
+use super::{Driver, Wire, ascii_query, ascii_set, cal, num, unsupported, words};
+use crate::rig::RigCaps;
+use anyhow::{Result, anyhow};
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Variant {
+    /// TS-590, TS-890, TS-990: data mode (DA), TX1 for USB audio, tuner.
+    Kenwood,
+    /// K3, K4, KX2, KX3.
+    Elecraft,
+    /// TS-480, TS-2000, QMX/QDX, truSDX: the common core.
+    Plain,
+}
+
+pub struct Kenwood {
+    w: Box<dyn Wire>,
+    v: Variant,
+    name: String,
+    max_w: f32,
+}
+
+pub fn model_name(id: &str) -> &'static str {
+    match id {
+        "017" => "K3 / TS-570",
+        "019" => "TS-2000",
+        "020" => "TS-480 (or QMX/QDX/truSDX)",
+        "021" => "TS-590S",
+        "023" => "TS-590SG",
+        "024" => "TS-990S",
+        "025" => "TS-890S",
+        _ => "radio",
+    }
+}
+
+impl Kenwood {
+    pub fn new(mut w: Box<dyn Wire>, id: &str, elecraft_hint: bool, max_w: f32) -> Result<Kenwood> {
+        // Elecraft radios answer OM; (their options); Kenwoods don't.
+        let elecraft = elecraft_hint || (id == "017" && ascii_query(w.as_mut(), "OM;", "OM").is_ok());
+        let (v, name) = if elecraft {
+            let k4 = ascii_query(w.as_mut(), "K4;", "K4").is_ok();
+            (Variant::Elecraft, if k4 { "Elecraft K4".to_string() } else { "Elecraft K3/KX".to_string() })
+        } else {
+            let v = if matches!(id, "021" | "023" | "024" | "025") { Variant::Kenwood } else { Variant::Plain };
+            (v, format!("Kenwood {}", model_name(id)))
+        };
+        let mut k = Kenwood { w, v, name, max_w };
+        k.freq().map_err(|e| anyhow!("{}: {e}", k.name))?;
+        Ok(k)
+    }
+
+    fn q(&mut self, cmd: &str, prefix: &str) -> Result<String> {
+        ascii_query(self.w.as_mut(), cmd, prefix)
+    }
+
+    fn s(&mut self, cmd: &str) -> Result<()> {
+        ascii_set(self.w.as_mut(), cmd)
+    }
+
+    fn elecraft(&self) -> bool {
+        self.v == Variant::Elecraft
+    }
+
+    /// The IF; status word (frequency, RIT, TX state, mode, split).
+    fn info(&mut self) -> Result<String> {
+        let r = self.q("IF;", "IF")?;
+        if r.len() < 33 {
+            return Err(anyhow!("short IF reply: {r}"));
+        }
+        Ok(r)
+    }
+
+    /// Meter value for the TS-590/890 RM command (0..30).
+    fn meter(&mut self, which: u8) -> Result<f32> {
+        self.s(&format!("RM{which};"))?;
+        let r = self.q("RM;", "RM")?;
+        Ok(num(&r, r.len().saturating_sub(4), None)? as f32)
+    }
+
+    fn level_spec(&self, name: &str) -> Option<(&'static str, &'static str, f32, usize)> {
+        // (query, reply prefix, full scale, digits)
+        let e = self.elecraft();
+        Some(match name {
+            "AF" if e => ("AG;", "AG", 250.0, 3),
+            "AF" => ("AG0;", "AG0", 255.0, 3),
+            "RF" if e => ("RG;", "RG", 250.0, 3),
+            "RF" => ("RG;", "RG", 255.0, 3),
+            "SQL" if e => ("SQ;", "SQ", 29.0, 3),
+            "SQL" => ("SQ0;", "SQ0", 255.0, 3),
+            "MICGAIN" if e => ("MG;", "MG", 60.0, 3),
+            "MICGAIN" => ("MG;", "MG", 100.0, 3),
+            _ => return None,
+        })
+    }
+}
+
+fn mode_name(c: char, data: bool) -> &'static str {
+    match (c, data) {
+        ('1', false) => "LSB",
+        ('2', false) => "USB",
+        ('1', true) => "PKTLSB",
+        ('2', true) => "PKTUSB",
+        ('3', _) => "CW",
+        ('4', false) => "FM",
+        ('4', true) => "PKTFM",
+        ('5', _) => "AM",
+        ('6', _) => "RTTY",
+        ('7', _) => "CWR",
+        ('9', _) => "RTTYR",
+        _ => "USB",
+    }
+}
+
+impl Driver for Kenwood {
+    fn describe(&self) -> String {
+        format!("{} (direct CAT)", self.name)
+    }
+
+    fn caps(&self) -> RigCaps {
+        let (gl, sl, f, ops) = match self.v {
+            Variant::Kenwood => (
+                "AF RF SQL MICGAIN RFPOWER PREAMP ATT STRENGTH SWR ALC",
+                "AF RF SQL MICGAIN RFPOWER PREAMP ATT",
+                "NB NR ANF COMP VOX TUNER",
+                "TUNE CPY",
+            ),
+            Variant::Elecraft => ("AF RF SQL MICGAIN RFPOWER PREAMP ATT STRENGTH SWR", "AF RF SQL MICGAIN RFPOWER PREAMP ATT", "NB NR VOX", ""),
+            Variant::Plain => ("AF RF SQL RFPOWER STRENGTH", "AF RF SQL RFPOWER", "", ""),
+        };
+        RigCaps {
+            model: self.name.clone(),
+            get_levels: words(gl),
+            set_levels: words(sl),
+            get_funcs: words(f),
+            set_funcs: words(f),
+            vfo_ops: words(ops),
+            preamp_db: if self.v == Variant::Plain { vec![] } else { vec![10] },
+            att_db: if self.v == Variant::Plain { vec![] } else { vec![10] },
+            modes: words("USB LSB PKTUSB PKTLSB CW CWR AM FM RTTY"),
+        }
+    }
+
+    fn freq(&mut self) -> Result<f64> {
+        let r = self.q("FA;", "FA")?;
+        Ok(num(&r, 2, None)? as f64)
+    }
+
+    fn set_freq(&mut self, hz: f64) -> Result<()> {
+        self.s(&format!("FA{:011};", hz.round() as u64))
+    }
+
+    fn mode(&mut self) -> Result<(String, i64)> {
+        let r = self.q("MD;", "MD")?;
+        let c = r.chars().nth(2).unwrap_or('2');
+        let (name, pb) = match self.v {
+            Variant::Elecraft => {
+                let pb = self.q("BW;", "BW").ok().and_then(|b| num(&b, 2, None).ok()).map(|n| n * 10).unwrap_or(0);
+                let name = match c {
+                    '6' => "PKTUSB",
+                    '9' => "PKTLSB",
+                    _ => mode_name(c, false),
+                };
+                (name, pb)
+            }
+            Variant::Kenwood => {
+                let data = self.q("DA;", "DA").map(|d| d.ends_with('1')).unwrap_or(false);
+                (mode_name(c, data), 0)
+            }
+            Variant::Plain => (mode_name(c, false), 0),
+        };
+        Ok((name.into(), pb))
+    }
+
+    fn set_mode(&mut self, mode: &str, passband_hz: i64) -> Result<()> {
+        let (code, data) = match mode {
+            "LSB" => ('1', false),
+            "USB" => ('2', false),
+            "CW" => ('3', false),
+            "FM" => ('4', false),
+            "AM" => ('5', false),
+            "RTTY" => ('6', false),
+            "CWR" => ('7', false),
+            "RTTYR" => ('9', false),
+            "PKTLSB" => ('1', true),
+            "PKTUSB" => ('2', true),
+            "PKTFM" => ('4', true),
+            _ => return Err(unsupported(mode)),
+        };
+        match self.v {
+            Variant::Elecraft => {
+                if data {
+                    // DATA (or DATA-REV) mode, sub-mode DATA A (sound card).
+                    self.s(if code == '1' { "MD9;" } else { "MD6;" })?;
+                    self.s("DT0;")?;
+                } else {
+                    self.s(&format!("MD{code};"))?;
+                }
+                if passband_hz > 0 {
+                    self.s(&format!("BW{:04};", (passband_hz / 10).min(9999)))?;
+                }
+            }
+            Variant::Kenwood => {
+                self.s(&format!("MD{code};"))?;
+                self.s(if data { "DA1;" } else { "DA0;" })?;
+            }
+            Variant::Plain => self.s(&format!("MD{code};"))?,
+        }
+        Ok(())
+    }
+
+    fn ptt(&mut self) -> Result<bool> {
+        let r = self.info()?;
+        Ok(r.chars().nth(28) == Some('1'))
+    }
+
+    fn set_ptt(&mut self, on: bool) -> Result<()> {
+        // TX1 on Kenwood transmits the USB/ACC audio (data), not the mic.
+        self.s(match (on, self.v) {
+            (true, Variant::Kenwood) => "TX1;",
+            (true, _) => "TX;",
+            (false, _) => "RX;",
+        })
+    }
+
+    fn get_level(&mut self, name: &str) -> Result<f32> {
+        if let Some((cmd, prefix, full, _)) = self.level_spec(name) {
+            let r = self.q(cmd, prefix)?;
+            return Ok(num(&r, prefix.len(), None)? as f32 / full);
+        }
+        let e = self.elecraft();
+        Ok(match name {
+            "RFPOWER" => {
+                let r = self.q("PC;", "PC")?;
+                num(&r, 2, Some(3))? as f32 / self.max_w.max(1.0)
+            }
+            "STRENGTH" => {
+                let (r, t): (String, &[(f32, f32)]) = match self.v {
+                    Variant::Elecraft => (self.q("SM;", "SM")?, &[(0.0, -54.0), (9.0, 0.0), (21.0, 60.0)]),
+                    Variant::Kenwood => (self.q("SM0;", "SM0")?, &[(0.0, -54.0), (15.0, 0.0), (30.0, 60.0)]),
+                    Variant::Plain => (self.q("SM0;", "SM0")?, &[(0.0, -54.0), (9.0, 0.0), (15.0, 60.0)]),
+                };
+                let skip = r.len().saturating_sub(4);
+                cal(t, num(&r, skip, None)? as f32)
+            }
+            "SWR" if e => num(&self.q("SW;", "SW")?, 2, None)? as f32 / 10.0,
+            "SWR" if self.v == Variant::Kenwood => cal(&[(0.0, 1.0), (6.0, 1.5), (10.0, 2.0), (15.0, 3.0), (30.0, 10.0)], self.meter(1)?),
+            "ALC" if self.v == Variant::Kenwood => (self.meter(3)? / 30.0).min(1.0),
+            "PREAMP" if self.v != Variant::Plain => {
+                if self.q("PA;", "PA")?.chars().nth(2) == Some('1') {
+                    10.0
+                } else {
+                    0.0
+                }
+            }
+            "ATT" if self.v != Variant::Plain => {
+                let r = self.q("RA;", "RA")?;
+                if num(&r, 2, Some(2))? != 0 { 10.0 } else { 0.0 }
+            }
+            _ => return Err(unsupported(name)),
+        })
+    }
+
+    fn set_level(&mut self, name: &str, v: f32) -> Result<()> {
+        if let Some((_, prefix, full, digits)) = self.level_spec(name) {
+            let n = (v.clamp(0.0, 1.0) * full).round() as u32;
+            return self.s(&format!("{prefix}{n:0digits$};"));
+        }
+        match name {
+            "RFPOWER" => self.s(&format!("PC{:03};", (v.clamp(0.0, 1.0) * self.max_w).round() as u32)),
+            "PREAMP" if self.v != Variant::Plain => self.s(&format!("PA{};", (v > 0.0) as u8)),
+            "ATT" if self.v != Variant::Plain => self.s(&format!("RA{:02};", (v > 0.0) as u8)),
+            _ => Err(unsupported(name)),
+        }
+    }
+
+    fn get_func(&mut self, name: &str) -> Result<bool> {
+        let (cmd, prefix) = match (name, self.v) {
+            ("NB", Variant::Kenwood | Variant::Elecraft) => ("NB;", "NB"),
+            ("NR", Variant::Kenwood | Variant::Elecraft) => ("NR;", "NR"),
+            ("VOX", Variant::Kenwood | Variant::Elecraft) => ("VX;", "VX"),
+            ("ANF", Variant::Kenwood) => ("BC;", "BC"),
+            ("COMP", Variant::Kenwood) => ("PR;", "PR"),
+            ("TUNER", Variant::Kenwood) => {
+                let r = self.q("AC;", "AC")?;
+                return Ok(r.chars().nth(3) == Some('1'));
+            }
+            _ => return Err(unsupported(name)),
+        };
+        let r = self.q(cmd, prefix)?;
+        Ok(r.chars().nth(prefix.len()).is_some_and(|c| c != '0'))
+    }
+
+    fn set_func(&mut self, name: &str, on: bool) -> Result<()> {
+        let p = match (name, self.v) {
+            ("NB", Variant::Kenwood | Variant::Elecraft) => "NB",
+            ("NR", Variant::Kenwood | Variant::Elecraft) => "NR",
+            ("VOX", Variant::Kenwood | Variant::Elecraft) => "VX",
+            ("ANF", Variant::Kenwood) => "BC",
+            ("COMP", Variant::Kenwood) => "PR",
+            ("TUNER", Variant::Kenwood) => return self.s(if on { "AC110;" } else { "AC000;" }),
+            _ => return Err(unsupported(name)),
+        };
+        self.s(&format!("{p}{};", on as u8))
+    }
+
+    fn vfo_op(&mut self, op: &str) -> Result<()> {
+        match (op, self.v) {
+            ("TUNE", Variant::Kenwood) => self.s("AC111;"),
+            ("CPY", Variant::Kenwood) => self.s("VV;"),
+            _ => Err(unsupported(op)),
+        }
+    }
+
+    fn vfo(&mut self) -> Result<String> {
+        Ok(match self.q("FR;", "FR") {
+            Ok(r) if r.ends_with('1') => "VFOB".into(),
+            _ => "VFOA".into(),
+        })
+    }
+
+    fn set_vfo(&mut self, vfo: &str) -> Result<()> {
+        let n = (vfo == "VFOB") as u8;
+        self.s(&format!("FR{n};"))?;
+        self.s(&format!("FT{n};"))
+    }
+
+    fn split(&mut self) -> Result<bool> {
+        let rx = self.q("FR;", "FR")?;
+        let tx = self.q("FT;", "FT")?;
+        Ok(rx.chars().nth(2) != tx.chars().nth(2))
+    }
+
+    fn set_split(&mut self, on: bool) -> Result<()> {
+        let rx = self.q("FR;", "FR").map(|r| r.ends_with('1')).unwrap_or(false);
+        self.s(&format!("FT{};", (rx != on) as u8))
+    }
+
+    fn offset(&mut self, xit: bool) -> Result<i32> {
+        let r = self.info()?;
+        let on = r.chars().nth(if xit { 24 } else { 23 }) == Some('1');
+        if !on {
+            return Ok(0);
+        }
+        Ok(num(&r, 18, Some(5))? as i32)
+    }
+
+    fn set_offset(&mut self, xit: bool, hz: i32) -> Result<()> {
+        match self.v {
+            Variant::Elecraft => self.s(&format!("RO{}{:04};", if hz < 0 { '-' } else { '+' }, hz.unsigned_abs().min(9999)))?,
+            _ => {
+                self.s("RC;")?;
+                if hz != 0 {
+                    self.s(&format!("{}{:05};", if hz > 0 { "RU" } else { "RD" }, hz.unsigned_abs().min(99999)))?;
+                }
+            }
+        }
+        self.s(&format!("{}{};", if xit { "XT" } else { "RT" }, (hz != 0) as u8))
+    }
+}

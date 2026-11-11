@@ -1537,6 +1537,7 @@ impl App {
                         ui.horizontal(|ui| {
                             ui.selectable_value(&mut c.rig_mode, RigMode::External, "Use a running rigctld / RigHelm").help(&help::ST_RIGMODE);
                             ui.selectable_value(&mut c.rig_mode, RigMode::Managed, "Let Whistlestop run rigctld").help(&help::ST_RIGMODE);
+                            ui.selectable_value(&mut c.rig_mode, RigMode::Direct, "Direct CAT (built in)").help(&help::ST_CAT);
                         });
                         match c.rig_mode {
                             RigMode::External => {
@@ -1608,6 +1609,104 @@ impl App {
                                     ui.end_row();
                                 });
                                 ui.label(RichText::new(format!("Mercury: Hamlib model 2 (NET rigctl) at 127.0.0.1:{}. RTS and DTR are held off so connecting can't key the radio.", c.managed_rig.listen_port)).small().color(DIM));
+                            }
+                            RigMode::Direct => {
+                                use whistlestop::cat::Family;
+                                ui.label(RichText::new("Whistlestop talks to the radio itself (Icom CI-V, Kenwood, Elecraft, Yaesu): no Hamlib needed.").small().color(DIM));
+                                ui.horizontal(|ui| {
+                                    if ui.button("🔍  Detect radios").help(&help::ST_DETECT).clicked() {
+                                        self.detected = rs::detect();
+                                    }
+                                    ui.label(RichText::new(format!("{} found", self.detected.len())).color(DIM));
+                                });
+                                for g in self.detected.clone() {
+                                    ui.horizontal(|ui| {
+                                        ui.label(RichText::new(&g.what).strong());
+                                        ui.label(RichText::new(&g.port).monospace().small().color(DIM));
+                                        if ui.small_button("Use").help(&help::ST_DETECT).clicked() {
+                                            c.cat.port = g.port.clone();
+                                            let f = Family::from_description(&g.what);
+                                            if f != Family::Auto {
+                                                c.cat.family = f;
+                                            }
+                                        }
+                                    })
+                                    .response
+                                    .on_hover_text(&g.why);
+                                }
+                                egui::Grid::new("cat").num_columns(2).spacing(vec2(10.0, 8.0)).show(ui, |ui| {
+                                    ui.label("Protocol");
+                                    egui::ComboBox::from_id_salt("catfam").width(300.0).selected_text(c.cat.family.label()).show_ui(ui, |ui| {
+                                        for f in Family::ALL {
+                                            ui.selectable_value(&mut c.cat.family, f, f.label());
+                                        }
+                                    })
+                                    .response
+                                    .help(&help::ST_CAT_FAMILY);
+                                    ui.end_row();
+                                    ui.label("Port");
+                                    ui.horizontal(|ui| {
+                                        egui::ComboBox::from_id_salt("catport").width(300.0).selected_text(if c.cat.port.is_empty() { "Automatic".to_string() } else { c.cat.port.clone() }).show_ui(ui, |ui| {
+                                            ui.selectable_value(&mut c.cat.port, String::new(), "Automatic");
+                                            for p in rs::all_serial_paths() {
+                                                ui.selectable_value(&mut c.cat.port, p.clone(), p);
+                                            }
+                                        })
+                                        .response
+                                        .help(&help::ST_CAT_PORT);
+                                    });
+                                    ui.end_row();
+                                    ui.label("or network address");
+                                    ui.add(egui::TextEdit::singleline(&mut c.cat.port).hint_text("host:port, for a serial-over-network bridge").desired_width(300.0)).help(&help::ST_CAT_PORT);
+                                    ui.end_row();
+                                    ui.label("Speed");
+                                    egui::ComboBox::from_id_salt("catbaud").selected_text(if c.cat.baud == 0 { "Automatic".to_string() } else { c.cat.baud.to_string() }).show_ui(ui, |ui| {
+                                        for b in [0u32, 4800, 9600, 19200, 38400, 57600, 115200] {
+                                            ui.selectable_value(&mut c.cat.baud, b, if b == 0 { "Automatic".to_string() } else { b.to_string() });
+                                        }
+                                    })
+                                    .response
+                                    .help(&help::ST_CAT_BAUD);
+                                    ui.end_row();
+                                    if matches!(c.cat.family, Family::Icom | Family::Auto) {
+                                        ui.label("CI-V address");
+                                        ui.horizontal(|ui| {
+                                            let mut auto = c.cat.civ_addr == 0;
+                                            if ui.checkbox(&mut auto, "Ask the radio").help(&help::ST_CAT_CIV).changed() {
+                                                c.cat.civ_addr = if auto { 0 } else { 0x94 };
+                                            }
+                                            if !auto {
+                                                let mut hex = format!("{:02X}", c.cat.civ_addr);
+                                                if ui.add(egui::TextEdit::singleline(&mut hex).desired_width(36.0).char_limit(2)).help(&help::ST_CAT_CIV).changed()
+                                                    && let Ok(v) = u8::from_str_radix(hex.trim(), 16)
+                                                {
+                                                    c.cat.civ_addr = v;
+                                                }
+                                                ui.label(RichText::new(format!("h  ({})", whistlestop::cat::icom::model_name(c.cat.civ_addr))).color(DIM));
+                                            }
+                                        });
+                                        ui.end_row();
+                                    }
+                                    ui.label("Full power");
+                                    ui.add(egui::DragValue::new(&mut c.cat.max_power_w).range(1.0..=2000.0).suffix(" W")).help(&help::ST_CAT_POWER);
+                                    ui.end_row();
+                                    ui.label("Share with Mercury on port");
+                                    ui.horizontal(|ui| {
+                                        let mut on = c.cat.share_port != 0;
+                                        if ui.checkbox(&mut on, "").help(&help::ST_CAT_SHARE).changed() {
+                                            c.cat.share_port = if on { 4532 } else { 0 };
+                                        }
+                                        if on {
+                                            ui.add(egui::DragValue::new(&mut c.cat.share_port).range(1024..=65535)).help(&help::ST_CAT_SHARE);
+                                        }
+                                    });
+                                    ui.end_row();
+                                });
+                                if c.cat.share_port != 0 {
+                                    ui.label(RichText::new(format!("Mercury: Hamlib model 2 (NET rigctl) at 127.0.0.1:{}. Whistlestop owns the radio's port; Mercury keys it through Whistlestop. RTS and DTR are held low.", c.cat.share_port)).small().color(DIM));
+                                } else {
+                                    ui.label(RichText::new("Not shared: Mercury will need another way to key the radio (VOX, or a separate PTT port).").small().color(AMBER));
+                                }
                             }
                         }
                     });

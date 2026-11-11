@@ -178,6 +178,8 @@ impl RigCaps {
 
 pub enum Rig {
     Rigctld(RigctldClient),
+    /// Whistlestop's own CAT drivers (see `cat`).
+    Cat(crate::cat::CatHandle),
     Sim(SimRig),
 }
 
@@ -213,6 +215,7 @@ impl Rig {
     pub async fn set_freq(&mut self, hz: f64) -> Result<()> {
         match self {
             Rig::Rigctld(c) => c.set(&format!("F {}", hz.round() as i64)).await,
+            Rig::Cat(h) => h.call(move |d| d.set_freq(hz)).await,
             Rig::Sim(s) => {
                 s.status.freq_hz = hz.round();
                 *s.freq_link.lock().unwrap() = s.status.freq_hz;
@@ -224,6 +227,7 @@ impl Rig {
     pub async fn freq(&mut self) -> Result<f64> {
         match self {
             Rig::Rigctld(c) => Ok(c.get("f", 1).await?[0].parse()?),
+            Rig::Cat(h) => h.call(|d| d.freq()).await,
             Rig::Sim(s) => Ok(s.status.freq_hz),
         }
     }
@@ -232,6 +236,10 @@ impl Rig {
     pub async fn set_mode(&mut self, mode: &str, passband_hz: i64) -> Result<()> {
         match self {
             Rig::Rigctld(c) => c.set(&format!("M {mode} {passband_hz}")).await,
+            Rig::Cat(h) => {
+                let m = mode.to_string();
+                h.call(move |d| d.set_mode(&m, passband_hz)).await
+            }
             Rig::Sim(s) => {
                 s.status.mode = mode.into();
                 s.status.passband_hz = passband_hz;
@@ -243,6 +251,7 @@ impl Rig {
     pub async fn ptt(&mut self, on: bool) -> Result<()> {
         match self {
             Rig::Rigctld(c) => c.set(&format!("T {}", on as u8)).await,
+            Rig::Cat(h) => h.call(move |d| d.set_ptt(on)).await,
             Rig::Sim(s) => {
                 s.status.ptt = on;
                 Ok(())
@@ -253,6 +262,10 @@ impl Rig {
     pub async fn set_power(&mut self, frac: f32) -> Result<()> {
         match self {
             Rig::Rigctld(c) => c.set(&format!("L RFPOWER {:.2}", frac.clamp(0.0, 1.0))).await,
+            Rig::Cat(h) => {
+                let f = frac.clamp(0.0, 1.0);
+                h.call(move |d| d.set_level("RFPOWER", f)).await
+            }
             Rig::Sim(s) => {
                 s.status.rf_power = Some(frac.clamp(0.0, 1.0));
                 Ok(())
@@ -279,6 +292,7 @@ impl Rig {
                     rf_power,
                 })
             }
+            Rig::Cat(h) => h.call(|d| crate::cat::poll(d)).await,
             Rig::Sim(s) => Ok(s.status.clone()),
         }
     }
@@ -299,6 +313,7 @@ impl Rig {
                 }
                 Ok(RigCaps::parse(&text))
             }
+            Rig::Cat(h) => Ok(h.caps.clone()),
             Rig::Sim(_) => Ok(RigCaps::demo()),
         }
     }
@@ -306,6 +321,10 @@ impl Rig {
     pub async fn get_level(&mut self, name: &str) -> Result<f32> {
         match self {
             Rig::Rigctld(c) => Ok(c.get(&format!("l {name}"), 1).await?[0].parse()?),
+            Rig::Cat(h) => {
+                let n = name.to_string();
+                h.call(move |d| d.get_level(&n)).await
+            }
             Rig::Sim(s) => Ok(match name {
                 "SWR" => s.swr(),
                 "ALC" => if s.status.ptt { 0.25 } else { 0.0 },
@@ -322,6 +341,10 @@ impl Rig {
                 let val = if matches!(name, "AGC" | "PREAMP" | "ATT" | "KEYSPD" | "NOTCHF" | "IF" | "CWPITCH") { format!("{}", v.round() as i64) } else { format!("{v:.3}") };
                 c.set(&format!("L {name} {val}")).await
             }
+            Rig::Cat(h) => {
+                let n = name.to_string();
+                h.call(move |d| d.set_level(&n, v)).await
+            }
             Rig::Sim(s) => {
                 s.levels.insert(name.into(), v);
                 if name == "RFPOWER" {
@@ -335,6 +358,10 @@ impl Rig {
     pub async fn get_func(&mut self, name: &str) -> Result<bool> {
         match self {
             Rig::Rigctld(c) => Ok(c.get(&format!("u {name}"), 1).await?[0] == "1"),
+            Rig::Cat(h) => {
+                let n = name.to_string();
+                h.call(move |d| d.get_func(&n)).await
+            }
             Rig::Sim(s) => Ok(*s.funcs.get(name).unwrap_or(&false)),
         }
     }
@@ -342,6 +369,10 @@ impl Rig {
     pub async fn set_func(&mut self, name: &str, on: bool) -> Result<()> {
         match self {
             Rig::Rigctld(c) => c.set(&format!("U {name} {}", on as u8)).await,
+            Rig::Cat(h) => {
+                let n = name.to_string();
+                h.call(move |d| d.set_func(&n, on)).await
+            }
             Rig::Sim(s) => {
                 s.funcs.insert(name.into(), on);
                 Ok(())
@@ -354,6 +385,10 @@ impl Rig {
     pub async fn vfo_op(&mut self, op: &str) -> Result<()> {
         match self {
             Rig::Rigctld(c) => c.set(&format!("G {op}")).await,
+            Rig::Cat(h) => {
+                let o = op.to_string();
+                h.call(move |d| d.vfo_op(&o)).await
+            }
             Rig::Sim(s) => {
                 match op {
                     "TUNE" => {
@@ -371,6 +406,7 @@ impl Rig {
     pub async fn vfo(&mut self) -> Result<String> {
         match self {
             Rig::Rigctld(c) => Ok(c.get("v", 1).await?[0].clone()),
+            Rig::Cat(h) => h.call(|d| d.vfo()).await,
             Rig::Sim(s) => Ok(s.vfo.clone()),
         }
     }
@@ -378,6 +414,10 @@ impl Rig {
     pub async fn set_vfo(&mut self, vfo: &str) -> Result<()> {
         match self {
             Rig::Rigctld(c) => c.set(&format!("V {vfo}")).await,
+            Rig::Cat(h) => {
+                let v = vfo.to_string();
+                h.call(move |d| d.set_vfo(&v)).await
+            }
             Rig::Sim(s) => {
                 s.vfo = vfo.into();
                 Ok(())
@@ -388,6 +428,7 @@ impl Rig {
     pub async fn split(&mut self) -> Result<bool> {
         match self {
             Rig::Rigctld(c) => Ok(c.get("s", 2).await?[0] == "1"),
+            Rig::Cat(h) => h.call(|d| d.split()).await,
             Rig::Sim(s) => Ok(s.split),
         }
     }
@@ -395,6 +436,7 @@ impl Rig {
     pub async fn set_split(&mut self, on: bool) -> Result<()> {
         match self {
             Rig::Rigctld(c) => c.set(&format!("S {} VFOB", on as u8)).await,
+            Rig::Cat(h) => h.call(move |d| d.set_split(on)).await,
             Rig::Sim(s) => {
                 s.split = on;
                 Ok(())
@@ -406,6 +448,7 @@ impl Rig {
     pub async fn offset(&mut self, xit: bool) -> Result<i32> {
         match self {
             Rig::Rigctld(c) => Ok(c.get(if xit { "z" } else { "j" }, 1).await?[0].parse()?),
+            Rig::Cat(h) => h.call(move |d| d.offset(xit)).await,
             Rig::Sim(s) => Ok(if xit { s.xit } else { s.rit }),
         }
     }
@@ -413,6 +456,7 @@ impl Rig {
     pub async fn set_offset(&mut self, xit: bool, hz: i32) -> Result<()> {
         match self {
             Rig::Rigctld(c) => c.set(&format!("{} {hz}", if xit { "Z" } else { "J" })).await,
+            Rig::Cat(h) => h.call(move |d| d.set_offset(xit, hz)).await,
             Rig::Sim(s) => {
                 if xit {
                     s.xit = hz

@@ -17,3 +17,5 @@ pub mod tnc;
 pub mod whistle;
 pub mod widesearch;
 pub mod ziputil;
+pub mod cat;
+pub mod rigserve;

@@ -438,6 +438,8 @@ struct Station {
     /// belongs to another frequency.
     last_tune: Instant,
     rigctld: Option<crate::rigsetup::RigctldProcess>,
+    /// Built-in rigctld server sharing a direct-CAT radio with Mercury.
+    rig_server: Option<crate::rigserve::RigServer>,
     rig_caps: crate::rig::RigCaps,
     rig_watch: bool,
     last_ext_poll: Instant,
@@ -563,6 +565,7 @@ impl Station {
             wide_tried: vec![],
             last_tune: Instant::now(),
             rigctld: None,
+            rig_server: None,
             rig_caps: Default::default(),
             rig_watch: false,
             last_ext_poll: Instant::now(),
@@ -622,6 +625,31 @@ impl Station {
             s.rig = Some(Rig::sim(14_096_000.0, vfo.clone()));
             s.set(|g| g.rig_ok = true);
             s.set(|g| g.rig_desc = "Demo transceiver (simulated)".into());
+        } else if cfg.rig_mode == crate::rigsetup::RigMode::Direct && real.is_none() && !cfg.demo {
+            // Whistlestop's own CAT drivers: find the radio and its protocol.
+            let cat = cfg.cat.clone();
+            match tokio::task::spawn_blocking(move || crate::cat::connect(&cat)).await.map_err(|e| anyhow::anyhow!("{e}")).and_then(|r| r) {
+                Ok(d) => {
+                    let h = crate::cat::CatHandle::start(d);
+                    let desc = h.desc.clone();
+                    s.log(format!("Radio: {desc}"));
+                    if cfg.cat.share_port > 0 {
+                        match crate::rigserve::serve(h.clone(), cfg.cat.share_port).await {
+                            Ok(srv) => {
+                                s.log(format!("Radio shared for Mercury and other programs at {} (Hamlib model 2, NET rigctl)", srv.addr));
+                                s.rig_server = Some(srv);
+                            }
+                            Err(e) => s.log(format!("⚠ {e}. Mercury won't be able to key the radio; change the sharing port in Settings.")),
+                        }
+                    }
+                    s.rig = Some(Rig::Cat(h));
+                    s.set(|g| {
+                        g.rig_ok = true;
+                        g.rig_desc = desc.clone();
+                    });
+                }
+                Err(e) => s.log(format!("⚠ Radio (direct CAT): {e:#}")),
+            }
         } else {
             let mut addr = real_ports.as_ref().map(|p| p.0.clone()).unwrap_or(cfg.rigctld.clone());
             let mut desc = if real_ports.is_some() { "Demo radio on the simulated band".to_string() } else { format!("rigctld at {addr}") };
@@ -2949,6 +2977,55 @@ mod tests {
         wait("chat saved to Arrivals", 40, &|s| s.depot.arrivals.iter().any(|m| m.from == "K7BOT"));
         h.send(Cmd::Stop);
         let _ = std::fs::remove_file(std::env::temp_dir().join(format!("ws-depot-{}-N0MAIL.json", std::process::id())));
+    }
+
+    /// Direct CAT end to end: the engine finds a (simulated) IC-7300 over
+    /// a network bridge, tunes it, and shares it on a rigctld port that a
+    /// Hamlib-style client (as Mercury is) can key.
+    #[test]
+    fn direct_cat_controls_and_shares_the_radio() {
+        let radio_port = crate::cat::sim::serve_tcp(crate::cat::sim::Kind::Icom(0x94));
+        let share = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+        let h = spawn(|| {});
+        let mut cfg = Config { demo: false, callsign: "N0CAT".into(), mercury_port: 1, mercury_bcast_port: 1, ..Default::default() };
+        cfg.sdr.enabled = false;
+        cfg.rig_mode = crate::rigsetup::RigMode::Direct;
+        cfg.cat.port = format!("127.0.0.1:{radio_port}");
+        cfg.cat.share_port = share;
+        h.send(Cmd::Start(cfg));
+        let wait = |what: &str, secs: u64, f: &dyn Fn(&State) -> bool| {
+            let t = Instant::now();
+            while t.elapsed() < Duration::from_secs(secs) {
+                if f(&h.state.lock().unwrap()) {
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            let g = h.state.lock().unwrap();
+            let log: Vec<_> = g.log.iter().map(|l| l.1.clone()).collect();
+            panic!("timed out waiting for {what}; log:\n{}", log.join("\n"));
+        };
+        wait("radio", 15, &|s| s.rig_ok && s.rig_desc.contains("IC-7300"));
+        wait("frequency read", 10, &|s| s.rig.freq_hz == 14_074_000.0);
+        h.send(Cmd::SetFreq(7_074_000.0));
+        wait("tuned", 10, &|s| s.rig.freq_hz == 7_074_000.0);
+        // A NET rigctl client (Mercury's way) on the shared port.
+        use std::io::{BufRead, BufReader, Write};
+        let mut c = std::net::TcpStream::connect(("127.0.0.1", share)).unwrap();
+        c.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        let mut r = BufReader::new(c.try_clone().unwrap());
+        let mut ask = |cmd: &str| {
+            c.write_all(format!("{cmd}\n").as_bytes()).unwrap();
+            let mut l = String::new();
+            r.read_line(&mut l).unwrap();
+            l.trim().to_string()
+        };
+        assert_eq!(ask("f"), "7074000");
+        assert_eq!(ask("T 1"), "RPRT 0");
+        assert_eq!(ask("t"), "1");
+        wait("PTT seen by Whistlestop", 10, &|s| s.rig.ptt);
+        assert_eq!(ask("T 0"), "RPRT 0");
+        h.send(Cmd::Stop);
     }
 
     /// Demo with encryption required: link to K7BOT, see the 🔒 and the

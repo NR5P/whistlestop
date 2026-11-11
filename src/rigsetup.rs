@@ -202,6 +202,9 @@ pub enum RigMode {
     External,
     /// Whistlestop runs rigctld itself for this radio.
     Managed,
+    /// Whistlestop talks to the radio itself (its own CAT drivers, no
+    /// Hamlib), and shares it with Mercury over a built-in rigctld server.
+    Direct,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

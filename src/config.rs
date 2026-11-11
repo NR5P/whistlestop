@@ -54,6 +54,8 @@ pub struct Config {
     /// Whistlestop runs (Managed, with auto-detect).
     pub rig_mode: crate::rigsetup::RigMode,
     pub managed_rig: crate::rigsetup::ManagedRig,
+    /// Direct CAT settings (rig_mode Direct).
+    pub cat: crate::cat::CatConfig,
     /// Ask the antenna tuner to tune when a transmission's SWR is above
     /// `swr_limit` (off by default; tuning transmits a carrier).
     pub auto_tune: bool,
@@ -121,6 +123,7 @@ impl Default for Config {
             sdr: SdrConfig::default(),
             rig_mode: crate::rigsetup::RigMode::External,
             managed_rig: crate::rigsetup::ManagedRig::default(),
+            cat: crate::cat::CatConfig::default(),
             auto_tune: false,
             swr_limit: 2.0,
             monitor: false,

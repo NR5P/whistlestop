@@ -36,13 +36,15 @@ When you're ready for the air, open **Settings**, enter your callsign, untick **
 
 ## Setting up your station
 
-You need four things: a radio with CAT control, an audio interface to it (most modern radios have USB audio built in), the **Mercury** modem, and a **rig control server** that both Mercury and Whistlestop share.
+You need four things: a radio with CAT control, an audio interface to it (most modern radios have USB audio built in), the **Mercury** modem, and a way for both Mercury and Whistlestop to control the radio.
 
 ### 1. Rig control
 
-Only one program can open the radio's CAT (serial/USB) port. So a rig control *server* owns it, and everything else (Whistlestop and Mercury) talks to that server over the network on this computer. In **Settings → Radio connection** choose one of two ways:
+Only one program can open the radio's CAT (serial/USB) port. So one program owns it and shares it with the others over the network on this computer. In **Settings → Radio connection** choose one of three ways:
 
-**Let Whistlestop run rigctld** (easiest). Whistlestop starts Hamlib's `rigctld` for your radio and stops it when you quit.
+**Direct CAT (built in)** (nothing to install). Whistlestop speaks your radio's own control protocol itself and shares the radio with Mercury. See "Direct CAT (built in)".
+
+**Let Whistlestop run rigctld**. Whistlestop starts Hamlib's `rigctld` for your radio and stops it when you quit.
 
 - Install Hamlib once (macOS: `brew install hamlib`).
 - Press **🔍 Detect radios**. Whistlestop looks at the USB devices macOS already knows about and recognises:
@@ -58,13 +60,13 @@ Only one program can open the radio's CAT (serial/USB) port. So a rig control *s
 - **RigHelm**: enable its built-in rigctld server (default `127.0.0.1:4532`).
 - **Hamlib rigctld** you start yourself: `rigctld -m <model> -r <port>` (find the model number with `rigctl -l`).
 
-Set **rigctld address** to it. Either way, the **Radio** pill in the top bar turns green when connected, and the log names the radio Hamlib reports.
+Set **rigctld address** to it. Whichever way, the **Radio** pill in the top bar turns green when connected, and the log names the radio Hamlib reports.
 
 ### 2. Mercury
 
 Install Mercury (macOS: drag `Mercury.app` to Applications). Then set it up so it shares the radio:
 
-- **Radio / PTT**: Hamlib model **2 (NET rigctl)** pointing at the same rigctld address (`127.0.0.1:4532` by default, whether Whistlestop runs rigctld or something else does). Mercury then keys the transmitter through the same server.
+- **Radio / PTT**: Hamlib model **2 (NET rigctl)** pointing at `127.0.0.1:4532` (the default for all three ways: Whistlestop's direct-CAT sharing port, the rigctld it runs, or RigHelm's server). Mercury then keys the transmitter through the same server.
 - **Sound card**: the radio's USB audio codec, both directions.
 - **Ports**: leave the TNC port at **8300** (data on 8301) and the broadcast port at **8100**, or set the same numbers in Whistlestop **Settings → Mercury modem**.
 
@@ -408,6 +410,47 @@ The top bar's S-meter and frequency display follow the radio, including changes 
 
 > For data, keep NB, NR, Notch, compression, VOX, split, RIT and XIT **off** and squelch **open**. They distort data signals or move you off the other station. The window reminds you.
 
+## Direct CAT (built in)
+
+With **Settings → Radio connection → Direct CAT (built in)**, Whistlestop controls the radio itself, in the radio's own language. No Hamlib, rigctld or other program is needed.
+
+| Protocol | Radios |
+|---|---|
+| **Icom CI-V** | IC-7300, IC-7300MK2, IC-705, IC-7610, IC-9700, IC-7100, IC-905, IC-7851, IC-7600, IC-7200, IC-7410, IC-9100, older CI-V radios; **Xiegu** G90, X6100, X5105 (they speak CI-V) |
+| **Kenwood** | TS-590S/SG, TS-890S, TS-990S, TS-480, TS-2000; **QRP Labs** QMX/QDX, **truSDX**, **FlexRadio** CAT ports (they speak Kenwood) |
+| **Elecraft** | K3/K3S, K4, KX2, KX3 |
+| **Yaesu** | FT-991/A, FT-891, FT-710, FTDX10, FTDX101D/MP, FT-950, FTDX3000, FTDX1200, FT-2000, FT-450 |
+| **Yaesu (older)** | FT-817, FT-818, FT-857, FT-897 |
+
+**Setting it up**
+
+- **🔍 Detect radios** and **Use** fill in the port and protocol (detection reads the USB descriptions and never opens a port).
+- **Protocol: Automatic** works the protocol out from the USB description; if that doesn't say, Whistlestop asks: a CI-V broadcast for Icom, then `ID;` (which tells Kenwood, Elecraft and Yaesu apart), then the FT-817 frequency read.
+- **Speed: Automatic** tries the usual speeds for the protocol until the radio answers (Icom 19200 first, Yaesu 38400 and 4800, Elecraft 38400, Kenwood 115200). Choosing the radio's actual CAT speed makes connecting faster.
+- **CI-V address**: **Ask the radio** finds it with a broadcast, even if you've changed it from the factory address. Turn it off to type an address in hex.
+- **Full power**: the radio's maximum output, so the power slider is right (Kenwood, Elecraft and Yaesu set power in watts).
+- **or network address**: `host:port` reaches a radio through a serial-over-network bridge (ser2net and similar) or a FlexRadio CAT port.
+- The port is opened with **RTS and DTR held low**, because on many radios those lines key the transmitter.
+
+**Sharing with Mercury.** Only one program can open the serial port, so Whistlestop serves the rigctld protocol on **Share with Mercury on port** (default 4532). Set Mercury to **Hamlib model 2 (NET rigctl)** at `127.0.0.1:4532` and it keys the radio through Whistlestop. Loggers and other programs that speak rigctld can use it too. Turn sharing off only if Mercury keys the radio another way (VOX, or its own PTT port).
+
+**What each protocol controls.** Frequency, mode (including the radio's data mode: Icom DATA, Kenwood DA, Elecraft DATA A, Yaesu DATA-U, FT-817 DIG), PTT and the S-meter work on every radio. The Radio Controls window offers what the radio supports:
+
+| | Icom | Kenwood TS-590/890/990 | Elecraft | Yaesu | TS-480 / QMX / truSDX | FT-817 family |
+|---|---|---|---|---|---|---|
+| Power, AF, RF, squelch | ✓ | ✓ | ✓ | ✓ | ✓ (no mic gain) | — |
+| SWR meter | ✓ | ✓ (approximate) | ✓ | ✓ | — | — |
+| ALC, power meter | ✓ | ALC | — | ✓ | — | — |
+| Preamp, attenuator | ✓ | ✓ | ✓ | ✓ | — | — |
+| NB, NR, VOX | ✓ | ✓ | ✓ | ✓ | — | — |
+| Auto notch, compressor | ✓ | ✓ | — | auto notch | — | — |
+| Antenna tuner on/off and **Tune** | ✓ | ✓ | — | ✓ | — | — |
+| Split, VFO A/B, RIT/XIT | ✓ | ✓ | ✓ | ✓ | — | — |
+
+Meter readings come from each radio's own scale and are converted to S-units and SWR; on some radios (Kenwood SWR especially) the conversion is approximate.
+
+**FT-817 family**: set the radio's DIG mode to USER-U in its menu. The FT-817 can't report PTT over CAT, so Whistlestop remembers what it last sent.
+
 ## Antenna tuner and SWR
 
 ### The SWR watch
@@ -464,7 +507,10 @@ Settings are saved to `~/Library/Application Support/Whistlestop/whistlestop.tom
 | Demo on real Mercury | Demo runs two real Mercury modems when Mercury is installed | on |
 | Mercury engine | Path to the Mercury engine (empty: look in the usual places) | automatic |
 | Mercury host / TNC port / Broadcast port | Where Mercury listens | 127.0.0.1 / 8300 / 8100 |
-| Radio connection | Use a running rigctld / RigHelm, or let Whistlestop run rigctld | running rigctld |
+| Radio connection | Use a running rigctld / RigHelm, let Whistlestop run rigctld, or Direct CAT (built in) | running rigctld |
+| Protocol / Port / Speed / CI-V address | Direct CAT: the radio's control protocol and where it is; Automatic detects | Automatic |
+| Full power | Direct CAT: the radio's maximum output | 100 W |
+| Share with Mercury on port | Direct CAT: serve rigctld here for Mercury and other programs | 4532 (on) |
 | rigctld address | The running server's address | 127.0.0.1:4532 |
 | Model / Port / Speed | For the rigctld Whistlestop runs; Automatic detects at start | Automatic |
 | rigctld port | Where Whistlestop's rigctld listens (point Mercury here) | 4532 |
