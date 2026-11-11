@@ -6,6 +6,7 @@
 //! CQFRAME/PENDING/CONNECTED/DISCONNECTED, BUFFER draining at a set bit
 //! rate, BITRATE and SN reports, PTT lines, and the broadcast plane.
 
+use crate::e2e::{Channel, Notice, Policy};
 use crate::protocol::*;
 use anyhow::Result;
 use std::collections::VecDeque;
@@ -28,11 +29,13 @@ pub struct FakeOptions {
     pub rig_freq: Option<Arc<Mutex<f64>>>,
     pub bot_freq: f64,
     pub answer_cq: bool,
+    /// The bot's encryption setting (Prefer: encrypts if you do).
+    pub bot_e2e: Policy,
 }
 
 impl Default for FakeOptions {
     fn default() -> Self {
-        Self { fast: false, bot_call: "K7BOT".into(), bps: 1400.0, rig_freq: None, bot_freq: 14_103_150.0, answer_cq: true }
+        Self { fast: false, bot_call: "K7BOT".into(), bps: 1400.0, rig_freq: None, bot_freq: 14_103_150.0, answer_cq: true, bot_e2e: Policy::Prefer }
     }
 }
 
@@ -195,6 +198,9 @@ struct Session {
     data_out: Vec<u8>,
     bcast_out: Vec<Vec<u8>>,
     dec: LinkDecoder,
+    /// The bot's end of the link's security layer, and what waits for keys.
+    ch: Option<Channel>,
+    pending: VecDeque<Link>,
     bot_chat_id: u64,
     incoming: Option<(u64, u64, Vec<u8>, [u8; 32])>, // fid, size, data, sha
     bot_offer: Option<Outgoing>,
@@ -221,6 +227,8 @@ impl Session {
             data_out: vec![],
             bcast_out: vec![],
             dec: LinkDecoder::default(),
+            ch: None,
+            pending: VecDeque::new(),
             bot_chat_id: 0,
             incoming: None,
             bot_offer: None,
@@ -300,6 +308,8 @@ impl Session {
                 }
                 self.reply("DISCONNECTED");
                 self.peer = None;
+                self.ch = None;
+                self.pending.clear();
                 self.uplink.clear();
                 self.downlink.clear();
             }
@@ -313,7 +323,26 @@ impl Session {
     }
 
     fn bot_send(&mut self, p: Link) {
-        self.downlink.extend(p.encode());
+        self.pending.push_back(p);
+        self.flush();
+    }
+
+    /// Send what the bot's security layer lets through (all of it once
+    /// the link is plain or keys are agreed).
+    fn flush(&mut self) {
+        let Some(ch) = self.ch.as_mut() else { return };
+        while let Some(p) = self.pending.front() {
+            let Some(w) = ch.wrap(p) else { break };
+            self.downlink.extend(w);
+            self.pending.pop_front();
+        }
+    }
+
+    fn hang_up(&mut self) {
+        self.reply("DISCONNECTED");
+        self.peer = None;
+        self.ch = None;
+        self.pending.clear();
     }
 
     fn connect_bot(&mut self) {
@@ -322,15 +351,22 @@ impl Session {
         }
         let bot = self.o.bot_call.clone();
         self.peer = Some(bot.clone());
+        self.dec = LinkDecoder::default();
+        self.pending.clear();
         let l = format!("CONNECTED {} {} 2300", bot, self.mycall);
         self.reply(&l);
-        self.bot_send(Link::Hello {
+        let hello = Link::Hello {
             version: VERSION,
             caps: CAP_RESUME | CAP_ZIP,
             name: "Demo station".into(),
             grid: "DN31".into(),
             app: "Whistlestop demo".into(),
-        });
+        };
+        let (ch, first) = Channel::open(self.o.bot_e2e, hello, std::time::Instant::now());
+        self.ch = Some(ch);
+        for w in first {
+            self.downlink.extend(w);
+        }
         self.bot_chat_id += 1;
         let hi = format!(
             "Hi {}, K7BOT demo station here. Good signal! Type anything, try sending a file, or ask me for a file.",
@@ -392,10 +428,7 @@ impl Session {
                         }
                     }
             }
-            Link::Bye { .. } => {
-                self.reply("DISCONNECTED");
-                self.peer = None;
-            }
+            Link::Bye { .. } => self.hang_up(),
             _ => {}
         }
     }
@@ -437,6 +470,7 @@ impl Session {
                 Act::Line(s) => {
                     if s == "DISCONNECTED" {
                         self.peer = None;
+                        self.ch = None;
                     }
                     self.reply(&s)
                 }
@@ -468,8 +502,28 @@ impl Session {
                     self.reply("PTT ON");
                 }
                 let bytes: Vec<u8> = self.uplink.drain(..n).collect();
-                match self.dec.feed(&bytes) {
-                    Ok(pkts) => pkts.into_iter().for_each(|p| self.on_link(p)),
+                match self.dec.feed_bodies(&bytes) {
+                    Ok(bodies) => {
+                        for b in bodies {
+                            let Some(ch) = self.ch.as_mut() else { break };
+                            match ch.on_body(&b) {
+                                Ok(step) => {
+                                    for w in step.send {
+                                        self.downlink.extend(w);
+                                    }
+                                    if let Some(Notice::Secure { sas }) = step.notice {
+                                        self.bot_chat_id += 1;
+                                        let t = format!("🔒 Encrypted now. My screen shows the code {sas}; does yours?");
+                                        self.pending.push_back(Link::Chat { id: self.bot_chat_id, text: t });
+                                    }
+                                    step.app.into_iter().for_each(|p| self.on_link(p));
+                                }
+                                // Policy refused, or tampering: hang up, like Whistlestop.
+                                Err(_) => self.hang_up(),
+                            }
+                        }
+                        self.flush();
+                    }
                     Err(_) => self.dec = LinkDecoder::default(),
                 }
             } else if self.ptt {

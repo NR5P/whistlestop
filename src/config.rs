@@ -2,6 +2,7 @@
 //! (macOS: ~/Library/Application Support/Whistlestop/whistlestop.toml).
 
 use crate::bandplan::{Segment, default_segments};
+use crate::e2e::Policy;
 use crate::modes::Bandwidth;
 use crate::sdr::SdrConfig;
 use serde::{Deserialize, Serialize};
@@ -41,6 +42,10 @@ pub struct Config {
     /// Report whistles heard while parked on a frequency.
     pub whistle_watch: bool,
 
+    /// End-to-end encryption of 1:1 links. Off by default: NOT legal on
+    /// amateur bands (47 CFR 97.113(a)(4) in the US, and most countries).
+    pub e2e: Policy,
+
     pub segments: Vec<Segment>,
     pub download_dir: PathBuf,
     pub sdr: SdrConfig,
@@ -69,6 +74,7 @@ impl Default for Config {
             step_hz: 1800.0,
             auto_answer: false,
             whistle_watch: true,
+            e2e: Policy::Off,
             segments: default_segments(),
             download_dir: dirs::download_dir().unwrap_or_else(std::env::temp_dir).join("Whistlestop"),
             sdr: SdrConfig::default(),
@@ -100,5 +106,13 @@ mod tests {
         let c = super::Config::default();
         let s = toml::to_string_pretty(&c).unwrap();
         assert_eq!(toml::from_str::<super::Config>(&s).unwrap(), c);
+    }
+
+    #[test]
+    fn encryption_is_off_by_default() {
+        assert_eq!(super::Config::default().e2e, crate::e2e::Policy::Off);
+        // Old config files without the key load as Off too.
+        let c: super::Config = toml::from_str("callsign = \"N0CALL\"").unwrap();
+        assert_eq!(c.e2e, crate::e2e::Policy::Off);
     }
 }

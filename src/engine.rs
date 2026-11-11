@@ -7,6 +7,7 @@
 use crate::audio::{self, AudioSpectrum, LiveInput, LiveOutput, SharedRx, SimBand, SimSignal};
 use crate::bandplan::{self, SearchScope};
 use crate::config::Config;
+use crate::e2e::{self, Channel, Notice};
 use crate::fake_mercury::{FakeMercury, FakeOptions};
 use crate::modes::{self, Bandwidth, Mode, ThroughputEstimator};
 use crate::protocol::*;
@@ -130,6 +131,21 @@ pub struct LinkInfo {
     pub their_report_db: Option<i8>,
     pub mode: Option<&'static Mode>,
     pub bps: f64,
+    /// End-to-end encryption on this link.
+    pub e2e: E2eView,
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub enum E2eView {
+    /// Encryption is off in Settings.
+    #[default]
+    Off,
+    /// Key exchange in progress; chat and files wait for it.
+    Negotiating,
+    /// Sealed with ChaCha20-Poly1305. Compare `sas` with the other operator.
+    Encrypted { sas: String },
+    /// Prefer was set, but this link is plain text.
+    Plain { why: String },
 }
 
 #[derive(Clone, Debug, Default)]
@@ -323,7 +339,14 @@ struct Station {
     // link
     peer: Option<String>,
     dec: LinkDecoder,
-    hi_queue: VecDeque<Vec<u8>>,
+    /// Security layer for the current link (dropped, keys and all, when it ends).
+    e2e: Option<Channel>,
+    /// Handshake packets: always sent at once, in the clear.
+    ctl_queue: VecDeque<Vec<u8>>,
+    /// Packets that arrived before Mercury's CONNECTED line.
+    early: Vec<Vec<u8>>,
+    /// Application packets, waiting for the modem (and for keys).
+    hi_queue: VecDeque<Link>,
     outgoing: Vec<Outgoing>,
     incoming: HashMap<u64, Incoming>,
     mercury_buffer: usize,
@@ -354,8 +377,6 @@ struct Station {
     /// Roundtable host: the speed to switch to once the announcement is out.
     pending_speed: Option<(&'static Mode, Instant)>,
     last_query: Instant,
-    /// Link data that arrived before Mercury's CONNECTED line.
-    prelink: Vec<u8>,
 }
 
 async fn run(mut cmds: mpsc::UnboundedReceiver<Cmd>, st: SharedState, sdr: sdr::Shared, repaint: Arc<dyn Fn() + Send + Sync>) {
@@ -432,6 +453,9 @@ impl Station {
             sdr_span: Arc::new(Mutex::new(cfg.sdr.span_hz)),
             peer: None,
             dec: LinkDecoder::default(),
+            e2e: None,
+            ctl_queue: VecDeque::new(),
+            early: vec![],
             hi_queue: VecDeque::new(),
             outgoing: vec![],
             incoming: HashMap::new(),
@@ -457,7 +481,6 @@ impl Station {
             last_tune: Instant::now(),
             pending_speed: None,
             last_query: Instant::now(),
-            prelink: vec![],
         };
         {
             let mut g = st.lock().unwrap();
@@ -715,7 +738,7 @@ impl Station {
             }
             Cmd::Disconnect => {
                 if self.peer.is_some() {
-                    self.hi_queue.push_back(Link::Bye { text: "73".into() }.encode());
+                    self.hi_queue.push_back(Link::Bye { text: "73".into() });
                     self.pump().await?;
                 }
                 self.tnc()?.command("DISCONNECT").await?;
@@ -727,7 +750,7 @@ impl Station {
                 }
                 let id = self.next_chat_id;
                 self.next_chat_id += 1;
-                self.hi_queue.push_back(Link::Chat { id, text: text.clone() }.encode());
+                self.hi_queue.push_back(Link::Chat { id, text: text.clone() });
                 let me = self.mycall();
                 self.set(|g| {
                     g.chat.push(ChatLine { at: Clock::now(), who: Who::Me, from: me, text, id, delivered: false })
@@ -741,7 +764,7 @@ impl Station {
                 if let Some(i) = self.incoming.remove(&fid) {
                     i.save_partial();
                 }
-                self.hi_queue.push_back(Link::Cancel { fid }.encode());
+                self.hi_queue.push_back(Link::Cancel { fid });
                 self.xfer(fid, |t| t.state = XferState::Failed("cancelled".into()));
                 self.pump().await?;
             }
@@ -1087,16 +1110,14 @@ impl Station {
         match e {
             TncEvent::Line(l) => self.on_line(l).await?,
             TncEvent::Data(d) => {
-                // Mercury reports CONNECTED on the control port and delivers
-                // data on the data port: the first bytes can win the race.
-                // Hold them until the link is confirmed.
+                let bodies = self.dec.feed_bodies(&d)?;
                 if self.peer.is_none() {
-                    self.prelink.extend_from_slice(&d);
-                    self.prelink.truncate(1 << 20);
-                    return Ok(());
-                }
-                for p in self.dec.feed(&d)? {
-                    self.on_link(p).await?;
+                    // Mercury's data port can beat the CONNECTED line on the
+                    // control port: keep these for when it arrives.
+                    self.early.extend(bodies);
+                    self.early.truncate(64);
+                } else {
+                    self.on_bodies(bodies).await?;
                 }
             }
             TncEvent::Broadcast(f) => self.on_table_frame(&f).await?,
@@ -1108,6 +1129,30 @@ impl Station {
             }
         }
         Ok(())
+    }
+
+    /// Link packets from the peer, through the security layer.
+    async fn on_bodies(&mut self, bodies: Vec<Vec<u8>>) -> anyhow::Result<()> {
+        for body in bodies {
+            // None: the link is being dropped; ignore the rest.
+            let Some(ch) = self.e2e.as_mut() else { break };
+            match ch.on_body(&body) {
+                Ok(step) => {
+                    self.ctl_queue.extend(step.send);
+                    if let Some(n) = step.notice {
+                        self.on_e2e_notice(n);
+                    }
+                    for p in step.app {
+                        self.on_link(p).await?;
+                    }
+                }
+                Err(e) => {
+                    self.e2e_drop(e.to_string()).await?;
+                    break;
+                }
+            }
+        }
+        self.pump().await
     }
 
     async fn on_line(&mut self, l: String) -> anyhow::Result<()> {
@@ -1124,8 +1169,6 @@ impl Station {
                     self.set(|g| g.cq = CqView::default());
                 }
                 self.peer = Some(peer.clone());
-                self.dec = LinkDecoder::default();
-                let early = std::mem::take(&mut self.prelink);
                 self.est = ThroughputEstimator::default();
                 self.mercury_buffer = 0;
                 self.set(|g| {
@@ -1142,28 +1185,42 @@ impl Station {
                     });
                 });
                 self.log(format!("Linked with {peer}, {bw} Hz"));
-                self.hi_queue.push_back(
-                    Link::Hello {
-                        version: VERSION,
-                        caps: CAP_RESUME | CAP_ZIP,
-                        name: self.cfg.name.clone(),
-                        grid: self.cfg.grid.clone(),
-                        app: format!("Whistlestop {}", env!("CARGO_PKG_VERSION")),
-                    }
-                    .encode(),
-                );
+                let hello = Link::Hello {
+                    version: VERSION,
+                    caps: CAP_RESUME | CAP_ZIP,
+                    name: self.cfg.name.clone(),
+                    grid: self.cfg.grid.clone(),
+                    app: format!("Whistlestop {}", env!("CARGO_PKG_VERSION")),
+                };
+                let policy = self.cfg.e2e;
+                let (ch, first) = Channel::open(policy, hello, Instant::now());
+                self.e2e = Some(ch);
+                self.ctl_queue = first.into();
+                self.hi_queue.clear();
+                if policy != e2e::Policy::Off {
+                    self.set(|g| {
+                        if let Some(l) = g.link.as_mut() {
+                            l.e2e = E2eView::Negotiating;
+                        }
+                    });
+                    let m = format!("Setting up encryption ({}); chat and files wait for it", policy.label());
+                    self.log(m.clone());
+                    self.system_line(m);
+                }
                 // Re-offer files queued before the link came up.
                 for o in self.outgoing.iter() {
-                    self.hi_queue.push_back(o.offer().encode());
+                    self.hi_queue.push_back(o.offer());
                 }
                 self.pump().await?;
-                if !early.is_empty() {
-                    for p in self.dec.feed(&early)? {
-                        self.on_link(p).await?;
-                    }
-                }
+                let early = std::mem::take(&mut self.early);
+                self.on_bodies(early).await?;
             }
             "DISCONNECTED" => {
+                // Forget the session keys (they wipe themselves on drop).
+                self.e2e = None;
+                self.ctl_queue.clear();
+                self.early.clear();
+                self.dec = LinkDecoder::default();
                 if let Some(p) = self.peer.take() {
                     self.log(format!("Link with {p} ended"));
                     self.set(|g| {
@@ -1185,8 +1242,6 @@ impl Station {
                     o.next = None; // re-offer (with resume) on the next link
                 }
                 self.hi_queue.clear();
-                self.prelink.clear();
-                self.dec = LinkDecoder::default();
                 self.set(|g| {
                     g.link = None;
                     g.tx = false;
@@ -1259,6 +1314,47 @@ impl Station {
         Ok(())
     }
 
+    fn system_line(&self, text: String) {
+        self.set(|g| {
+            g.chat.push(ChatLine { at: Clock::now(), who: Who::System, from: String::new(), text, id: 0, delivered: true })
+        });
+    }
+
+    fn on_e2e_notice(&mut self, n: Notice) {
+        let peer = self.peer.clone().unwrap_or_default();
+        let (view, line) = match n {
+            Notice::Secure { sas } => (
+                E2eView::Encrypted { sas: sas.clone() },
+                format!(
+                    "🔒 Encrypted with {peer} (X25519 + ChaCha20-Poly1305, keys for this link only). \
+                     Code {sas}: read it to {peer} by voice or another channel. If theirs matches, \
+                     no one is in the middle."
+                ),
+            ),
+            Notice::Plain { why } => (E2eView::Plain { why: why.clone() }, format!("🔓 Not encrypted: {why}")),
+        };
+        self.log(line.clone());
+        self.system_line(line);
+        self.set(|g| {
+            if let Some(l) = g.link.as_mut() {
+                l.e2e = view;
+            }
+        });
+    }
+
+    /// The link can't be (or may no longer be) trusted: say why and hang up.
+    /// Nothing more goes out except a plain BYE carrying the reason.
+    async fn e2e_drop(&mut self, why: String) -> anyhow::Result<()> {
+        self.e2e = None;
+        self.hi_queue.clear();
+        self.log(format!("⚠ Encryption: {why}. Disconnecting."));
+        self.system_line(format!("⚠ Encryption: {why}. Disconnecting."));
+        self.ctl_queue.push_back(Link::Bye { text: "encryption problem, disconnecting".into() }.encode());
+        self.pump().await?;
+        self.tnc()?.command("DISCONNECT").await?;
+        Ok(())
+    }
+
     fn add_heard(&self, call: &str, what: String, table: Option<String>) {
         let dial = self.dial();
         self.set(|g| {
@@ -1281,7 +1377,7 @@ impl Station {
                 });
             }
             Link::Chat { id, text } => {
-                self.hi_queue.push_back(Link::Received { id }.encode());
+                self.hi_queue.push_back(Link::Received { id });
                 self.set(|g| {
                     g.chat.push(ChatLine { at: Clock::now(), who: Who::Them, from: peer, text, id, delivered: true })
                 });
@@ -1363,12 +1459,12 @@ impl Station {
                     let name = inc.name.clone();
                     match inc.finish(&self.cfg.download_dir) {
                         Ok(path) => {
-                            self.hi_queue.push_back(Link::Done { fid, ok: true }.encode());
+                            self.hi_queue.push_back(Link::Done { fid, ok: true });
                             self.log(format!("✓ Received {name} → {}", path.display()));
                             self.xfer(fid, |t| t.state = XferState::Done(Some(path)));
                         }
                         Err(e) => {
-                            self.hi_queue.push_back(Link::Done { fid, ok: false }.encode());
+                            self.hi_queue.push_back(Link::Done { fid, ok: false });
                             self.xfer(fid, |t| t.state = XferState::Failed(e.to_string()));
                         }
                     }
@@ -1402,7 +1498,8 @@ impl Station {
                     g.chat.push(ChatLine { at: Clock::now(), who: Who::Them, from: peer, text, id: 0, delivered: true })
                 });
             }
-            Link::Unknown(_) => {}
+            // Handled by the e2e channel before we get here.
+            Link::KeyCommit { .. } | Link::KeyX { .. } | Link::Sealed { .. } | Link::Unknown(_) => {}
         }
         Ok(())
     }
@@ -1442,7 +1539,7 @@ impl Station {
         let size = out.data.len() as u64;
         let eta = self.est.eta_s(file_wire_size(&name, size), self.bw);
         if self.peer.is_some() {
-            self.hi_queue.push_back(out.offer().encode());
+            self.hi_queue.push_back(out.offer());
         }
         self.outgoing.push(out);
         self.set(|g| {
@@ -1474,7 +1571,7 @@ impl Station {
         if !accept {
             self.incoming.remove(&fid);
         }
-        self.hi_queue.push_back(Link::Answer { fid, accept, resume_from: have }.encode());
+        self.hi_queue.push_back(Link::Answer { fid, accept, resume_from: have });
         self.xfer(fid, |t| {
             t.state = if accept { XferState::Receiving } else { XferState::Declined };
             t.started = Some(Instant::now());
@@ -1489,9 +1586,19 @@ impl Station {
         if self.peer.is_none() || self.tnc.is_none() {
             return Ok(());
         }
-        while let Some(p) = self.hi_queue.pop_front() {
+        while let Some(p) = self.ctl_queue.pop_front() {
             self.mercury_buffer += p.len();
             self.tnc()?.send_data(&p).await?;
+        }
+        // Chat and files wait until the link is plain or keys are agreed.
+        while let Some(p) = self.hi_queue.front() {
+            let Some(bytes) = self.e2e.as_mut().and_then(|c| c.wrap(p)) else { return Ok(()) };
+            self.hi_queue.pop_front();
+            self.mercury_buffer += bytes.len();
+            self.tnc()?.send_data(&bytes).await?;
+        }
+        if !self.e2e.as_ref().is_some_and(|c| c.ready()) {
+            return Ok(());
         }
         while self.mercury_buffer < 2 * CHUNK {
             let Some(o) = self.outgoing.iter_mut().find(|o| o.next.is_some() && !o.finished_sending()) else { break };
@@ -1499,7 +1606,7 @@ impl Station {
             let Some(chunk) = o.next_chunk() else { break };
             let sent = o.next.unwrap_or(0);
             let total = o.data.len();
-            let bytes = chunk.encode();
+            let Some(bytes) = self.e2e.as_mut().and_then(|c| c.wrap(&chunk)) else { break };
             self.mercury_buffer += bytes.len();
             self.tnc()?.send_data(&bytes).await?;
             let eta = self.est.eta_s(total - sent as usize + self.mercury_buffer, self.bw);
@@ -1741,6 +1848,17 @@ impl Station {
         self.step_cq().await?;
         self.step_table_tx().await?;
 
+        if let Some(ch) = self.e2e.as_mut() {
+            match ch.tick(Instant::now()) {
+                Ok(Some(n)) => {
+                    self.on_e2e_notice(n);
+                    self.pump().await?;
+                }
+                Ok(None) => {}
+                Err(e) => self.e2e_drop(e.to_string()).await?,
+            }
+        }
+
         if self.peer.is_some() {
             let bps = self.est.bps(self.bw);
             let mode = self.est.reported_mode;
@@ -1767,7 +1885,7 @@ impl Station {
                 }
                 let snr = self.est.snr_db.unwrap_or(0.0).round().clamp(-60.0, 60.0) as i8;
                 let mi = self.est.reported_mode.map(|m| m.index).unwrap_or(1);
-                self.hi_queue.push_back(Link::Report { snr_db: snr, mode_index: mi }.encode());
+                self.hi_queue.push_back(Link::Report { snr_db: snr, mode_index: mi });
                 self.pump().await?;
             }
         } else {
@@ -2000,6 +2118,58 @@ mod tests {
         std::fs::write(dir.join("log.txt"), "QSO log line\n".repeat(400)).unwrap();
         h.send(Cmd::SendFiles { paths: vec![dir.clone()], zip: true });
         wait("file delivered", 60, &|s| s.transfers.iter().any(|t| t.dir == Dir::Out && t.state == XferState::Done(None)));
+        h.send(Cmd::Stop);
+        std::fs::remove_dir_all(&cfg.download_dir).ok();
+    }
+
+    /// Demo with encryption required: link to K7BOT, see the 🔒 and the
+    /// code, chat and send a file sealed; after hanging up and calling
+    /// again, the new link has new keys (a different code).
+    #[test]
+    fn demo_encrypted_chat_and_file() {
+        let h = spawn(|| {});
+        let mut cfg = Config { demo: true, callsign: "N0SEC".into(), e2e: e2e::Policy::Require, ..Default::default() };
+        cfg.download_dir = std::env::temp_dir().join(format!("ws-e2e-{}", std::process::id()));
+        cfg.sdr.enabled = false;
+        cfg.whistle_watch = false;
+        h.send(Cmd::Start(cfg.clone()));
+        let wait = |what: &str, secs: u64, f: &dyn Fn(&State) -> bool| {
+            let t = Instant::now();
+            while t.elapsed() < Duration::from_secs(secs) {
+                if f(&h.state.lock().unwrap()) {
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            let g = h.state.lock().unwrap();
+            let log: Vec<_> = g.log.iter().map(|l| l.1.clone()).collect();
+            panic!("timed out waiting for {what}; log:\n{}", log.join("\n"));
+        };
+        let sas = |s: &State| match s.link.as_ref().map(|l| &l.e2e) {
+            Some(E2eView::Encrypted { sas }) => Some(sas.clone()),
+            _ => None,
+        };
+        wait("Mercury", 10, &|s| s.mercury_ok);
+        h.send(Cmd::Connect("K7BOT".into()));
+        wait("encrypted link with K7BOT", 40, &|s| sas(s).is_some());
+        let first = sas(&h.state.lock().unwrap()).unwrap();
+        // The bot reads its code back: same as ours, so no one in the middle.
+        wait("bot's code", 30, &|s| s.chat.iter().any(|c| c.who == Who::Them && c.text.contains(&first)));
+        assert!(h.state.lock().unwrap().chat.iter().any(|c| c.who == Who::System && c.text.contains("🔒")));
+        h.send(Cmd::Chat("hello sealed".into()));
+        wait("bot reply", 30, &|s| s.chat.iter().any(|c| c.who == Who::Them && c.text.contains("hello sealed")));
+        let dir = cfg.download_dir.join("src");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("log.txt"), "QSO log line\n".repeat(400)).unwrap();
+        h.send(Cmd::SendFiles { paths: vec![dir.clone()], zip: true });
+        wait("file delivered", 60, &|s| s.transfers.iter().any(|t| t.dir == Dir::Out && t.state == XferState::Done(None)));
+
+        h.send(Cmd::Disconnect);
+        wait("link down", 30, &|s| s.link.is_none());
+        h.send(Cmd::Connect("K7BOT".into()));
+        wait("second encrypted link", 40, &|s| sas(s).is_some());
+        let second = sas(&h.state.lock().unwrap()).unwrap();
+        assert_ne!(first, second, "a new link must have new keys");
         h.send(Cmd::Stop);
         std::fs::remove_dir_all(&cfg.download_dir).ok();
     }

@@ -8,6 +8,9 @@ use std::path::{Path, PathBuf};
 pub const VERSION: u8 = 1;
 pub const CAP_RESUME: u8 = 1;
 pub const CAP_ZIP: u8 = 2;
+/// Set in HELLO when this station's encryption setting is Prefer or Require
+/// (not merely when it could encrypt). See `crate::e2e`.
+pub const CAP_E2E: u8 = 4;
 pub const CHUNK: usize = 1024;
 pub const TABLE_MAGIC: u8 = 0x57;
 const MAX_PACKET: usize = 1 << 20;
@@ -99,6 +102,12 @@ impl<'a> Reader<'a> {
     pub fn hash(&mut self) -> Result<[u8; 32]> {
         Ok(self.take(32)?.try_into()?)
     }
+    /// Everything left in the packet.
+    pub fn rest(&mut self) -> &'a [u8] {
+        let s = &self.b[self.pos..];
+        self.pos = self.b.len();
+        s
+    }
 }
 
 fn read_varint_prefix(b: &[u8]) -> Option<(usize, usize)> {
@@ -114,6 +123,11 @@ fn read_varint_prefix(b: &[u8]) -> Option<(usize, usize)> {
 
 // -------------------------------------------------------------- link plane
 
+pub const T_HELLO: u8 = 0x01;
+pub const T_KEYC: u8 = 0x0B;
+pub const T_KEYX: u8 = 0x0C;
+pub const T_SEALED: u8 = 0x0D;
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum Link {
     Hello { version: u8, caps: u8, name: String, grid: String, app: String },
@@ -127,6 +141,13 @@ pub enum Link {
     Cancel { fid: u64 },
     Report { snr_db: i8, mode_index: u8 },
     Bye { text: String },
+    /// E2E handshake, step 1: a commitment to the ephemeral public key.
+    KeyCommit { suite: u8, commit: [u8; 32] },
+    /// E2E handshake, step 2: the public key itself (sent only after the
+    /// peer's commitment has arrived).
+    KeyX { suite: u8, pubkey: [u8; 32] },
+    /// One encrypted inner link packet body (ciphertext + 16-byte tag).
+    Sealed { data: Vec<u8> },
     Unknown(u8),
 }
 
@@ -165,6 +186,15 @@ impl Link {
             Link::Bye { text } => {
                 w.u8(0x0A).str(text);
             }
+            Link::KeyCommit { suite, commit } => {
+                w.u8(T_KEYC).u8(*suite).raw(commit);
+            }
+            Link::KeyX { suite, pubkey } => {
+                w.u8(T_KEYX).u8(*suite).raw(pubkey);
+            }
+            Link::Sealed { data } => {
+                w.u8(T_SEALED).raw(data);
+            }
             Link::Unknown(t) => {
                 w.u8(*t);
             }
@@ -200,6 +230,9 @@ impl Link {
             0x08 => Link::Cancel { fid: r.uv()? },
             0x09 => Link::Report { snr_db: r.i8()?, mode_index: r.u8()? },
             0x0A => Link::Bye { text: r.str()? },
+            T_KEYC => Link::KeyCommit { suite: r.u8()?, commit: r.hash()? },
+            T_KEYX => Link::KeyX { suite: r.u8()?, pubkey: r.hash()? },
+            T_SEALED => Link::Sealed { data: r.rest().to_vec() },
             t => Link::Unknown(t),
         })
     }
@@ -213,6 +246,12 @@ pub struct LinkDecoder {
 
 impl LinkDecoder {
     pub fn feed(&mut self, data: &[u8]) -> Result<Vec<Link>> {
+        self.feed_bodies(data)?.iter().map(|b| Link::decode(b)).collect()
+    }
+
+    /// Like `feed`, but hands back the raw packet bodies (the E2E handshake
+    /// hashes the HELLOs exactly as they were sent).
+    pub fn feed_bodies(&mut self, data: &[u8]) -> Result<Vec<Vec<u8>>> {
         self.buf.extend_from_slice(data);
         let mut out = vec![];
         while let Some((n, hdr)) = read_varint_prefix(&self.buf) {
@@ -222,7 +261,7 @@ impl LinkDecoder {
             if self.buf.len() < hdr + n {
                 break;
             }
-            out.push(Link::decode(&self.buf[hdr..hdr + n])?);
+            out.push(self.buf[hdr..hdr + n].to_vec());
             self.buf.drain(..hdr + n);
         }
         Ok(out)
@@ -490,10 +529,13 @@ pub fn table_text_frames(table: u16, from: &str, id: u64, text: &str, frame_byte
         .collect())
 }
 
+/// (total parts, parts received by number), per (sender, message id).
+type Partial = (u8, HashMap<u8, Vec<u8>>);
+
 /// Reassembles TEXT parts and reports what is missing (for AGAIN).
 #[derive(Default)]
 pub struct TableAssembler {
-    parts: HashMap<(String, u64), (u8, HashMap<u8, Vec<u8>>)>,
+    parts: HashMap<(String, u64), Partial>,
 }
 
 impl TableAssembler {
@@ -620,6 +662,9 @@ mod tests {
             Link::Done { fid: 9, ok: true },
             Link::Report { snr_db: -7, mode_index: 1 },
             Link::Bye { text: "73".into() },
+            Link::KeyCommit { suite: 1, commit: [3; 32] },
+            Link::KeyX { suite: 1, pubkey: [4; 32] },
+            Link::Sealed { data: vec![9; 40] },
         ];
         let wire: Vec<u8> = pkts.iter().flat_map(|p| p.encode()).collect();
         let mut d = LinkDecoder::default();
