@@ -573,10 +573,9 @@ private fun SettingsScreen(station: Station, s: EngineState) {
                 "Port", Modifier.fillMaxWidth(), caps = false, number = true)
         }
         BrassButton(if (saved) "Saved" else "Save") {
-            val demoChanged = ((cfg["demo"] as? JsonPrimitive)?.content == "true") != s.demo
-            val radioChanged = station.radioChanged()
+            // The engine restarts the station itself when a connection
+            // setting (demo, modem, radio, callsign) changed.
             if (station.saveConfig()) {
-                if (demoChanged || radioChanged) station.restart()
                 saved = true
             }
         }

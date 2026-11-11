@@ -234,10 +234,12 @@ fn click_help_guide_settings_radio() {
     let c = &h.state().cfg;
     assert!(!c.beacon && !c.notify_mail && !c.auto_deliver && !c.auto_collect && !c.relay, "automation is off by default");
     assert!(c.auto_in_segments_only);
+    // The window edits a draft; the settings change only on Save & connect.
     click(&mut h, "Carry mail for other stations");
-    assert!(h.state().cfg.relay, "checkbox toggles the setting");
+    assert!(h.state().settings_draft.as_ref().unwrap().relay, "checkbox toggles the setting");
+    assert!(!h.state().cfg.relay, "not applied before Save");
     click(&mut h, "Direct CAT");
-    assert_eq!(h.state().cfg.rig_mode, whistlestop::rigsetup::RigMode::Direct);
+    assert_eq!(h.state().settings_draft.as_ref().unwrap().rig_mode, whistlestop::rigsetup::RigMode::Direct);
     assert!(has_text(&h, "Share with Mercury on port"));
     assert!(has_button(&h, "Ask the radio"));
     // New cards: QSY requests, File library, Schedule, all off by default.
@@ -247,10 +249,14 @@ fn click_help_guide_settings_radio() {
     let c = &h.state().cfg;
     assert!(!c.accept_qsy && !c.share_library && !c.schedule_on, "new automation is off by default");
     click(&mut h, "Add a time slot");
-    assert_eq!(h.state().cfg.schedule.len(), 1);
-    // Radio controls window (demo radio has every control).
+    assert_eq!(h.state().settings_draft.as_ref().unwrap().schedule.len(), 1);
+    // Closing without saving throws the edits away.
     h.state_mut().settings_open = false;
     frames(&mut h, 2);
+    assert!(h.state().settings_draft.is_none());
+    assert!(!h.state().cfg.relay && h.state().cfg.schedule.is_empty(), "closed without saving: nothing applied");
+    assert_ne!(h.state().cfg.rig_mode, whistlestop::rigsetup::RigMode::Direct);
+    // Radio controls window (demo radio has every control).
     click(&mut h, "Radio controls");
     assert!(h.state().rigwin.open);
     frames(&mut h, 5);
@@ -390,4 +396,19 @@ fn click_remote_connect_and_back() {
     click(&mut h, "Disconnect (back to this computer)");
     wait(&mut h, 15.0, "back to the local station", |a, s| a.client.is_none() && s.mycall == "N0DEN");
     radio.send(Cmd::Stop);
+}
+
+#[test]
+fn typed_frequencies_in_mhz_khz_or_hz() {
+    use super::parse_freq;
+    assert_eq!(parse_freq("14103.15"), Some(14_103_150.0)); // kHz
+    assert_eq!(parse_freq("14.10315"), Some(14_103_150.0)); // MHz
+    assert_eq!(parse_freq("14.1"), Some(14_100_000.0)); // not 14.1 kHz
+    assert_eq!(parse_freq("7,1"), Some(7_100_000.0)); // decimal comma
+    assert_eq!(parse_freq(" 3585 "), Some(3_585_000.0));
+    assert_eq!(parse_freq("14103150"), Some(14_103_150.0)); // Hz
+    assert_eq!(parse_freq("50.313"), Some(50_313_000.0)); // 6 m
+    assert_eq!(parse_freq("abc"), None);
+    assert_eq!(parse_freq("-14100"), None);
+    assert_eq!(parse_freq(""), None);
 }

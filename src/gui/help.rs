@@ -137,7 +137,7 @@ pub const CQ_WHISTLE: Topic = (
 );
 pub const CQ_CALL: Topic = (
     "Call CQ",
-    "Starts the cycle: key up and whistle, then Mercury's CQFRAME with your callsign, a CALL packet, then listen for answers. Repeats (5 cycles by default) until someone answers or you press Stop.",
+    "Starts the cycle: key up and whistle, then Mercury's CQFRAME with your callsign, a CALL packet, then listen for answers. Repeats (5 cycles by default) until someone answers or you press Stop. When a station calls in, the CQ goes on hold so nothing is sent over Mercury's answer.",
     "Calling CQ",
 );
 pub const CQ_STOP: Topic = ("Stop CQ", "Stops calling at once, mid-whistle if necessary, and unkeys.", "Calling CQ");
@@ -177,7 +177,7 @@ pub const H_TUNE_TO: Topic = (
 );
 pub const H_ANSWER: Topic = ("Answer", "Connect to this station: Mercury places the call, and the Chat tab opens when the link is up.", "Chat");
 pub const H_JOIN: Topic =
-    ("Join", "Join this Roundtable on the current frequency. The host hears your report and may adjust the table's speed.", "Roundtables");
+    ("Join", "Join this Roundtable on the current frequency. The host hears your report and may adjust the table's speed. Not offered during a 1:1 link (joining would cut it).", "Roundtables");
 pub const H_LOCK: Topic = ("Lock on", "Tune the radio to this SDR hit and fine-lock using the radio's own audio, then wait for the CQ.", "Finding stations");
 
 pub const BW_BUTTONS: Topic = (
@@ -186,9 +186,9 @@ pub const BW_BUTTONS: Topic = (
     "Bandwidth and speed",
 );
 
-pub const R_BANDS: Topic = ("Band buttons", "Jump to that band's digital segment, where whistles and Whistlestop stations are searched for.", "Band plan");
-pub const R_NUDGE: Topic = ("Nudge", "Move the dial down or up by 1 kHz or 100 Hz.", "Rig controls");
-pub const R_FREQ: Topic = ("Frequency entry", "Type a frequency in kHz (14103.15) or Hz and press Enter or Tune.", "Rig controls");
+pub const R_BANDS: Topic = ("Band buttons", "Jump to that band's digital segment, where whistles and Whistlestop stations are searched for. Locked during a link: moving the dial would break it.", "Band plan");
+pub const R_NUDGE: Topic = ("Nudge", "Move the dial down or up by 1 kHz or 100 Hz. Locked during a link.", "Rig controls");
+pub const R_FREQ: Topic = ("Frequency entry", "Type a frequency in kHz (14103.15), MHz (14.10315) or Hz (14103150) and press Enter or Tune. Locked during a link: use QSY to move one.", "Rig controls");
 pub const R_MODE: Topic =
     ("Radio mode", "PKTUSB (data USB) or USB for Whistlestop. LSB is there for completeness: Whistlestop's signals are upper sideband.", "Rig controls");
 pub const R_POWER: Topic = (
@@ -229,7 +229,7 @@ pub const F_ACCEPT: Topic = ("Accept", "Receive this file. If part of it arrived
 pub const F_DECLINE: Topic = ("Decline", "Refuse this file; the sender is told.", "Files");
 pub const F_CANCEL: Topic = ("Cancel", "Stop this transfer on both sides. A partly received file is kept so it can resume later.", "Files");
 
-pub const T_JOIN: Topic = ("Join here", "Join the named Roundtable on the frequency you're on (the host's frequency).", "Roundtables");
+pub const T_JOIN: Topic = ("Join here", "Join the named Roundtable on the frequency you're on (the host's frequency). Off during a 1:1 link: disconnect first.", "Roundtables");
 pub const T_LEAVE: Topic = ("Leave", "Say goodbye to the table and stop listening to it.", "Roundtables");
 pub const T_MEMBER: Topic = (
     "Pass the floor",

@@ -160,7 +160,7 @@ The **Call CQ** card:
   4. It listens for answers (default **20 s**), then repeats, up to **5 cycles**.
 - **Stop CQ** ends it at any point.
 
-When someone answers, Mercury reports the connection, the CQ stops by itself, and the Chat tab shows "Linked with …".
+When someone answers, Mercury reports the incoming call and the CQ goes on hold at once ("Incoming call: CQ on hold" in the Log): a whistle in progress stops and nothing more is sent, because a whistle or CQFRAME on top of Mercury's answer would make it drop the call. When the link comes up the CQ stops for good and the Chat tab shows "Linked with …". If the call doesn't complete (Mercury gives up after about 45 s), the CQ carries on with its next cycle; the hold lasts at most 60 s.
 
 > Courtesy: listen first. The whistle is a calling signal, not a beacon. Keep it as short as the searchers need, and don't call on a busy frequency.
 
@@ -190,7 +190,7 @@ On a simulated busy band with fading, a half-second listen catches 82–84 % of 
 
 ### Whistle watch (parked)
 
-Even when you're not searching, Whistlestop listens for whistles on the frequency you're on. If one is heard nearby, a banner under **Heard** says "Whistle +640 Hz from here" with **Tune to it**. The watch pauses while you're transmitting and during a link, and ignores audio from before your last retune. Turn it off in **Settings → Search & CQ**.
+Even when you're not searching, Whistlestop listens for whistles on the frequency you're on. If one is heard nearby, a banner under **Heard** says "Whistle +640 Hz from here" with **Tune to it**. A whistle is reported only when two checks in a row (about a second apart) agree on the offset within 15 Hz, so a single data burst isn't mistaken for one. The watch pauses while you're transmitting, while a call is being made or answered, during a link, for 8 s after a call starts or a link comes up, and for 30 s after a link ends, because Mercury's connect and disconnect bursts can look like a whistle. It also ignores audio from before your last retune. Turn it off in **Settings → Search & CQ**.
 
 ### Wide search (RTL-SDR)
 
@@ -217,7 +217,7 @@ Chat is a 1:1 conversation over Mercury's ARQ, which retransmits until everythin
 - **Time estimate**: under the input, "N bytes on air · ≈ T at R bps" tells you how long a message will take at the current link speed.
 - **Chat never waits behind a file.** Files go in 1 KB pieces and at most two pieces wait inside Mercury, so a line you type during a big transfer goes out within a couple of pieces.
 
-**Disconnect (73)** sends a short goodbye, then Mercury delivers anything still queued before hanging up.
+**Disconnect (73)** sends a short goodbye, then Mercury delivers anything still queued before hanging up. When the other station says 73, Whistlestop waits up to 30 s for its disconnect; if that never arrives (say, it was lost after a QSY), Whistlestop ends the link at once without a goodbye exchange, so Mercury doesn't keep calling a station that has gone.
 
 ## Files
 
@@ -228,7 +228,8 @@ The **Files** tab sends and receives files over a 1:1 link.
 - **+ Files…** picks one or more files; **+ Folder…** picks a folder; or **drop** files and folders anywhere on the window.
 - **Zip before sending** (on by default) packs everything into one zip with maximum compression. Folders are always zipped. Text and logs often shrink to a few percent; photos and already-compressed files don't shrink.
 - Each transfer is **offered** first: the other station sees the name, size, zip contents and predicted time, and presses **Accept** or **Decline**.
-- Progress shows bytes done, the measured speed, and the time left. **Cancel** stops a transfer on either side.
+- Progress shows bytes done, the measured speed, and the time left. **Cancel** stops a transfer on either side. (Each station numbers its own files from a random starting point, so a cancel from either end always names the right one.)
+- If the link ends while an offer is still waiting for an answer, it shows **link ended before you answered**. The sender offers it again on the next link (with resume).
 
 ### Receiving
 
@@ -249,8 +250,9 @@ A Roundtable is a group conversation on one frequency. There is no special broad
 
 ### Hosting and joining
 
-- **Host**: Call CQ → **Roundtable**, name the table, **Call CQ**. Your whistle and CQ invite others; Whistlestop sends a CALL packet with the table's name.
-- **Join**: when a Roundtable CALL is heard, it appears under **Heard** with **Join**. Or type the name in the Roundtable tab and press **Join here** (you must be on the host's frequency).
+- **Host**: Call CQ → **Roundtable**, name the table, **Call CQ**. Your whistle and CQ invite others; Whistlestop sends a CALL packet with the table's name. The CQ keeps cycling to invite more stations, but never on top of the table: table messages wait while your whistle is on the air, and the next whistle waits until table traffic has gone out. Once the table speeds up beyond DATAC3 the CQ ends by itself (the Log says so), because stations still listening for calls at DATAC3 couldn't copy its CALL packets.
+- **Join**: when a Roundtable CALL is heard, it appears under **Heard** with **Join**. Or type the name in the Roundtable tab and press **Join here** (you must be on the host's frequency). Both are off during a 1:1 link: a Roundtable switches Mercury to broadcast modes, which would cut the link. Disconnect first.
+- After you **Leave**, Mercury goes back to listening in DATAC3, the calling mode, once your goodbye has gone out (a table that sped up would otherwise leave you deaf to calls).
 - **Leave** says goodbye to the table.
 
 ### Talking
@@ -288,7 +290,7 @@ The Depot is saved in `depot.json` beside the settings, so mail survives restart
 
 - Stations that connect get your **away message** (Settings → Automation), with your callsign in front.
 - Anything they type in chat is saved to your **Arrivals**, so they can leave you a message just by connecting and typing.
-- A link with nothing happening for the **Hang up quiet links after** time (default 180 s) is ended with a polite 73, so the next station can get through.
+- A link with nothing happening for the **Hang up quiet links after** time (default 180 s) is ended with a polite 73, so the next station can get through. Real traffic counts as activity, file pieces included, so a long transfer is never cut off (the signal reports both stations send every 30 s don't count).
 - Automatic delivery and collection (if you turned them on) are allowed. They never happen while you're **Here**.
 
 Away is a convenience, not a licence to leave a station running unattended where your rules don't allow it (see "Legal and good practice").
@@ -307,7 +309,7 @@ Whistlestop notices stations it holds mail for whenever it hears them: a CQ, a S
 |---|---|---|
 | **Tell stations I hear that I have mail for them** | Sends a short NOTICE frame: "N messages waiting here, connect to me" | Any time the band is quiet, at most once per station every 15 minutes |
 | **While away: connect and deliver** | Connects to the station, hands over the mail, waits for the confirmations and hangs up | Only while Away, the band is quiet and you're not calling or searching; once per station every 15 minutes |
-| **While away: connect and collect** | Connects to a station that says it holds mail for you; it hands the mail over, and the link ends after 20 s of quiet | Same conditions |
+| **While away: connect and collect** | Connects to a station that says it holds mail for you; it hands the mail over, and the link ends 10 s after the mail has come, or after 60 s of quiet if none does (mail can take 20–30 s to cross on HF) | Same conditions |
 
 Every automatic transmission is written to the Log (🤖 and 📣 lines), so you can see what your station did while you were gone.
 
@@ -325,6 +327,7 @@ Once linked, either station can ask to **move the link** to another frequency, t
 - If it agrees, both stations retune a moment later. The answer has crossed by then, and Mercury's ARQ resends anything lost in the gap. The link carries on at the new frequency.
 - The link card shows "on … with …, back to … when the link ends". When the link ends, for any reason, **both stations go back** to where they were.
 - If it refuses, you see why ("I only QSY within 20m", "outside my digital segments"…).
+- Whatever the rules, the **whole signal** must fit inside an amateur band: USB puts it 300–2700 Hz above the dial, so a dial within 2.7 kHz of a band's top edge is refused. While you're **Away** with **Automatic only in the automatic-control segments** on, a QSY must also stay inside those segments.
 
 **Your rules** (Settings → QSY requests, **off by default**):
 
@@ -357,7 +360,7 @@ Share a folder of files that linked stations can browse and download, even while
 
 **Downloading** from someone else's library: when linked, the **Files** tab shows **📚 Browse** for their library.
 - Folders open with **Open**, **⬆ Up** goes back, and **Download** asks for a file.
-- It comes as a normal file transfer, with a time estimate and resume after a dropped link. It's accepted automatically because you asked, and saved in your **Download folder** (Settings → Files).
+- It comes as a normal file transfer, with a time estimate. It's accepted automatically because you asked, and saved in your **Download folder** (Settings → Files). A library file is sent only on the link it was asked for: if the link drops, ask for it again.
 
 ## Schedule
 
@@ -388,13 +391,13 @@ The window then shows the address to connect to, for example `192.168.1.20:7373`
 
 **On the other computer:** press **🛰 Remote**, type the radio computer's address (its LAN address, or a name such as `shack.local`; add `:port` if it isn't 7373) and the password, and press **Connect to the radio computer**. The button turns teal (**🛰 Remote ●**), and from then on everything happens on the radio computer:
 - search, CQ, chat, Roundtables, the Depot, QSY, the library, Radio Controls and the waterfalls;
-- **Settings**: you edit the radio computer's own settings, and it saves them. Its remote-sharing settings can only be changed on the radio computer itself.
+- **Settings**: you edit how the radio computer operates (callsign, CQ, search, bandwidth, automation, QSY, the schedule, the SDR…), and it saves them. Changing what's settled on that computer itself is ignored, with a note saying so: its folders (Download, file library, Depot file), Mercury (program and address), the radio connection (rigctld, managed rig, CAT), Demo mode, its speakers and its remote-sharing settings. Sound devices can be picked only from those it lists. Only **Save & connect** restarts its station; other changes (Answer automatically, Call CQ) apply without dropping the radio or a link.
 - **🔊 Listen**: plays the radio's received audio on this computer's speakers (Settings → Audio → Listen on and Listen volume are this computer's). It's 8 kHz audio, about 16 KB/s, nothing for a home network.
-- **Files**: files you send are picked here and uploaded. Files you receive are saved on the radio computer and also copied to this computer's Download folder.
+- **Files**: files you send are picked here and uploaded, up to **25 MB** each; only files uploaded this way can be sent from the radio computer. Files you receive are saved on the radio computer and also copied to this computer's Download folder (only files in its own Download folder are ever copied back).
 
-**Disconnect** (in the Remote window) goes back to this computer's own station; the radio computer carries on as it was. If the connection drops, this computer goes back to its own station and says so.
+**Disconnect** (in the Remote window) goes back to this computer's own station; the radio computer carries on as it was. If the connection drops, this computer goes back to its own station and says so. Turning sharing off or changing the password on the radio computer disconnects anyone operating at once. Both computers must run the same Whistlestop version; **Connect** says which versions differ if they don't.
 
-**Security.** Only computers with private (home network) addresses can connect: 192.168.x.x, 10.x.x.x, 172.16–31.x.x, link-local and IPv6 unique-local. The password is never sent: the radio computer sends a fresh challenge and the other computer answers with an HMAC-SHA256 of it. A wrong password is refused, slowly. The stream itself isn't encrypted, so **don't forward the port to the internet**; use a VPN to reach home from outside. Anyone who knows the password can transmit with your station, under your callsign: choose it accordingly. On macOS, allow incoming connections for Whistlestop when the firewall asks.
+**Security.** Only computers with private (home network) addresses can connect: 192.168.x.x, 10.x.x.x, 172.16–31.x.x, link-local and IPv6 unique-local. The password is never sent: the radio computer sends a fresh challenge and the other computer answers with an HMAC-SHA256 of it. A wrong password is refused, slowly, and after **10 wrong passwords within a minute** (from any computers together) every remote login is refused for **5 minutes**, the right password included; the radio computer's Log says so. At most **8** connections are accepted at once, and a login must finish within **15 s**. The stream itself isn't encrypted, so **don't forward the port to the internet**; use a VPN to reach home from outside. Anyone who knows the password can transmit with your station, under your callsign: choose it accordingly. On macOS, allow incoming connections for Whistlestop when the firewall asks.
 
 ## Phone apps (iPhone and Android)
 
@@ -407,7 +410,7 @@ Whistlestop also comes as native phone apps: SwiftUI on the iPhone and iPad (iOS
 - **Chat**: keyboard-to-keyboard over the link. The app switches here when a link comes up. A tick (✓) means the other station confirmed the line.
 - **Depot**: Arrivals, Departures, In Transit and Delivered. Tap a message to read it (that clears NEW), reply, connect now, or delete it. The pencil button writes new mail, with an optional **Via** relay.
 - **Log**: what the engine did, newest first, in UTC.
-- **Settings**: Help mode, your station (callsign, name, grid), Demo, the **Radio** (USB cable, serial bridge, rigctld or none on Android; the CAT bridge on the iPhone), and the modem's host and port. **Save** applies them; switching Demo on or off restarts the station. Everything else (search timing, QSY rules, the library, the schedule…) keeps the values in the phone's settings file, `whistlestop.toml` in the app's own storage, the same format as the desktop's.
+- **Settings**: Help mode, your station (callsign, name, grid), Demo, the **Radio** (USB cable, serial bridge, rigctld or none on Android; the CAT bridge on the iPhone), and the modem's host and port. **Save** applies them. A change to the callsign, Demo, the modem's host or port, the radio connection or the audio restarts the station (which ends a link in progress); other changes (name, grid, Answer automatically) apply without a restart. The built-in Mercury starts with the settings in force; it can't be restarted inside the app, so after a change to its port or to how it keys the radio, the app asks you to close and reopen it. Everything else (search timing, QSY rules, the library, the schedule…) keeps the values in the phone's settings file, `whistlestop.toml` in the app's own storage, the same format as the desktop's.
 
 **Help mode.** A phone has no hover, so Help works by tapping: turn it on with the **?** in the header (or in Settings) and every card shows a brass **?**; tap one for its explanation. Like the desktop, Help mode is off each time the app starts.
 
@@ -519,7 +522,8 @@ The **Radio** card keeps only the essentials:
 
 - **Band buttons** (80–10 m): jump to that band's digital segment.
 - **−1k / −100 / +100 / +1k**: nudge the dial.
-- **Frequency box**: type kHz (`14103.15`) or Hz and press **Tune** or Enter.
+- **Frequency box**: type kHz (`14103.15`), MHz (`14.10315`) or Hz (`14103150`) and press **Tune** or Enter. A number under 100 is MHz, over 100 000 is Hz, anything between is kHz; a decimal comma works too.
+- **Tuning is locked during a link** (and while calling a station): Mercury holds a link only within about ±55 Hz, so the band buttons, nudges, frequency box, waterfall clicks and searches are off until you disconnect. To move a link, use QSY.
 - **Mode**: PKTUSB, USB or LSB (Whistlestop's signals are USB).
 - **Power**: the radio's RF power, if it supports remote setting.
 - **🎛 Radio controls**: opens the full controls window (below). The button is lit while it's open.
@@ -559,10 +563,14 @@ With **Settings → Radio connection → Direct CAT (built in)**, Whistlestop co
 - **Speed: Automatic** tries the usual speeds for the protocol until the radio answers (Icom 19200 first, Yaesu 38400 and 4800, Elecraft 38400, Kenwood 115200). Choosing the radio's actual CAT speed makes connecting faster.
 - **CI-V address**: **Ask the radio** finds it with a broadcast, even if you've changed it from the factory address. Turn it off to type an address in hex.
 - **Full power**: the radio's maximum output, so the power slider is right (Kenwood, Elecraft and Yaesu set power in watts).
-- **or network address**: `host:port` reaches a radio through a serial-over-network bridge (ser2net and similar) or a FlexRadio CAT port.
+- **or network address**: `host:port` reaches a radio through a serial-over-network bridge (ser2net and similar) or a FlexRadio CAT port. A bridge that doesn't answer is given up on after about 3 s (per address the name resolves to), and a port that won't open is retried for 2 s, so a switched-off bridge never holds Whistlestop up for long.
 - The port is opened with **RTS and DTR held low**, because on many radios those lines key the transmitter.
 
-**Sharing with Mercury.** Only one program can open the serial port, so Whistlestop serves the rigctld protocol on **Share with Mercury on port** (default 4532). Set Mercury to **Hamlib model 2 (NET rigctl)** at `127.0.0.1:4532` and it keys the radio through Whistlestop. Loggers and other programs that speak rigctld can use it too. Turn sharing off only if Mercury keys the radio another way (VOX, or its own PTT port).
+**Sharing with Mercury.** Only one program can open the serial port, so Whistlestop serves the rigctld protocol on **Share with Mercury on port** (default 4532). Set Mercury to **Hamlib model 2 (NET rigctl)** at `127.0.0.1:4532` and it keys the radio through Whistlestop. Loggers and other programs that speak rigctld can use it too. Turn sharing off only if Mercury keys the radio another way (VOX, or its own PTT port). If a program keys the radio through this port and then disconnects or crashes without unkeying, Whistlestop unkeys the radio for it. Quitting Whistlestop also waits (up to 3 s) until the radio is unkeyed.
+
+**FT-817 family PTT.** Whistlestop checks that the radio did key or unkey, from its acknowledgement or, failing that, its TX status; if it can't confirm, it reports an error instead of assuming the radio is receiving. The PTT readout comes from the radio's own TX status.
+
+**Kenwood TS-990.** Mode is read and set with the TS-990's own `OM` command (main band), including its data modes (USB-D, LSB-D, FM-D).
 
 **What each protocol controls.** Frequency, mode (including the radio's data mode: Icom DATA, Kenwood DA, Elecraft DATA A, Yaesu DATA-U, FT-817 DIG), PTT and the S-meter work on every radio. The Radio Controls window offers what the radio supports:
 
@@ -627,7 +635,7 @@ They're stored in the settings file (`segments`), so you can change or add them.
 
 ## Settings reference
 
-Settings are saved to `~/Library/Application Support/Whistlestop/whistlestop.toml` (macOS). **Save & connect** applies them and reconnects.
+Settings are saved to `~/Library/Application Support/Whistlestop/whistlestop.toml` (macOS). **Save & connect** applies them and reconnects. Closing the Settings window without it throws your edits away.
 
 | Setting | What it does | Default |
 |---|---|---|

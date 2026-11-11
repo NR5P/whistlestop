@@ -512,17 +512,20 @@ fn run_sim(
                 paint(*f, 50.0, -78.0 - (k % 5) as f32 * 4.0, &mut lv);
             }
         }
-        // The demo station's whistle (14.10315 MHz dial + 500..2500 Hz).
-        let cyc = t.rem_euclid(45.0);
-        if cyc < 25.0 {
-            let ph = cyc.rem_euclid(1.0);
-            let af = if ph < 0.5 {
-                500.0 + 4000.0 * ph
+        // The demo station's whistle (14.10315 MHz dial + 1000..2000 Hz, 0.2 s
+        // each way), on the same schedule as the wide-search simulation: from
+        // 4 s, a 10 s whistle every 30 s, then its CQ burst.
+        let cyc = (t - 4.0).rem_euclid(30.0);
+        if t < 4.0 {
+        } else if cyc < 10.0 {
+            let ph = cyc.rem_euclid(0.4);
+            let af = if ph < 0.2 {
+                1000.0 + 5000.0 * ph
             } else {
-                2500.0 - 4000.0 * (ph - 0.5)
+                2000.0 - 5000.0 * (ph - 0.2)
             };
             paint(14_103_150.0 + af, 60.0, -74.0, &mut lv);
-        } else if cyc < 28.1 {
+        } else if cyc < 13.1 {
             paint(14_103_150.0 + 1500.0, 200.0, -80.0, &mut lv);
         }
         // Other activity: CW, a Mercury/VARA-like wide data signal, carriers.

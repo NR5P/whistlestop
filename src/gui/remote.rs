@@ -47,6 +47,7 @@ impl RemoteWin {
                     if let Some(desc) = v.connected {
                         ui.label(RichText::new(format!("● Operating {desc}")).strong().color(GREEN));
                         ui.label(RichText::new("Everything you do here happens on the radio computer. Listen plays its radio's audio on this computer's speakers; files you receive are copied to this computer's Download folder.").small().color(DIM));
+                        ui.label(RichText::new("Its folders, file library, Mercury, radio connection and Demo mode stay as set on the radio computer. Files you send can be up to 25 MB.").small().color(DIM));
                         if ui.button("Disconnect (back to this computer)").help(&help::RM_DISCONNECT).clicked() {
                             act = Some(RemoteAction::Disconnect);
                         }
@@ -99,6 +100,7 @@ impl RemoteWin {
                         None => {}
                     }
                     ui.label(RichText::new("Only computers on your home network (private addresses) can connect, and only with the password. The connection isn't encrypted: don't open this port to the internet.").small().color(DIM));
+                    ui.label(RichText::new("Turning sharing off or changing the password disconnects anyone operating. After 10 wrong passwords within a minute, all logins are refused for 5 minutes.").small().color(DIM));
                     if changed {
                         act = Some(RemoteAction::Serve);
                     }

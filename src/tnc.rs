@@ -137,6 +137,11 @@ impl Tnc {
 
     /// Send a command and wait for OK. WRONG/BUSY become errors.
     pub async fn command(&mut self, cmd: &str) -> Result<()> {
+        // One command per line: a CR or LF inside (say, in a callsign from
+        // the air) would start a second command.
+        if cmd.chars().any(|c| c.is_control()) {
+            bail!("refused a Mercury command with control characters: {cmd:?}");
+        }
         while self.replies.try_recv().is_ok() {} // drop stale replies
         self.ctl.write_all(format!("{cmd}\r").as_bytes()).await?;
         let r = tokio::time::timeout(Duration::from_secs(5), self.replies.recv())

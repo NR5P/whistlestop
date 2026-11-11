@@ -245,11 +245,43 @@ pub fn is_tcp(port: &str) -> bool {
             .is_some_and(|(_, n)| n.parse::<u16>().is_ok())
 }
 
+/// How long to wait for a TCP serial bridge to accept the connection.
+pub const TCP_CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// How long `connect` keeps retrying a port that won't open (one a previous
+/// connection is still letting go of). A last try may start just before
+/// this and take up to `TCP_CONNECT_TIMEOUT` per address.
+const OPEN_RETRY: Duration = Duration::from_secs(2);
+
+fn connect_tcp(addr: &str) -> Result<std::net::TcpStream> {
+    use std::net::ToSocketAddrs;
+    let addrs: Vec<_> = addr
+        .to_socket_addrs()
+        .map_err(|e| anyhow!("can't reach the radio at {addr}: {e}"))?
+        .collect();
+    let mut last = None;
+    // At most two addresses (typically IPv6 and IPv4), so an unreachable
+    // host costs a few seconds, not minutes.
+    for a in addrs.iter().take(2) {
+        match std::net::TcpStream::connect_timeout(a, TCP_CONNECT_TIMEOUT) {
+            Ok(s) => return Ok(s),
+            Err(e) => last = Some(e),
+        }
+    }
+    Err(match last {
+        Some(e) if e.kind() == std::io::ErrorKind::TimedOut => anyhow!(
+            "can't reach the radio at {addr}: no answer in {} s",
+            TCP_CONNECT_TIMEOUT.as_secs()
+        ),
+        Some(e) => anyhow!("can't reach the radio at {addr}: {e}"),
+        None => anyhow!("can't reach the radio at {addr}: no such host"),
+    })
+}
+
 pub fn open_wire(port: &str, baud: u32) -> Result<Box<dyn Wire>> {
     if is_tcp(port) {
         let addr = port.strip_prefix("tcp:").unwrap_or(port);
-        let s = std::net::TcpStream::connect(addr)
-            .map_err(|e| anyhow!("can't reach the radio at {addr}: {e}"))?;
+        let s = connect_tcp(addr)?;
         s.set_read_timeout(Some(Duration::from_millis(40)))?;
         s.set_nodelay(true)?;
         return Ok(Box::new(TcpWire(s)));
@@ -470,6 +502,12 @@ impl CatHandle {
         orx.await
             .map_err(|_| anyhow!("the radio connection has closed"))?
     }
+
+    /// Queue `f` on the radio's thread without waiting (works outside
+    /// async code too, e.g. in a `Drop`).
+    pub fn send(&self, f: impl FnOnce(&mut dyn Driver) + Send + 'static) {
+        let _ = self.tx.send(Box::new(f));
+    }
 }
 
 // ---------------------------------------------------------------- connect
@@ -508,12 +546,12 @@ pub fn connect(cfg: &CatConfig) -> Result<Box<dyn Driver>> {
     let mut last = anyhow!("the radio on {port} didn't answer");
     for &baud in &bauds {
         for &f in &families {
-            // A previous connection may still be letting go of the port.
+            // A previous connection may still be letting go of the port:
+            // retry for a moment, never minutes (each TCP try is itself
+            // bounded by TCP_CONNECT_TIMEOUT).
+            let first = Instant::now();
             let mut w = open_wire(&port, baud);
-            for _ in 0..10 {
-                if w.is_ok() {
-                    break;
-                }
+            while w.is_err() && first.elapsed() < OPEN_RETRY {
                 std::thread::sleep(Duration::from_millis(200));
                 w = open_wire(&port, baud);
             }
@@ -708,6 +746,33 @@ mod tests {
             Family::from_description("USB serial (choose the model)"),
             Family::Auto
         );
+    }
+
+    /// A radio bridge that isn't there fails in seconds, not minutes.
+    #[test]
+    fn unreachable_bridge_gives_up_quickly() {
+        // Nothing listening: refused at once, retried for OPEN_RETRY.
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let cfg = CatConfig {
+            port: format!("127.0.0.1:{port}"),
+            ..Default::default()
+        };
+        let t = Instant::now();
+        assert!(connect(&cfg).is_err());
+        assert!(t.elapsed() < Duration::from_secs(5), "{:?}", t.elapsed());
+        // A host that never answers (TEST-NET-1): one connect timeout,
+        // or less if the network says it's unreachable.
+        let cfg = CatConfig {
+            port: "192.0.2.1:4532".into(),
+            ..Default::default()
+        };
+        let t = Instant::now();
+        assert!(connect(&cfg).is_err());
+        assert!(t.elapsed() < Duration::from_secs(10), "{:?}", t.elapsed());
     }
 
     #[test]

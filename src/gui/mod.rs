@@ -94,6 +94,21 @@ fn card<R>(ui: &mut Ui, title: &str, add: impl FnOnce(&mut Ui) -> R) -> R {
 }
 
 /// Show a file in Finder / Explorer / the Linux file manager.
+/// A typed frequency: MHz (`14.10315`), kHz (`14103.15`) or Hz
+/// (`14103150`), told apart by size. HF and 6 m are 1.8–54 MHz, so a number
+/// under 100 is MHz and one over 100 000 is Hz.
+fn parse_freq(text: &str) -> Option<f64> {
+    let v = text.trim().replace(',', ".").parse::<f64>().ok().filter(|v| v.is_finite() && *v > 0.0)?;
+    let hz = if v < 100.0 {
+        v * 1e6
+    } else if v > 100_000.0 {
+        v
+    } else {
+        v * 1e3
+    };
+    Some(hz.round())
+}
+
 fn reveal(p: &std::path::Path) {
     #[cfg(target_os = "macos")]
     let r = std::process::Command::new("open").arg("-R").arg(p).spawn();
@@ -173,6 +188,9 @@ pub struct App {
     cq_table: bool,
     cq_table_name: String,
     settings_open: bool,
+    /// What the Settings window edits. It becomes the real settings only on
+    /// Save & connect; closing the window throws it away.
+    settings_draft: Option<Config>,
     freq_input: String,
     search_band: String,
     power: f32,
@@ -239,6 +257,7 @@ impl App {
             cq_table: false,
             cq_table_name: "Evening Table".into(),
             settings_open: first_run,
+            settings_draft: None,
             freq_input: String::new(),
             search_band: "20m".into(),
             power: 0.5,
@@ -282,6 +301,16 @@ impl App {
         match whistlestop::remote::serve(c.remote_port, &c.remote_password, shared) {
             Ok(srv) => self.server = Some(srv),
             Err(e) => self.toast(format!("Remote sharing: {e}")),
+        }
+    }
+
+    /// Save a setting changed outside the Settings window. While operating
+    /// another computer, `cfg` is that computer's: it gets the change as a
+    /// command, and this computer's own file is left alone.
+    fn save_cfg(&mut self) {
+        if self.client.is_none() {
+            let _ = self.cfg.save();
+            self.publish_cfg();
         }
     }
 
@@ -420,7 +449,7 @@ impl App {
                 if ui.add(lb).help(&help::LISTEN).clicked() {
                     if self.client.is_none() {
                         self.cfg.monitor = !lon;
-                        let _ = self.cfg.save();
+                        self.save_cfg();
                     }
                     self.send(Cmd::Monitor(!lon));
                 }
@@ -616,46 +645,52 @@ impl App {
     }
 
     fn radio_card(&mut self, ui: &mut Ui, s: &State) {
+        // Mercury only holds a link within about ±55 Hz, so the dial stays put
+        // while linked or calling (the engine refuses too).
+        let tune_ok = s.link.is_none() && s.calling.is_none();
+        const LOCKED: &str = "Tuning is locked during a link: moving the dial would break it. Disconnect first.";
         card(ui, "Radio", |ui| {
-            ui.horizontal_wrapped(|ui| {
-                for (band, hz) in [
-                    ("80", 3_585_000.0),
-                    ("40", 7_100_000.0),
-                    ("30", 10_140_000.0),
-                    ("20", 14_100_500.0),
-                    ("17", 18_105_000.0),
-                    ("15", 21_090_000.0),
-                    ("12", 24_925_000.0),
-                    ("10", 28_120_000.0),
-                ] {
-                    let on = bandplan::band_of(s.rig.freq_hz) == Some(&*format!("{band}m"));
-                    let b = egui::Button::new(RichText::new(band).monospace().color(if on { BG } else { TEXT }))
-                        .fill(if on { BRASS } else { CARD_HI })
-                        .min_size(vec2(34.0, 26.0));
-                    if ui.add(b).on_hover_text(format!("{band} m digital segment")).help(&help::R_BANDS).clicked() {
-                        self.send(Cmd::SetFreq(hz));
+            ui.add_enabled_ui(tune_ok, |ui| {
+                ui.horizontal_wrapped(|ui| {
+                    for (band, hz) in [
+                        ("80", 3_585_000.0),
+                        ("40", 7_100_000.0),
+                        ("30", 10_140_000.0),
+                        ("20", 14_100_500.0),
+                        ("17", 18_105_000.0),
+                        ("15", 21_090_000.0),
+                        ("12", 24_925_000.0),
+                        ("10", 28_120_000.0),
+                    ] {
+                        let on = bandplan::band_of(s.rig.freq_hz) == Some(&*format!("{band}m"));
+                        let b = egui::Button::new(RichText::new(band).monospace().color(if on { BG } else { TEXT }))
+                            .fill(if on { BRASS } else { CARD_HI })
+                            .min_size(vec2(34.0, 26.0));
+                        if ui.add(b).on_hover_text(format!("{band} m digital segment")).on_disabled_hover_text(LOCKED).help(&help::R_BANDS).clicked() {
+                            self.send(Cmd::SetFreq(hz));
+                        }
                     }
-                }
-            });
-            ui.horizontal(|ui| {
-                for (lbl, d) in [("−1k", -1000.0), ("−100", -100.0), ("+100", 100.0), ("+1k", 1000.0)] {
-                    if ui.small_button(lbl).help(&help::R_NUDGE).clicked() {
-                        self.send(Cmd::SetFreq(s.rig.freq_hz + d));
+                });
+                ui.horizontal(|ui| {
+                    for (lbl, d) in [("−1k", -1000.0), ("−100", -100.0), ("+100", 100.0), ("+1k", 1000.0)] {
+                        if ui.small_button(lbl).on_disabled_hover_text(LOCKED).help(&help::R_NUDGE).clicked() {
+                            self.send(Cmd::SetFreq(s.rig.freq_hz + d));
+                        }
                     }
-                }
-            });
-            ui.horizontal(|ui| {
-                let r = ui.add(egui::TextEdit::singleline(&mut self.freq_input).hint_text("kHz, e.g. 14103.15").desired_width(130.0)).help(&help::R_FREQ);
-                let go = ui.button("Tune").help(&help::R_FREQ).clicked() || (r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)));
-                if go {
-                    if let Ok(k) = self.freq_input.trim().replace(',', ".").parse::<f64>() {
-                        let hz = if k > 100_000.0 { k } else { k * 1000.0 };
-                        self.send(Cmd::SetFreq(hz));
-                        self.freq_input.clear();
-                    } else {
-                        self.toast("Type a frequency in kHz");
+                });
+                ui.horizontal(|ui| {
+                    let r = ui.add(egui::TextEdit::singleline(&mut self.freq_input).hint_text("kHz, e.g. 14103.15").desired_width(130.0)).help(&help::R_FREQ);
+                    let go = ui.button("Tune").on_disabled_hover_text(LOCKED).help(&help::R_FREQ).clicked() || (r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)));
+                    if go {
+                        match parse_freq(&self.freq_input) {
+                            Some(hz) => {
+                                self.send(Cmd::SetFreq(hz));
+                                self.freq_input.clear();
+                            }
+                            None => self.toast("Type a frequency: kHz (14103.15), MHz (14.10315) or Hz"),
+                        }
                     }
-                }
+                });
             });
             ui.horizontal(|ui| {
                 ui.label(RichText::new("Mode").color(DIM));
@@ -724,7 +759,7 @@ impl App {
                         .clicked()
                     {
                         self.cfg.bandwidth = b;
-                        let _ = self.cfg.save();
+                        self.save_cfg();
                         self.send(Cmd::SetBandwidth(b));
                     }
                 }
@@ -772,7 +807,7 @@ impl App {
             ui.horizontal(|ui| {
                 ui.label(RichText::new("Whistle").color(DIM));
                 if ui.add(egui::Slider::new(&mut self.cfg.whistle_s, 4.0..=60.0).suffix(" s").integer()).help(&help::CQ_WHISTLE).changed() {
-                    let _ = self.cfg.save();
+                    self.save_cfg();
                 }
             });
             ui.label(RichText::new("Whistle ≥ searchers' scan cycle. Then Mercury sends your CQFRAME (ID) and listens.").small().color(DIM));
@@ -848,7 +883,7 @@ impl App {
                         .changed()
                     {
                         self.cfg.sdr.wide_search = on;
-                        let _ = self.cfg.save();
+                        self.save_cfg();
                         self.send(Cmd::WideSearch { on, auto: s.wide.auto });
                     }
                     let mut auto = s.wide.auto;
@@ -859,7 +894,7 @@ impl App {
                         .changed()
                     {
                         self.cfg.sdr.wide_auto = auto;
-                        let _ = self.cfg.save();
+                        self.save_cfg();
                         self.send(Cmd::WideSearch { on: s.wide.on, auto });
                     }
                 });
@@ -870,7 +905,7 @@ impl App {
                 }
             });
             if ui.checkbox(&mut self.cfg.auto_answer, "Answer automatically").help(&help::S_AUTOANSWER).changed() {
-                let _ = self.cfg.save();
+                self.save_cfg();
                 self.send(Cmd::Update(self.cfg.clone()));
             }
         });
@@ -935,7 +970,7 @@ impl App {
                     ui.label(RichText::new(&h.what).small().color(DIM));
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         if let Some(t) = &h.table {
-                            if ui.small_button("Join").help(&help::H_JOIN).clicked() {
+                            if s.link.is_none() && ui.small_button("Join").help(&help::H_JOIN).clicked() {
                                 self.send(Cmd::JoinTable(t.clone()));
                                 self.tab = Tab::Roundtable;
                             }
@@ -1182,7 +1217,8 @@ impl App {
                 ui.add_space(6.0);
                 ui.horizontal(|ui| {
                     ui.add(egui::TextEdit::singleline(&mut self.join_name).hint_text("Roundtable name").desired_width(220.0));
-                    if ui.button("Join here").help(&help::T_JOIN).clicked() && !self.join_name.trim().is_empty() {
+                    let join = ui.add_enabled(s.link.is_none(), egui::Button::new("Join here")).help(&help::T_JOIN).on_disabled_hover_text("Disconnect the 1:1 link first");
+                    if join.clicked() && !self.join_name.trim().is_empty() {
                         self.send(Cmd::JoinTable(self.join_name.trim().into()));
                     }
                 });
@@ -1411,7 +1447,7 @@ impl App {
                             }
                             XferState::Sending | XferState::Receiving | XferState::Offered => {
                                 if ui.small_button("Cancel").help(&help::F_CANCEL).clicked() {
-                                    self.send(Cmd::Cancel(t.fid));
+                                    self.send(Cmd::Cancel { fid: t.fid, dir: t.dir });
                                 }
                             }
                             XferState::Done(Some(p)) => {
@@ -1609,9 +1645,10 @@ impl App {
         if let Some(pos) = resp.hover_pos() {
             let hz = start + (pos.x - rect.left()) as f64 / rect.width() as f64 * span;
             p.line_segment([Pos2::new(pos.x, rect.top()), Pos2::new(pos.x, rect.bottom())], Stroke::new(1.0, Color32::WHITE.linear_multiply(0.4)));
-            p.text(pos + vec2(8.0, -14.0), Align2::LEFT_BOTTOM, format!("{:.2} kHz — click to tune", hz / 1e3), FontId::proportional(11.0), TEXT);
+            let what = if s.link.is_none() && s.calling.is_none() { "click to tune" } else { "tuning locked during a link" };
+            p.text(pos + vec2(8.0, -14.0), Align2::LEFT_BOTTOM, format!("{:.2} kHz — {what}", hz / 1e3), FontId::proportional(11.0), TEXT);
         }
-        if let (true, Some(pos)) = (resp.clicked(), resp.interact_pointer_pos()) {
+        if let (true, Some(pos)) = (resp.clicked() && s.link.is_none() && s.calling.is_none(), resp.interact_pointer_pos()) {
             // Put the clicked signal in the middle of the audio passband.
             let hz = start + (pos.x - rect.left()) as f64 / rect.width() as f64 * span;
             self.send(Cmd::SetFreq((hz - 1500.0).round()));
@@ -1750,6 +1787,9 @@ impl App {
     fn settings(&mut self, ctx: &egui::Context) {
         let mut open = self.settings_open;
         let mut apply = false;
+        if self.settings_draft.is_none() {
+            self.settings_draft = Some(self.cfg.clone());
+        }
         egui::Window::new(RichText::new("Settings").strong())
             .open(&mut open)
             .collapsible(false)
@@ -1758,7 +1798,7 @@ impl App {
             .anchor(Align2::CENTER_CENTER, vec2(0.0, 0.0))
             .show(ctx, |ui| {
                 egui::ScrollArea::vertical().max_height(560.0).show(ui, |ui| {
-                    let c = &mut self.cfg;
+                    let c = self.settings_draft.as_mut().expect("settings draft");
                     card(ui, "Station", |ui| {
                         egui::Grid::new("st").num_columns(2).spacing(vec2(10.0, 8.0)).show(ui, |ui| {
                             ui.label("Callsign");
@@ -1823,7 +1863,7 @@ impl App {
                             }
                             RigMode::Managed => {
                                 if rs::hamlib_bin("rigctld").is_none() {
-                                    ui.label(RichText::new("Hamlib isn't installed. On macOS: brew install hamlib").color(RED));
+                                    ui.label(RichText::new(format!("Hamlib isn't installed: {}", rs::hamlib_install_hint())).color(RED));
                                 }
                                 ui.horizontal(|ui| {
                                     if ui.button("🔍  Detect radios").help(&help::ST_DETECT).clicked() {
@@ -2256,7 +2296,9 @@ impl App {
                 });
             match decided {
                 Some(true) => {
-                    self.cfg.e2e = want;
+                    if let Some(d) = self.settings_draft.as_mut() {
+                        d.e2e = want;
+                    }
                     self.e2e_confirm = None;
                 }
                 Some(false) => self.e2e_confirm = None,
@@ -2264,6 +2306,19 @@ impl App {
             }
         }
         if apply {
+            if let Some(mut new) = self.settings_draft.take() {
+                // Controls outside this window may have changed these since
+                // it opened; keep their current values.
+                new.bandwidth = self.cfg.bandwidth;
+                new.whistle_s = self.cfg.whistle_s;
+                new.auto_answer = self.cfg.auto_answer;
+                new.monitor = self.cfg.monitor;
+                new.sdr.wide_search = self.cfg.sdr.wide_search;
+                new.sdr.wide_auto = self.cfg.sdr.wide_auto;
+                new.auto_tune = self.cfg.auto_tune;
+                new.swr_limit = self.cfg.swr_limit;
+                self.cfg = new;
+            }
             if self.client.is_some() {
                 // The radio computer's settings: it saves and applies them.
                 self.send(Cmd::Start(self.cfg.clone()));
@@ -2276,6 +2331,11 @@ impl App {
             }
             self.sdr_span = self.cfg.sdr.span_hz;
             open = false;
+        }
+        if !open {
+            // Closed without saving: forget the edits.
+            self.settings_draft = None;
+            self.e2e_confirm = None;
         }
         self.settings_open = open;
     }
@@ -2422,6 +2482,8 @@ impl eframe::App for App {
 
         if self.settings_open {
             self.settings(&ctx);
+        } else {
+            self.settings_draft = None;
         }
         if self.rigwin.open {
             let (cmds, changed) = self.rigwin.show(&ctx, &snap, &mut self.cfg);
@@ -2429,7 +2491,7 @@ impl eframe::App for App {
                 self.send(c);
             }
             if changed {
-                let _ = self.cfg.save();
+                self.save_cfg();
                 self.send(Cmd::Update(self.cfg.clone()));
             }
         }
@@ -2485,8 +2547,21 @@ impl eframe::App for App {
     }
 
     fn on_exit(&mut self) {
-        let _ = self.cfg.save();
-        self.send(Cmd::Stop);
+        // The tour changes settings for its pictures only; never keep them.
+        if self.tour.is_none() {
+            self.save_cfg();
+        }
+        if self.client.is_none() {
+            // Wait (briefly) for the engine to unkey the radio: quitting
+            // first could leave a direct-CAT radio transmitting.
+            self.h.send(Cmd::Stop);
+            let until = Instant::now() + Duration::from_secs(3);
+            while self.h.state.lock().map(|g| g.running).unwrap_or(false) && Instant::now() < until {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        } else {
+            self.send(Cmd::Stop);
+        }
     }
 }
 

@@ -50,12 +50,25 @@ impl Writer {
     }
     pub fn call(&mut self, c: &str) -> &mut Self {
         let c = c.to_ascii_uppercase();
-        self.str(&c[..c.len().min(12)])
+        // At most 12 bytes, cut on a character boundary.
+        let mut end = c.len().min(12);
+        while !c.is_char_boundary(end) {
+            end -= 1;
+        }
+        self.str(&c[..end])
     }
     pub fn raw(&mut self, b: &[u8]) -> &mut Self {
         self.0.extend_from_slice(b);
         self
     }
+}
+
+/// Does this look like a callsign (or a tactical name like BRAVO)? 1–12
+/// characters: letters, digits, `/` and `-`.
+pub fn valid_call(c: &str) -> bool {
+    !c.is_empty()
+        && c.len() <= 12
+        && c.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'/' || b == b'-')
 }
 
 pub struct Reader<'a> {
@@ -68,7 +81,8 @@ impl<'a> Reader<'a> {
         Self { b, pos: 0 }
     }
     fn take(&mut self, n: usize) -> Result<&'a [u8]> {
-        if self.pos + n > self.b.len() {
+        // A length from the air can be anything: no overflow.
+        if self.pos.checked_add(n).is_none_or(|end| end > self.b.len()) {
             bail!("packet too short");
         }
         let s = &self.b[self.pos..self.pos + n];
@@ -98,6 +112,15 @@ impl<'a> Reader<'a> {
     }
     pub fn str(&mut self) -> Result<String> {
         Ok(std::str::from_utf8(self.bytes()?)?.to_string())
+    }
+    /// A callsign: refused unless it looks like one (see `valid_call`), so
+    /// nothing from the air can smuggle text into a Mercury command.
+    pub fn call(&mut self) -> Result<String> {
+        let c = self.str()?;
+        if !valid_call(&c) {
+            bail!("not a callsign");
+        }
+        Ok(c)
     }
     pub fn hash(&mut self) -> Result<[u8; 32]> {
         Ok(self.take(32)?.try_into()?)
@@ -442,8 +465,8 @@ impl Link {
             0x0A => Link::Bye { text: r.str()? },
             T_MAIL => Link::Mail {
                 id: r.uv()?,
-                from: r.str()?,
-                to: r.str()?,
+                from: r.call()?,
+                to: r.call()?,
                 created: r.uv()?,
                 hops: r.u8()?,
                 text: r.str()?,
@@ -662,7 +685,9 @@ impl Incoming {
     /// Apply a chunk. Out-of-order chunks are ignored (ARQ keeps order).
     pub fn chunk(&mut self, offset: u64, data: &[u8]) {
         if offset == self.have() {
-            self.data.extend_from_slice(data);
+            // Never more than the offered size.
+            let room = self.size.saturating_sub(self.have()).min(data.len() as u64) as usize;
+            self.data.extend_from_slice(&data[..room]);
         }
     }
     pub fn complete(&self) -> bool {
@@ -855,7 +880,7 @@ impl TableFrame {
         }
         let t = r.u8().ok()?;
         let table = r.uv().ok()? as u16;
-        let from = r.str().ok()?;
+        let from = r.call().ok()?;
         let body = (|| -> Result<TableBody> {
             Ok(match t {
                 0x10 => TableBody::Call {
@@ -864,12 +889,19 @@ impl TableFrame {
                     bw_code: r.u8()?,
                     grid: r.str()?,
                 },
-                0x11 => TableBody::Text {
-                    id: r.uv()?,
-                    part: r.u8()?,
-                    total: r.u8()?,
-                    data: r.bytes()?.to_vec(),
-                },
+                0x11 => {
+                    let (id, part, total) = (r.uv()?, r.u8()?, r.u8()?);
+                    // Missing parts are tracked in a 64-bit map.
+                    if total == 0 || total > 64 || part == 0 || part > total {
+                        bail!("bad part number");
+                    }
+                    TableBody::Text {
+                        id,
+                        part,
+                        total,
+                        data: r.bytes()?.to_vec(),
+                    }
+                }
                 0x12 => TableBody::Join {
                     table_name: r.str()?,
                     snr_of_host: r.i8()?,
@@ -878,11 +910,11 @@ impl TableFrame {
                     mode_index: r.u8()?,
                 },
                 0x14 => TableBody::Again {
-                    of: r.str()?,
+                    of: r.call()?,
                     id: r.uv()?,
                     missing: r.uv()?,
                 },
-                0x15 => TableBody::Floor { to: r.str()? },
+                0x15 => TableBody::Floor { to: r.call()? },
                 0x16 => TableBody::Leave,
                 0x17 => {
                     let grid = r.str()?;
@@ -890,7 +922,7 @@ impl TableFrame {
                     let n = r.uv()?.min(32);
                     let mut mail_for = vec![];
                     for _ in 0..n {
-                        mail_for.push(r.str()?);
+                        mail_for.push(r.call()?);
                     }
                     TableBody::Beacon {
                         grid,
@@ -899,7 +931,7 @@ impl TableFrame {
                     }
                 }
                 0x18 => TableBody::Notice {
-                    to: r.str()?,
+                    to: r.call()?,
                     count: r.u8()?,
                 },
                 _ => bail!("unknown"),
@@ -1338,5 +1370,50 @@ mod tests {
         let (a, b) = w.split_at(3);
         assert!(d.feed(a).is_empty());
         assert_eq!(d.feed(b), vec![(0, p)]);
+    }
+
+    #[test]
+    fn huge_length_from_the_air_is_refused_not_a_panic() {
+        // Table frame, type TEXT, table 0, then a "from" whose length varint
+        // is near u64::MAX: pos + len used to wrap and pass the check.
+        let mut b = vec![TABLE_MAGIC, 0x11, 0x00];
+        b.extend_from_slice(&[0xFF; 9]);
+        b.push(0x01);
+        b.extend_from_slice(b"ABC");
+        assert!(TableFrame::decode(&b).is_none());
+        let mut r = Reader::new(&b[3..]);
+        assert!(r.bytes().is_err());
+    }
+
+    #[test]
+    fn callsigns_from_the_air_are_checked() {
+        assert!(valid_call("N0CALL"));
+        assert!(valid_call("K7BOT/P"));
+        assert!(valid_call("BRAVO"));
+        assert!(!valid_call(""));
+        assert!(!valid_call("X\rLISTEN OFF"));
+        assert!(!valid_call("A B"));
+        assert!(!valid_call("ABCDEFGHIJKLM"));
+        // A NOTICE "from" with a CR in it is dropped whole.
+        let mut w = Writer::default();
+        w.u8(TABLE_MAGIC).u8(0x18).uv(0).str("X\rLISTEN OFF").str("N0CALL").u8(1);
+        assert!(TableFrame::decode(&w.0).is_none());
+    }
+
+    #[test]
+    fn long_non_ascii_callsign_is_cut_on_a_character_boundary() {
+        let mut w = Writer::default();
+        w.call("AÅÅÅÅÅÅ"); // 13 bytes: byte 12 is inside a character
+        let mut r = Reader::new(&w.0);
+        assert_eq!(r.str().unwrap(), "AÅÅÅÅÅ");
+    }
+
+    #[test]
+    fn text_with_too_many_parts_is_refused() {
+        for (part, total) in [(1u8, 65u8), (0, 3), (4, 3), (1, 0)] {
+            let mut w = Writer::default();
+            w.u8(TABLE_MAGIC).u8(0x11).uv(1).str("N0CALL").uv(7).u8(part).u8(total).bytes(b"hi");
+            assert!(TableFrame::decode(&w.0).is_none(), "{part}/{total}");
+        }
     }
 }

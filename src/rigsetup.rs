@@ -34,6 +34,17 @@ impl HamlibModel {
     }
 }
 
+/// How to install Hamlib on this computer, for messages.
+pub fn hamlib_install_hint() -> &'static str {
+    if cfg!(windows) {
+        "install Hamlib for Windows (hamlib-w64 from github.com/Hamlib/Hamlib/releases)"
+    } else if cfg!(target_os = "macos") {
+        "brew install hamlib"
+    } else {
+        "install your distribution's hamlib (libhamlib-utils) package"
+    }
+}
+
 /// Where rigctld and rigctl live (Homebrew, MacPorts, Linux, the Windows
 /// Hamlib installer, or PATH).
 pub fn hamlib_bin(name: &str) -> Option<String> {
@@ -370,7 +381,7 @@ impl Drop for RigctldProcess {
 /// key the radio.
 pub fn start_rigctld(m: &ManagedRig) -> Result<RigctldProcess> {
     let bin = hamlib_bin("rigctld")
-        .ok_or_else(|| anyhow!("Hamlib's rigctld isn't installed (macOS: brew install hamlib)"))?;
+        .ok_or_else(|| anyhow!("Hamlib's rigctld isn't installed ({})", hamlib_install_hint()))?;
     let (model, port, what) = if m.model == 0 || m.port.is_empty() {
         let g = detect()
             .into_iter()

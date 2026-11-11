@@ -202,8 +202,11 @@ class Station(private val scope: CoroutineScope) {
     }
 
     private fun saveAndRestart() {
-        // Saving lets the engine adopt a USB radio when none was set up.
-        if (saveConfig()) restart()
+        // Saving lets the engine adopt a USB radio when none was set up; if
+        // that changed the radio settings, the engine restarted the station
+        // itself, so restart here only when nothing changed.
+        val before = Core.config()
+        if (saveConfig() && Core.config() == before) restart()
     }
 
     /** Mercury keys the radio differently from the settings: reopen the app. */

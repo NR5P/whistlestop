@@ -34,7 +34,7 @@ WSP has two planes, matching Mercury's two data paths.
 | `uv` | unsigned LEB128 varint (1 byte below 128) |
 | `str` | `uv` length + UTF-8 bytes |
 | `bytes` | `uv` length + raw bytes |
-| `call` | `str`, upper case, at most 12 bytes |
+| `call` | `str`, upper case, at most 12 bytes. A receiver accepts only 1–12 of `A–Z a–z 0–9 / -`; a packet or frame with any other callsign is dropped whole. |
 | `hash32` | 32 bytes, SHA-256 |
 
 ## Link plane
@@ -53,22 +53,22 @@ body   := type(u8) fields...
 | `0x03` | RECEIVED | `uv id` | The CHAT `id` arrived. Sent automatically on receipt, so the sender sees "✓ delivered". (No read receipts and no typing indicators: they cost airtime.) |
 | `0x04` | OFFER | `uv fid`, `str name`, `uv size`, `hash32 sha`, `u8 flags`, `uv files` | A file is offered. `flags` bit 0 = zip made by Whistlestop. `files` = entries inside the zip. |
 | `0x05` | ANSWER | `uv fid`, `u8 accept`, `uv resume_from` | Accept (`1`) or decline (`0`). `resume_from` = bytes already held. |
-| `0x06` | CHUNK | `uv fid`, `uv offset`, `bytes data` | Piece of an accepted file, at most 1024 bytes. |
+| `0x06` | CHUNK | `uv fid`, `uv offset`, `bytes data` | Piece of an accepted file, at most 1024 bytes. Bytes beyond the offered size are ignored. |
 | `0x07` | DONE | `uv fid`, `u8 ok` | The receiver checked the SHA-256: `1` good, `0` bad (sender may offer again). |
-| `0x08` | CANCEL | `uv fid` | Either side stops a transfer. |
+| `0x08` | CANCEL | `uv fid` | Either side stops a transfer. The fid is the offering station's, so a CANCEL can name a file in either direction; Whistlestop starts its own fids at a random number below 2^20 so the two stations' fids don't meet. |
 | `0x09` | REPORT | `i8 snr_db`, `u8 mode_index` | How this station hears the other, sent at most every 30 s while linked. |
 | `0x0A` | BYE | `str text` | Leaving (e.g. `73`). Then the sender disconnects. |
 | `0x0B` | KEYC | `u8 suite`, `hash32 commit` | Encryption only: commitment to this link's public key. |
 | `0x0C` | KEYX | `u8 suite`, `32 bytes pubkey` | Encryption only: the public key, sent after the peer's KEYC arrives. |
 | `0x0D` | SEALED | `ciphertext + 16-byte tag` (rest of body) | Encryption only: one encrypted inner packet. |
-| `0x0E` | MAIL | `uv id`, `str from`, `str to`, `uv created`, `u8 hops`, `str text` | Depot mail, handed over when linked. `to` = this station: it goes to Arrivals; otherwise (relaying on) In Transit. `hops` counts relays (at most 3). |
+| `0x0E` | MAIL | `uv id`, `call from`, `call to`, `uv created`, `u8 hops`, `str text` | Depot mail, handed over when linked. `to` = this station: it goes to Arrivals; otherwise (relaying on) In Transit. `hops` counts relays (at most 3). |
 | `0x0F` | MAILACK | `uv id` | Mail `id` is safely stored; the sender moves it to Delivered. |
 | `0x20` | QSY | `uv id`, `uv dial_hz`, `str why` | "Let's both move to `dial_hz`." The other station decides by its own rules. |
 | `0x21` | QSYANS | `uv id`, `u8 accept`, `str reason` | The answer. When accepted, the asker moves 3 s after it arrives and the answerer once Mercury has sent everything (plus 2 s). Both return to where they were when the link ends. |
 | `0x22` | LIST | `uv id`, `str path` | "What's in your library at `path`?" (`""` = the top). |
 | `0x23` | LISTANS | `uv id`, `str path`, `str note`, `uv n`, n × (`str name`, `uv size`, `u8 dir`) | The listing (at most 200 entries), or none and why in `note`. |
 | `0x24` | FETCH | `uv id`, `str path` | "Please send me this library file." |
-| `0x25` | FETCHANS | `uv id`, `u8 ok`, `str reason` | Refused (with `reason`), or OK: an OFFER with `fid = id` follows, which the asker accepts automatically. |
+| `0x25` | FETCHANS | `uv id`, `u8 ok`, `str reason` | Refused (with `reason`), or OK: an OFFER with `fid = id` follows, which the asker accepts automatically. An `id` equal to a file the sender is already offering is refused ("busy: ask again"). The offer is for this link only: it isn't repeated on a later link. |
 
 **Scheduling.** The sender keeps at most `2 × 1024` bytes of CHUNKs inside
 Mercury's TX buffer (it watches Mercury's `BUFFER` reports), and nothing else
@@ -188,7 +188,7 @@ frame := 0x57 type(u8) uv(table) call(from) fields...
 | Type | Name | Fields | Meaning |
 |---|---|---|---|
 | `0x10` | CALL | `u8 kind`, `str table_name`, `u8 bw_code`, `str grid` | Sent after a CQFRAME: what the CQ is for. `kind` 0 = chat (connect to me), 1 = Roundtable (join on this frequency). |
-| `0x11` | TEXT | `uv id`, `u8 part`, `u8 total`, `bytes data` | One part of a Roundtable message. |
+| `0x11` | TEXT | `uv id`, `u8 part`, `u8 total`, `bytes data` | One part of a Roundtable message. `1 ≤ part ≤ total ≤ 64` (AGAIN's bitmap is 64 bits); other values are dropped. |
 | `0x12` | JOIN | `str table_name`, `i8 snr_of_host` | A station joins, or re-reports how it hears the host. |
 | `0x13` | SPEED | `u8 mode_index` | Host only: everyone moves to this mode after the frame. Sent twice, in the *old* mode. |
 | `0x14` | AGAIN | `call of`, `uv id`, `uv missing` | Please resend the parts of `of`'s message `id` in the bitmap `missing` (bit n = part n+1). |

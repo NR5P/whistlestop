@@ -76,7 +76,43 @@ waits up to 30 s for the other's disconnect (Mercury's takes about 20 s)
 before hanging up itself; doing it sooner collides with theirs. A station
 back from a QSY stays 8 s so the disconnect finishes there.
 
-## Results (Mercury 1.9.23 ×2, 2026-11-10): 18/18 passed, plus Depot 7/7
+That fallback hang-up is an `ABORT` (2026-11-11). As a `DISCONNECT`, Mercury
+deferred it "until delivered" and kept polling the departed station on the
+home frequency for 120 s; on the bench those transmissions muted BRAVO's
+receiver during the first scan trials, which then missed the whistle.
+
+## Results (Mercury 1.9.23 ×2, 2026-11-11, Ubuntu on WSL 2): 34/34
+
+All 34 tests passed: the full run passed everything except scan speed, and
+`qsylib scan` then passed 10/10 once the scan waited for quiet air (below).
+Before these fixes the same bench gave 24/34.
+
+| Test | Result |
+|---|---|
+| Search → whistle → CQFRAME → link | linked after 56 s (incl. search); B tuned +2 Hz from A |
+| Chat both ways + delivered | B→A 9.2 s, A→B 13.7 s |
+| 16 KB binary B→A | 1618 bps goodput on QAM16C2 |
+| No false whistles during link traffic | 0 / 0 |
+| Roundtable | join seen by host, 339-char message in 43 s, ramped to DATAC1 |
+| Depot: away station collects by itself / hangs up when done | 22 s / 29 s |
+| Scan speed (normal, weak, very weak) | 4/4 each; medians 7.3, 4.8, 3.6 s |
+
+Bugs this run found and fixed:
+
+- **A CQ cancelled the call answering it.** Mercury reports an incoming call
+  with PENDING; the CQ carried on and its next CQFRAME, sent during Mercury's
+  accept handshake, made Mercury drop the call. A CQ is now held while a call
+  is arriving. Mercury also sends PENDING/CANCELPENDING around our *own*
+  CQFRAME (VARA-style), so those are told apart by when we sent one.
+- **Automatic links never went idle.** The signal reports both stations send
+  every 30 s no longer count as activity; a collect link ends 10 s after its
+  mail arrives.
+- **A lost disconnect after a QSY** left Mercury polling the departed station
+  for 120 s on the home frequency; the fallback hang-up is now an `ABORT`.
+- **Bench:** the scan scenario waits until neither modem has keyed for 25 s,
+  so the previous link's teardown can't mute the scanner's first trial.
+
+## Earlier results (Mercury 1.9.23 ×2, 2026-11-10): 18/18 passed, plus Depot 7/7
 
 | Test | Result |
 |---|---|

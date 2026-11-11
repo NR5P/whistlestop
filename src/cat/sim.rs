@@ -246,6 +246,8 @@ impl SimRadio {
                 self.out.push_back(0);
             }
             0xE7 => self.out.push_back(0x09),
+            // TX status: bit 7 low while transmitting.
+            0xF7 => self.out.push_back(if self.ptt { 0x00 } else { 0x80 }),
             _ => {}
         }
     }

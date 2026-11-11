@@ -55,7 +55,12 @@ pub enum Cmd {
         fid: u64,
         accept: bool,
     },
-    Cancel(u64),
+    /// Stop a transfer. Both directions are named: the two stations number
+    /// their own files independently, so a fid alone can match one of each.
+    Cancel {
+        fid: u64,
+        dir: Dir,
+    },
     JoinTable(String),
     LeaveTable,
     TableSay(String),
@@ -127,7 +132,7 @@ pub struct ChatLine {
     pub delivered: bool,
 }
 
-#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Dir {
     Out,
     In,
@@ -611,6 +616,9 @@ struct Station {
     table_msg_id: u64,
     table_queue: VecDeque<Vec<u8>>,
     table_busy_until: Instant,
+    /// Left a Roundtable: go back to the calling mode (DATAC3) once the
+    /// LEAVE has gone out in the table's own mode.
+    restore_calling_mode: bool,
     last_ramp: Instant,
     last_downgrade: Instant,
     last_again: Instant,
@@ -618,6 +626,12 @@ struct Station {
     search: Option<Search>,
     cq: Option<Cq>,
     last_watch: Instant,
+    /// Whistle watch rests until then: Mercury's connect and disconnect
+    /// bursts are wideband and can look like a whistle to the detector.
+    watch_quiet_until: Instant,
+    /// A first detection waiting for a second, agreeing one before it is
+    /// reported (when, offset).
+    watch_pending: Option<(Instant, f64)>,
     wide_on: bool,
     wide_auto: bool,
     /// Hits already handed to the radio, so one caller isn't chased forever.
@@ -645,6 +659,10 @@ struct Station {
     last_link_activity: Instant,
     /// Why we connected automatically (deliver or collect), if we did.
     link_auto: Option<bool>,
+    /// Mail arrived on this link (a collect link can end soon after).
+    link_got_mail: bool,
+    /// We asked Mercury for a CQFRAME (when; whether its PENDING has come).
+    own_cq_pending: Option<(Instant, bool)>,
     /// Per-station cooldown for notices and automatic connects.
     auto_cooldown: HashMap<String, Instant>,
     /// QSY in force: (home dial, dial now).
@@ -666,6 +684,8 @@ struct Station {
     bye_at: Option<Instant>,
     /// Library downloads we asked for (their offers are accepted at once).
     wanted: std::collections::HashSet<u64>,
+    /// Library files we're sending on this link (fids): dropped when it ends.
+    library_out: std::collections::HashSet<u64>,
     last_sched: Option<Instant>,
     sched_slot: Option<usize>,
     /// Roundtable host: the speed to switch to once the announcement is out.
@@ -769,7 +789,10 @@ impl Station {
             outgoing: vec![],
             incoming: HashMap::new(),
             mercury_buffer: 0,
-            next_fid: 1,
+            // Each station numbers its own files. Starting at a random point
+            // keeps the two stations' numbers apart, so a CANCEL (which
+            // either side may send) can't name the wrong file.
+            next_fid: rand::random_range(1..1u64 << 20),
             next_chat_id: 1,
             est: ThroughputEstimator::default(),
             last_report: Instant::now(),
@@ -778,12 +801,15 @@ impl Station {
             table_msg_id: 0,
             table_queue: VecDeque::new(),
             table_busy_until: Instant::now(),
+            restore_calling_mode: false,
             last_ramp: Instant::now(),
             last_downgrade: Instant::now() - Duration::from_secs(600),
             last_again: Instant::now(),
             search: None,
             cq: None,
             last_watch: Instant::now(),
+            watch_quiet_until: Instant::now(),
+            watch_pending: None,
             wide_on: cfg.sdr.wide_search,
             wide_auto: cfg.sdr.wide_auto,
             wide_tried: vec![],
@@ -825,6 +851,8 @@ impl Station {
             last_beacon: Instant::now(),
             last_link_activity: Instant::now(),
             link_auto: None,
+            link_got_mail: false,
+            own_cq_pending: None,
             auto_cooldown: HashMap::new(),
             qsy: None,
             qsy_out: None,
@@ -836,6 +864,7 @@ impl Station {
             hangup_at: None,
             bye_at: None,
             wanted: Default::default(),
+            library_out: Default::default(),
             last_sched: None,
             sched_slot: None,
             pending_speed: None,
@@ -1148,6 +1177,30 @@ impl Station {
         *self.vfo.lock().unwrap()
     }
 
+    /// Mercury holds a 1:1 link only within about ±55 Hz: moving the dial
+    /// by hand mid-link drops it silently and leaves both modems polling for
+    /// minutes. (A QSY moves both stations together and doesn't come here.)
+    fn no_retune_while_linked(&self) -> anyhow::Result<()> {
+        if self.peer.is_some() || self.st.lock().unwrap().calling.is_some() {
+            anyhow::bail!("not while linked: retuning would break the link. Disconnect first");
+        }
+        Ok(())
+    }
+
+    /// Rest the whistle watch for 8 s: Mercury's connect bursts can look
+    /// like a whistle.
+    fn quiet_watch(&mut self) {
+        self.quiet_watch_for(8.0);
+    }
+
+    fn quiet_watch_for(&mut self, secs: f64) {
+        let until = Instant::now() + Duration::from_secs_f64(secs.max(0.0));
+        if until > self.watch_quiet_until {
+            self.watch_quiet_until = until;
+        }
+        self.watch_pending = None;
+    }
+
     async fn tune(&mut self, hz: f64) -> anyhow::Result<()> {
         if let Some(r) = self.rig.as_mut() {
             r.set_freq(hz).await?;
@@ -1365,10 +1418,12 @@ impl Station {
                 self.cfg.bandwidth = keep_bw;
             }
             Cmd::SetFreq(hz) => {
+                self.no_retune_while_linked()?;
                 self.stop_search("tuned by hand");
                 self.tune(hz).await?;
             }
             Cmd::Nudge(d) => {
+                self.no_retune_while_linked()?;
                 let f = self.dial() + d;
                 self.tune(f).await?;
                 self.log(format!("Tuned {d:+.0} Hz to {:.3} kHz", f / 1e3));
@@ -1414,29 +1469,17 @@ impl Station {
             Cmd::StartSearch(scope) => self.start_search(scope).await?,
             Cmd::StopSearch => self.stop_search("stopped"),
             Cmd::CallCq { table } => self.start_cq(table).await?,
-            Cmd::StopCq => {
-                if let Some(m) = &self.monitor {
-                    m.lock().unwrap().clear_tx();
-                }
-                if let Some(Cq {
-                    phase: CqPhase::Whistle { .. },
-                    ..
-                }) = &self.cq
-                    && let Some(o) = &self.output
-                {
-                    o.abort();
-                }
-                self.cq = None;
-                self.ptt(false).await;
-                self.set(|g| g.cq = CqView::default());
-                self.log("CQ stopped".into());
-            }
+            Cmd::StopCq => self.stop_cq("CQ stopped").await,
             Cmd::Connect(call) => {
                 let call = call.trim().to_uppercase();
+                if !crate::protocol::valid_call(&call) {
+                    anyhow::bail!("{call:?} isn't a callsign");
+                }
                 self.stop_search("connecting");
                 let me = self.mycall();
                 self.tnc()?.command(&format!("CONNECT {me} {call}")).await?;
                 self.set(|g| g.calling = Some(call.clone()));
+                self.quiet_watch();
                 self.log(format!("Calling {call}…"));
             }
             Cmd::Disconnect => {
@@ -1445,6 +1488,7 @@ impl Station {
                 } else {
                     self.tnc()?.command("DISCONNECT").await?;
                 }
+                self.quiet_watch();
                 self.set(|g| g.calling = None);
             }
             Cmd::Chat(text) => {
@@ -1472,13 +1516,17 @@ impl Station {
             }
             Cmd::SendFiles { paths, zip } => self.queue_files(paths, zip).await?,
             Cmd::AnswerOffer { fid, accept } => self.answer_offer(fid, accept).await?,
-            Cmd::Cancel(fid) => {
-                self.outgoing.retain(|o| o.fid != fid);
-                if let Some(i) = self.incoming.remove(&fid) {
-                    i.save_partial();
+            Cmd::Cancel { fid, dir } => {
+                match dir {
+                    Dir::Out => self.outgoing.retain(|o| o.fid != fid),
+                    Dir::In => {
+                        if let Some(i) = self.incoming.remove(&fid) {
+                            i.save_partial();
+                        }
+                    }
                 }
                 self.hi_queue.push_back(Link::Cancel { fid });
-                self.xfer(fid, |t| t.state = XferState::Failed("cancelled".into()));
+                self.xfer(dir, fid, |t| t.state = XferState::Failed("cancelled".into()));
                 self.pump().await?;
             }
             Cmd::JoinTable(name) => self.join_table(name, false).await?,
@@ -1495,6 +1543,9 @@ impl Station {
                     );
                 }
                 self.set(|g| g.table = None);
+                // A table that ramped up (say to DATAC1) left Mercury
+                // listening there, deaf to the DATAC3 calls everyone else uses.
+                self.restore_calling_mode = true;
                 self.log("Left the Roundtable".into());
             }
             Cmd::TableSay(text) => self.table_say(text)?,
@@ -1785,6 +1836,7 @@ impl Station {
         if self.cq.is_some() {
             anyhow::bail!("stop calling CQ first");
         }
+        self.no_retune_while_linked()?;
         let segs = bandplan::segments_for(&scope, &self.cfg.segments, self.dial());
         if segs.is_empty() {
             anyhow::bail!(
@@ -2128,6 +2180,50 @@ impl Station {
         Ok(())
     }
 
+    async fn stop_cq(&mut self, why: &str) {
+        if self.cq.is_none() {
+            return;
+        }
+        if let Some(m) = &self.monitor {
+            m.lock().unwrap().clear_tx();
+        }
+        if let Some(Cq {
+            phase: CqPhase::Whistle { .. },
+            ..
+        }) = &self.cq
+            && let Some(o) = &self.output
+        {
+            o.abort();
+        }
+        self.cq = None;
+        self.ptt(false).await;
+        self.set(|g| g.cq = CqView::default());
+        self.log(why.into());
+    }
+
+    /// A station is connecting to us (Mercury said PENDING): the CQ goes
+    /// quiet, so no whistle or CQFRAME is sent on top of Mercury's accept
+    /// handshake (that cancels the incoming call). It stays held until the
+    /// call connects (the CQ ends) or is cancelled (the CQ carries on).
+    async fn hold_cq(&mut self) {
+        let Some(cq) = self.cq.as_mut() else { return };
+        let whistling = matches!(cq.phase, CqPhase::Whistle { .. });
+        // Mercury gives up on an incoming call after about 45 s.
+        cq.phase = CqPhase::Listen {
+            until: Instant::now() + Duration::from_secs(60),
+        };
+        if whistling {
+            if let Some(o) = &self.output {
+                o.abort();
+            }
+            if let Some(m) = &self.monitor {
+                m.lock().unwrap().clear_tx();
+            }
+            self.ptt(false).await;
+        }
+        self.log("Incoming call: CQ on hold".into());
+    }
+
     async fn begin_cq_cycle(&mut self) {
         let Some(cq) = self.cq.as_mut() else { return };
         cq.cycle += 1;
@@ -2172,6 +2268,9 @@ impl Station {
                 self.ptt(false).await;
                 let me = self.mycall();
                 let arq_bw = self.bw.mercury_arq_bw();
+                // Mercury answers its own CQFRAME transmission with PENDING
+                // (on air) and CANCELPENDING (done), VARA-style: not a call.
+                self.own_cq_pending = Some((Instant::now(), false));
                 self.tnc()?
                     .command(&format!("CQFRAME {me} {arq_bw}"))
                     .await?;
@@ -2209,7 +2308,14 @@ impl Station {
             CqPhase::Frame { until } if Instant::now() >= *until => Some(CqPhase::Listen {
                 until: Instant::now() + Duration::from_secs_f64(self.cfg.cq_listen_s),
             }),
-            CqPhase::Listen { until } if Instant::now() >= *until => {
+            // The next whistle waits for a Roundtable host's table traffic,
+            // so the two never go out on top of each other. (An incoming
+            // call holds the CQ through `until`: see hold_cq.)
+            CqPhase::Listen { until }
+                if Instant::now() >= *until
+                    && self.table_queue.is_empty()
+                    && Instant::now() >= self.table_busy_until =>
+            {
                 if cycle >= cycles {
                     self.log("No answer to CQ".into());
                     self.cq = None;
@@ -2305,7 +2411,9 @@ impl Station {
                 let Some((peer, bw)) = parse_connected(&l, &self.mycall()) else {
                     return Ok(());
                 };
+                self.quiet_watch();
                 self.stop_search("— linked");
+                self.link_got_mail = false;
                 if self.cq.take().is_some() {
                     if let Some(o) = &self.output {
                         o.abort();
@@ -2384,6 +2492,9 @@ impl Station {
                 self.on_bodies(early).await?;
             }
             "DISCONNECTED" => {
+                // The other modem can keep sending teardown bursts for a
+                // while (up to ~25 s seen on the bench).
+                self.quiet_watch_for(30.0);
                 self.link_auto = None;
                 // Forget the session keys (they wipe themselves on drop).
                 self.e2e = None;
@@ -2419,6 +2530,9 @@ impl Station {
                     // here and the other station hears it too.
                     self.qsy_home = Some((home, at, Instant::now()));
                 }
+                // Library files were for that station only.
+                let lib = std::mem::take(&mut self.library_out);
+                self.outgoing.retain(|o| !lib.contains(&o.fid));
                 for o in self.outgoing.iter_mut() {
                     o.next = None; // re-offer (with resume) on the next link
                 }
@@ -2429,30 +2543,66 @@ impl Station {
                     g.calling = None;
                     g.incoming_call = false;
                     for t in g.transfers.iter_mut() {
+                        let library = t.dir == Dir::Out && lib.contains(&t.fid);
                         if matches!(
                             t.state,
                             XferState::Sending | XferState::Receiving | XferState::Offered
                         ) {
-                            t.state =
-                                XferState::Failed("link ended — will resume next time".into());
+                            t.state = XferState::Failed(if library {
+                                "link ended".into()
+                            } else {
+                                "link ended — will resume next time".into()
+                            });
+                        } else if t.state == XferState::WaitingForYou {
+                            // Nothing to answer any more: the sender offers it
+                            // again on the next link.
+                            t.state = XferState::Failed("link ended before you answered".into());
                         }
                     }
                 });
             }
             "PENDING" => {
-                if self.cq.is_none() {
-                    self.set(|g| g.incoming_call = true);
+                // Our own CQFRAME going out (see step_cq), not a station
+                // calling us.
+                if let Some((at, seen)) = self.own_cq_pending.as_mut()
+                    && !*seen
+                    && at.elapsed() < Duration::from_secs(10)
+                {
+                    *seen = true;
+                    return Ok(());
+                }
+                self.quiet_watch();
+                self.set(|g| g.incoming_call = true);
+                if self.cq.is_some() {
+                    self.hold_cq().await;
+                } else if let Some(s) = self.search.as_mut() {
                     // Hold the search: a connect is arriving here.
-                    if let Some(s) = self.search.as_mut() {
-                        s.phase = SearchPhase::WaitCq {
-                            until: Instant::now() + Duration::from_secs(60),
-                        };
-                    }
+                    s.phase = SearchPhase::WaitCq {
+                        until: Instant::now() + Duration::from_secs(60),
+                    };
                 }
             }
-            "CANCELPENDING" => self.set(|g| g.incoming_call = false),
+            "CANCELPENDING" => {
+                // Our own CQFRAME is done.
+                if let Some((_, true)) = self.own_cq_pending {
+                    self.own_cq_pending = None;
+                    return Ok(());
+                }
+                self.set(|g| g.incoming_call = false);
+                // A held CQ carries on with its next cycle.
+                if let Some(Cq {
+                    phase: CqPhase::Listen { until },
+                    ..
+                }) = self.cq.as_mut()
+                {
+                    *until = Instant::now();
+                }
+            }
             "CQFRAME" => {
                 let call = l.split_whitespace().nth(1).unwrap_or("?").to_string();
+                if !crate::protocol::valid_call(&call) {
+                    return Ok(());
+                }
                 let dial = self.dial();
                 self.log(format!("📣 CQ from {call} on {:.3} kHz", dial / 1e3));
                 self.add_heard(&call, "CQ".into(), None);
@@ -2588,6 +2738,11 @@ impl Station {
 
     async fn on_link(&mut self, p: Link) -> anyhow::Result<()> {
         let peer = self.peer.clone().unwrap_or_default();
+        // Real traffic (a file piece too) keeps the link from counting as
+        // idle; the signal reports both stations send every 30 s don't.
+        if !matches!(p, Link::Report { .. }) {
+            self.last_link_activity = Instant::now();
+        }
         match p {
             Link::Qsy { id, dial_hz, why } => {
                 let hz = dial_hz as f64;
@@ -2668,8 +2823,19 @@ impl Station {
                     note,
                 })
             }),
+            // The reply is offered under the asker's id. One that matches a
+            // file already going out would mix the two up.
+            Link::Fetch { id, .. } if self.outgoing.iter().any(|o| o.fid == id) => {
+                self.hi_queue.push_back(Link::FetchAnswer {
+                    id,
+                    ok: false,
+                    reason: "busy: ask again".into(),
+                });
+            }
             Link::Fetch { id, path } => match self.library_file(&path) {
                 Ok((name, data)) => {
+                    // Only for this link: never offered to whoever links next.
+                    self.library_out.insert(id);
                     self.log(format!("📚 Sending {path} from the library to {peer}"));
                     self.hi_queue.push_back(Link::FetchAnswer {
                         id,
@@ -2801,14 +2967,14 @@ impl Station {
                                 modes::human_bytes(resume_from as usize)
                             ));
                         }
-                        self.xfer(fid, |t| {
+                        self.xfer(Dir::Out, fid, |t| {
                             t.state = XferState::Sending;
                             t.done = resume_from;
                             t.started = Some(Instant::now());
                         });
                     } else {
                         self.outgoing.retain(|o| o.fid != fid);
-                        self.xfer(fid, |t| t.state = XferState::Declined);
+                        self.xfer(Dir::Out, fid, |t| t.state = XferState::Declined);
                     }
                 }
                 self.pump().await?;
@@ -2822,11 +2988,11 @@ impl Station {
                     if have % (16 * CHUNK as u64) < CHUNK as u64 {
                         inc.save_partial();
                     }
-                    progress = Some((have, inc.size - have, inc.complete()));
+                    progress = Some((have, inc.size.saturating_sub(have), inc.complete()));
                 }
                 if let Some((have, left, complete)) = progress {
                     let eta = self.est.eta_s(left as usize, self.bw);
-                    self.xfer(fid, |t| {
+                    self.xfer(Dir::In, fid, |t| {
                         t.done = have;
                         t.eta_s = eta;
                     });
@@ -2840,11 +3006,11 @@ impl Station {
                         Ok(path) => {
                             self.hi_queue.push_back(Link::Done { fid, ok: true });
                             self.log(format!("✓ Received {name} → {}", path.display()));
-                            self.xfer(fid, |t| t.state = XferState::Done(Some(path)));
+                            self.xfer(Dir::In, fid, |t| t.state = XferState::Done(Some(path)));
                         }
                         Err(e) => {
                             self.hi_queue.push_back(Link::Done { fid, ok: false });
-                            self.xfer(fid, |t| t.state = XferState::Failed(e.to_string()));
+                            self.xfer(Dir::In, fid, |t| t.state = XferState::Failed(e.to_string()));
                         }
                     }
                     self.pump().await?;
@@ -2852,7 +3018,7 @@ impl Station {
             }
             Link::Done { fid, ok } => {
                 self.outgoing.retain(|o| o.fid != fid);
-                self.xfer(fid, |t| {
+                self.xfer(Dir::Out, fid, |t| {
                     t.state = if ok {
                         XferState::Done(None)
                     } else {
@@ -2862,11 +3028,18 @@ impl Station {
                 });
             }
             Link::Cancel { fid } => {
-                self.outgoing.retain(|o| o.fid != fid);
-                if let Some(i) = self.incoming.remove(&fid) {
+                // Either side may cancel, so the fid is the sender's (a file
+                // coming here) or ours (a file going there). A file coming
+                // here takes precedence: our own numbers start at a random
+                // point, so the two hardly ever meet.
+                let dir = if let Some(i) = self.incoming.remove(&fid) {
                     i.save_partial();
-                }
-                self.xfer(fid, |t| {
+                    Dir::In
+                } else {
+                    self.outgoing.retain(|o| o.fid != fid);
+                    Dir::Out
+                };
+                self.xfer(dir, fid, |t| {
                     t.state = XferState::Failed(format!("cancelled by {peer}"))
                 });
             }
@@ -2907,6 +3080,7 @@ impl Station {
                 text,
             } => {
                 self.last_link_activity = Instant::now();
+                self.link_got_mail = true;
                 let m = crate::depot::Mail {
                     id,
                     from: from.clone(),
@@ -2977,9 +3151,16 @@ impl Station {
         Ok(())
     }
 
-    fn xfer(&self, fid: u64, f: impl FnOnce(&mut Transfer)) {
+    /// Update the newest transfer row with this direction and fid. Both are
+    /// needed: incoming rows carry the sender's numbers, outgoing rows ours.
+    fn xfer(&self, dir: Dir, fid: u64, f: impl FnOnce(&mut Transfer)) {
         let mut g = self.st.lock().unwrap();
-        if let Some(t) = g.transfers.iter_mut().rev().find(|t| t.fid == fid) {
+        if let Some(t) = g
+            .transfers
+            .iter_mut()
+            .rev()
+            .find(|t| t.fid == fid && t.dir == dir)
+        {
             f(t);
         }
     }
@@ -3070,7 +3251,21 @@ impl Station {
     }
 
     async fn answer_offer(&mut self, fid: u64, accept: bool) -> anyhow::Result<()> {
-        let have = self.incoming.get(&fid).map(|i| i.have()).unwrap_or(0);
+        // Only an offer on the current link can be answered; an answer queued
+        // now would otherwise go out on whatever link comes next.
+        let Some(have) = self
+            .incoming
+            .get(&fid)
+            .map(|i| i.have())
+            .filter(|_| self.peer.is_some())
+        else {
+            self.xfer(Dir::In, fid, |t| {
+                if t.state == XferState::WaitingForYou {
+                    t.state = XferState::Failed("link ended before you answered".into());
+                }
+            });
+            anyhow::bail!("that offer is no longer open: the link it came on has ended");
+        };
         if !accept {
             self.incoming.remove(&fid);
         }
@@ -3079,7 +3274,7 @@ impl Station {
             accept,
             resume_from: have,
         });
-        self.xfer(fid, |t| {
+        self.xfer(Dir::In, fid, |t| {
             t.state = if accept {
                 XferState::Receiving
             } else {
@@ -3130,10 +3325,11 @@ impl Station {
             };
             self.mercury_buffer += bytes.len();
             self.tnc()?.send_data(&bytes).await?;
+            self.last_link_activity = Instant::now();
             let eta = self
                 .est
                 .eta_s(total - sent as usize + self.mercury_buffer, self.bw);
-            self.xfer(fid, |t| {
+            self.xfer(Dir::Out, fid, |t| {
                 t.done = sent.saturating_sub(self.mercury_buffer as u64);
                 t.eta_s = eta;
             });
@@ -3152,7 +3348,13 @@ impl Station {
         if name.is_empty() {
             anyhow::bail!("give the Roundtable a name");
         }
+        // A Roundtable switches Mercury to broadcast modes, which would cut
+        // a 1:1 link off mid-sentence.
+        if self.peer.is_some() {
+            anyhow::bail!("you're in a 1:1 link: disconnect first, then join the Roundtable");
+        }
         let id = table_id(&name);
+        self.restore_calling_mode = false;
         let mode = modes::mode_by_name("DATAC3").unwrap();
         self.tnc()?.command(&format!("MODE {}", mode.index)).await?;
         self.set(|g| {
@@ -3239,7 +3441,26 @@ impl Station {
         if Instant::now() < self.table_busy_until || self.tnc.is_none() {
             return Ok(());
         }
+        // Our own CQ whistle is on the air: a table frame now would be sent
+        // on top of it and nobody would copy either.
+        if matches!(
+            self.cq.as_ref().map(|c| &c.phase),
+            Some(CqPhase::Whistle { .. })
+        ) {
+            return Ok(());
+        }
         let Some(f) = self.table_queue.pop_front() else {
+            if self.restore_calling_mode
+                && self.peer.is_none()
+                && self.st.lock().unwrap().table.is_none()
+            {
+                self.restore_calling_mode = false;
+                let calling = modes::mode_by_name("DATAC3").expect("DATAC3");
+                self.tnc()?
+                    .command(&format!("MODE {}", calling.index))
+                    .await?;
+                self.set(|g| g.listen_mode = Some(calling));
+            }
             self.set(|g| {
                 if let Some(t) = g.table.as_mut() {
                     t.sending_eta_s = 0.0;
@@ -3433,6 +3654,16 @@ impl Station {
             .unwrap()
             .listen_mode
             .unwrap_or(&modes::MODES[4]);
+        // Calls for the table go out in its mode; newcomers listen in DATAC3
+        // and couldn't copy them any more, so the CQ for the table ends, and
+        // first, so the announcements don't go out over a whistle.
+        if m.name != "DATAC3" && self.cq.as_ref().is_some_and(|c| c.table.is_some()) {
+            self.stop_cq(&format!(
+                "CQ for the Roundtable ends: the table now runs at {}, which stations still calling at DATAC3 can't copy",
+                m.name
+            ))
+            .await;
+        }
         self.tnc()?.send_broadcast(&f).await?;
         self.tnc()?.send_broadcast(&f).await?;
         let at = Instant::now() + Duration::from_secs_f64(2.0 * old.frame_s + 3.0);
@@ -3632,7 +3863,20 @@ impl Station {
     }
 
     fn qsy_verdict(&self, hz: f64) -> Result<(), String> {
-        qsy_verdict(&self.cfg, self.qsy.map(|q| q.0).unwrap_or(self.dial()), hz)
+        qsy_verdict(&self.cfg, self.qsy.map(|q| q.0).unwrap_or(self.dial()), hz)?;
+        // Unattended, the new frequency must be one where automatic control
+        // is allowed too, like everywhere else the away station transmits.
+        if self.away
+            && self.cfg.auto_in_segments_only
+            && !self
+                .cfg
+                .segments
+                .iter()
+                .any(|s| hz + 300.0 >= s.lo_hz && hz + 2700.0 <= s.hi_hz)
+        {
+            return Err("I'm away: only within the automatic-control segments".into());
+        }
+        Ok(())
     }
 
     /// End the link politely: BYE, then DISCONNECT once Mercury has sent it.
@@ -3650,7 +3894,10 @@ impl Station {
             } else if at.elapsed() > Duration::from_secs(30) {
                 self.bye_at = None;
                 self.log("The other station said 73 but its disconnect didn't arrive; hanging up from here".into());
-                self.tnc()?.command("DISCONNECT").await?;
+                // ABORT, not DISCONNECT: they've gone (after a QSY, maybe to
+                // another frequency), and Mercury would otherwise hold a
+                // DISCONNECT "until delivered", polling nobody for minutes.
+                self.tnc()?.command("ABORT").await?;
             }
         }
         if let Some(at) = self.hangup_at {
@@ -3676,8 +3923,12 @@ impl Station {
                     at / 1e3,
                     home / 1e3
                 ));
+                self.set(|g| g.qsy = None);
+            } else {
+                // A new link came up here first: still away from home, so go
+                // back when this one ends.
+                self.qsy = Some((home, at));
             }
-            self.set(|g| g.qsy = None);
         }
         if let Some((hz, at, asked)) = self.qsy_move {
             // Both move a moment after the answer has crossed: the station
@@ -3845,6 +4096,9 @@ impl Station {
 
     fn send_beacon(&mut self, why: &str) -> anyhow::Result<()> {
         if self.tnc.is_none() {
+            // Counts as an attempt: otherwise the automation step would retry
+            // (and fail, skipping the rest of the tick) ten times a second.
+            self.last_beacon = Instant::now();
             anyhow::bail!("Mercury is not connected");
         }
         let me = self.mycall();
@@ -3962,7 +4216,9 @@ impl Station {
             let idle = self.last_link_activity.elapsed().as_secs_f64();
             let done = match self.link_auto {
                 Some(true) => self.depot.waiting_for(&peer).is_empty() && idle > 8.0,
-                Some(false) => idle > 20.0,
+                // Collecting: once mail has come, 10 s of quiet ends it; until
+                // then wait up to a minute (it took 23 s to cross on the bench).
+                Some(false) => idle > if self.link_got_mail { 10.0 } else { 60.0 },
                 None => self.away && idle > self.cfg.away_idle_s,
             };
             if done && self.mercury_buffer == 0 {
@@ -4170,7 +4426,15 @@ impl Station {
             return;
         }
         self.last_watch = Instant::now();
-        if self.st.lock().unwrap().tx || self.peer.is_some() {
+        // Rest while transmitting, linked, calling or being called, and for a
+        // while after links start and end: Mercury's connect and disconnect
+        // bursts can look like a whistle.
+        let busy = {
+            let g = self.st.lock().unwrap();
+            g.tx || g.calling.is_some() || g.incoming_call
+        };
+        if busy || self.peer.is_some() || Instant::now() < self.watch_quiet_until {
+            self.watch_pending = None;
             return;
         }
         let n = (secs * FS as f64) as usize;
@@ -4187,8 +4451,22 @@ impl Station {
         else {
             return;
         };
-        if let Some(mut d) = self.detector.detect(&x) {
-            d.offset_hz = self.fine_offset(h.offset_hz, d.offset_hz);
+        let Some(mut d) = self.detector.detect(&x) else {
+            self.watch_pending = None;
+            return;
+        };
+        d.offset_hz = self.fine_offset(h.offset_hz, d.offset_hz);
+        // Report only when two checks in a row (about a second apart) agree
+        // on the offset: a single data burst isn't a whistle.
+        let agreed = self
+            .watch_pending
+            .is_some_and(|(at, off)| at.elapsed() < Duration::from_secs(3) && (off - d.offset_hz).abs() <= 15.0);
+        if !agreed {
+            self.watch_pending = Some((Instant::now(), d.offset_hz));
+            return;
+        }
+        self.watch_pending = None;
+        {
             let dial = self.dial();
             let fresh = self
                 .st
@@ -4222,8 +4500,12 @@ pub fn qsy_verdict(cfg: &Config, home: f64, hz: f64) -> Result<(), String> {
         return Err("QSY requests are turned off here".into());
     }
     let here = bandplan::band_of(home);
-    let Some(there) = bandplan::band_of(hz) else {
-        return Err("not an amateur band I can use".into());
+    // The signal, not just the dial, must be inside the band: USB puts it
+    // 300–2700 Hz above the dial.
+    let Some(there) = bandplan::band_of(hz + 300.0)
+        .filter(|b| bandplan::band_of(hz + 2700.0) == Some(*b))
+    else {
+        return Err("not an amateur band I can use (the whole signal must fit inside it)".into());
     };
     if cfg.qsy_same_band {
         if Some(there) != here {

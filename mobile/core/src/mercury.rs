@@ -23,14 +23,30 @@ unsafe extern "C" {
     fn mercury_ui_set_android_audio_devices(list: *const c_char);
 }
 
+/// A running Mercury, and everything `mercury_init` was handed: Mercury
+/// may keep any of those pointers (argv, its strings, the config and log
+/// paths) for as long as it runs, so they live here until it stops.
 struct Running {
-    /// The argument strings must outlive the engine (it may keep pointers).
     _args: Vec<CString>,
+    _argv: Vec<*mut c_char>,
+    _cfg: CString,
+    _log: CString,
+    port: u16,
+    bcast: u16,
     /// Where it keys the radio (a rigctld), if anywhere.
     ptt: Option<String>,
 }
 
+// SAFETY: the raw pointers in `_argv` point into `_args`, which this struct
+// owns; Rust never reads or writes through them, so moving the struct to
+// another thread (behind RUNNING's mutex) is fine.
+unsafe impl Send for Running {}
+
 static RUNNING: Mutex<Option<Running>> = Mutex::new(None);
+
+fn running_slot() -> std::sync::MutexGuard<'static, Option<Running>> {
+    RUNNING.lock().unwrap_or_else(|e| e.into_inner())
+}
 
 /// The sound system Mercury uses on this phone.
 pub const SOUND: &str = if cfg!(target_os = "android") { "aaudio" } else { "coreaudio" };
@@ -48,7 +64,7 @@ pub fn start(
     output: &str,
     ptt: Option<&str>,
 ) -> anyhow::Result<()> {
-    let mut g = RUNNING.lock().unwrap();
+    let mut g = running_slot();
     if g.is_some() {
         return Ok(());
     }
@@ -80,8 +96,8 @@ pub fn start(
     args.extend(["-C".into(), ini.to_string_lossy().into_owned()]);
     let c: Vec<CString> = args
         .iter()
-        .map(|a| CString::new(a.as_str()).unwrap())
-        .collect();
+        .map(|a| CString::new(a.as_str()))
+        .collect::<Result<_, _>>()?;
     let mut argv: Vec<*mut c_char> = c.iter().map(|s| s.as_ptr() as *mut c_char).collect();
     argv.push(std::ptr::null_mut());
     let cfg = CString::new(ini.to_string_lossy().as_bytes())?;
@@ -92,26 +108,39 @@ pub fn start(
     }
     *g = Some(Running {
         _args: c,
+        _argv: argv,
+        _cfg: cfg,
+        _log: log,
+        port,
+        bcast,
         ptt: ptt.map(str::to_owned),
     });
     Ok(())
 }
 
 pub fn running() -> bool {
-    RUNNING.lock().unwrap().is_some()
+    running_slot().is_some()
+}
+
+/// The (TNC, broadcast) ports of the Mercury running in the app.
+pub fn ports() -> Option<(u16, u16)> {
+    running_slot().as_ref().map(|r| (r.port, r.bcast))
 }
 
 /// Where the running Mercury keys the radio.
 pub fn ptt() -> Option<String> {
-    RUNNING.lock().unwrap().as_ref().and_then(|r| r.ptt.clone())
+    running_slot().as_ref().and_then(|r| r.ptt.clone())
 }
 
 pub fn stop() {
-    if RUNNING.lock().unwrap().take().is_some() {
+    let mut g = running_slot();
+    if g.is_some() {
         unsafe {
             mercury_request_shutdown();
             mercury_shutdown();
         }
+        // Only now that Mercury has shut down may its arguments go.
+        *g = None;
     }
 }
 

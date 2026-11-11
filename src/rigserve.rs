@@ -41,18 +41,56 @@ pub async fn serve(radio: CatHandle, port: u16) -> Result<RigServer> {
     Ok(RigServer { task, addr })
 }
 
+/// Unkeys the radio when a client that keyed it goes away (closes the
+/// connection, drops it, or the server stops), so a program that crashes
+/// or loses its link mid-transmission doesn't leave the radio on the air.
+struct KeyGuard {
+    radio: CatHandle,
+    keyed: bool,
+}
+
+impl Drop for KeyGuard {
+    fn drop(&mut self) {
+        if self.keyed {
+            self.radio.send(|d| {
+                let _ = d.set_ptt(false);
+            });
+        }
+    }
+}
+
+/// `Some(on)` if this line asks to set PTT.
+fn ptt_request(line: &str) -> Option<bool> {
+    let line = line.trim_start_matches(['+', ';', '|', ',']);
+    let mut it = line.split_whitespace();
+    matches!(it.next(), Some("T" | "\\set_ptt")).then(|| it.next().unwrap_or("") != "0")
+}
+
 async fn client(s: TcpStream, radio: CatHandle) {
     let _ = s.set_nodelay(true);
     let (r, mut w) = s.into_split();
     let mut lines = BufReader::new(r).lines();
+    let mut guard = KeyGuard {
+        radio: radio.clone(),
+        keyed: false,
+    };
     while let Ok(Some(line)) = lines.next_line().await {
         let line = line.trim();
         if line.is_empty() {
             continue;
         }
+        let ptt = ptt_request(line);
+        // Count a key-up as ours even if it reported an error (the radio
+        // may have keyed anyway); only a confirmed unkey clears it.
+        if ptt == Some(true) {
+            guard.keyed = true;
+        }
         let Some(reply) = answer(&radio, line).await else {
             break;
         };
+        if ptt == Some(false) && reply == OK {
+            guard.keyed = false;
+        }
         if w.write_all(reply.as_bytes()).await.is_err() {
             break;
         }
@@ -269,6 +307,55 @@ mod tests {
         assert_eq!(ask(&mut s, "T 0", 1).await, ["RPRT 0"]);
         assert_eq!(ask(&mut s, "\\chk_vfo", 1).await, ["0"]);
         assert_eq!(ask(&mut s, "w FA;", 1).await, ["RPRT -4"]);
+    }
+
+    /// A client that keyed the radio and then vanished leaves it unkeyed.
+    #[tokio::test]
+    async fn unkeys_when_a_keying_client_disconnects() {
+        let d = crate::cat::kenwood::Kenwood::new(
+            Box::new(SimRadio::new(Kind::Kenwood("023"))),
+            "023",
+            false,
+            100.0,
+        )
+        .unwrap();
+        let srv = serve(CatHandle::start(Box::new(d)), 0).await.unwrap();
+        let mut watcher = BufReader::new(TcpStream::connect(&srv.addr).await.unwrap());
+        // Keys, then drops the connection without unkeying.
+        let mut s = BufReader::new(TcpStream::connect(&srv.addr).await.unwrap());
+        assert_eq!(ask(&mut s, "T 1", 1).await, ["RPRT 0"]);
+        assert_eq!(ask(&mut watcher, "t", 1).await, ["1"]);
+        drop(s);
+        let t = std::time::Instant::now();
+        while ask(&mut watcher, "t", 1).await != ["0"] {
+            assert!(t.elapsed().as_secs() < 5, "still transmitting");
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        // One that unkeyed itself, or never keyed, changes nothing when it
+        // goes: the watcher's own key-up stays.
+        assert_eq!(ask(&mut watcher, "T 1", 1).await, ["RPRT 0"]);
+        let mut s = BufReader::new(TcpStream::connect(&srv.addr).await.unwrap());
+        assert_eq!(ask(&mut s, "f", 1).await, ["14074000"]);
+        drop(s);
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        assert_eq!(ask(&mut watcher, "t", 1).await, ["1"]);
+        assert_eq!(ask(&mut watcher, "q", 0).await, Vec::<String>::new());
+        // ...but the watcher keyed, so its quitting unkeys.
+        let mut s = BufReader::new(TcpStream::connect(&srv.addr).await.unwrap());
+        let t = std::time::Instant::now();
+        while ask(&mut s, "t", 1).await != ["0"] {
+            assert!(t.elapsed().as_secs() < 5, "still transmitting after q");
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    }
+
+    #[test]
+    fn spots_ptt_requests() {
+        assert_eq!(ptt_request("T 1"), Some(true));
+        assert_eq!(ptt_request("+\\set_ptt 2"), Some(true));
+        assert_eq!(ptt_request("T 0"), Some(false));
+        assert_eq!(ptt_request("t"), None);
+        assert_eq!(ptt_request("F 7074000"), None);
     }
 
     /// The real thing: Hamlib's own `rigctl` (model 2, NET rigctl, as

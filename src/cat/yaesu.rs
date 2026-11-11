@@ -312,7 +312,18 @@ impl Driver for Yaesu {
 
 pub struct Ft817 {
     w: Box<dyn Wire>,
-    ptt: bool,
+    /// The PTT state the radio last confirmed; None = unknown (a key or
+    /// unkey that may not have reached the radio).
+    ptt: Option<bool>,
+    /// The radio answers "read TX status" (F7). Cleared the first time it
+    /// doesn't, so a radio or bridge without it isn't asked on every poll.
+    tx_status_ok: bool,
+}
+
+/// A hard failure of the link to the radio (the port or bridge), as opposed
+/// to the radio not answering.
+fn is_io(e: &anyhow::Error) -> bool {
+    e.downcast_ref::<std::io::Error>().is_some()
 }
 
 fn bcd_be(v: u64) -> [u8; 4] {
@@ -337,7 +348,11 @@ fn from_bcd_be(b: &[u8]) -> Option<u64> {
 
 impl Ft817 {
     pub fn probe(w: Box<dyn Wire>) -> Result<Ft817> {
-        let mut r = Ft817 { w, ptt: false };
+        let mut r = Ft817 {
+            w,
+            ptt: None,
+            tx_status_ok: true,
+        };
         r.read_fm().map_err(|e| anyhow!("FT-817 family: {e}"))?;
         Ok(r)
     }
@@ -375,6 +390,23 @@ impl Ft817 {
             bail!("not an FT-817 reply");
         }
         Ok((f, r[4]))
+    }
+
+    /// Transmitting? "Read TX status" (00 00 00 00 F7) answers one byte
+    /// whose bit 7 is low while the radio transmits (Hamlib reads it the
+    /// same way). None if the radio doesn't answer it.
+    fn tx_status(&mut self) -> Result<Option<bool>> {
+        if !self.tx_status_ok {
+            return Ok(None);
+        }
+        match self.cmd([0, 0, 0, 0, 0xF7], 1) {
+            Ok(b) => Ok(Some(b[0] & 0x80 == 0)),
+            Err(e) if is_io(&e) => Err(e),
+            Err(_) => {
+                self.tx_status_ok = false;
+                Ok(None)
+            }
+        }
     }
 }
 
@@ -433,14 +465,50 @@ impl Driver for Ft817 {
     }
 
     fn ptt(&mut self) -> Result<bool> {
-        Ok(self.ptt)
+        if let Some(on) = self.tx_status()? {
+            self.ptt = Some(on);
+            return Ok(on);
+        }
+        // No TX status from this radio: the last state it confirmed.
+        self.ptt
+            .ok_or_else(|| anyhow!("the radio's PTT state is unknown (it didn't confirm the last change)"))
     }
 
     fn set_ptt(&mut self, on: bool) -> Result<()> {
-        self.cmd([0, 0, 0, 0, if on { 0x08 } else { 0x88 }], 1)
-            .or_else(|_| Ok::<_, anyhow::Error>(vec![]))?;
-        self.ptt = on;
-        Ok(())
+        let what = if on { "key" } else { "unkey" };
+        // The radio acknowledges with one byte: 00 done, F0 already in
+        // that state (both fine).
+        let ack = match self.cmd([0, 0, 0, 0, if on { 0x08 } else { 0x88 }], 1) {
+            Ok(b) => Some(b[0]),
+            Err(e) if is_io(&e) => {
+                self.ptt = None;
+                return Err(e.context(format!("couldn't {what} the radio")));
+            }
+            Err(_) => None,
+        };
+        if matches!(ack, Some(0x00) | Some(0xF0)) {
+            self.ptt = Some(on);
+            return Ok(());
+        }
+        // No (or an odd) acknowledgement: ask the radio what it's doing.
+        match self.tx_status() {
+            Ok(Some(now)) => {
+                self.ptt = Some(now);
+                if now == on {
+                    Ok(())
+                } else {
+                    Err(anyhow!("the radio didn't {what}"))
+                }
+            }
+            Ok(None) => {
+                self.ptt = None;
+                Err(anyhow!("the radio didn't confirm the {what}"))
+            }
+            Err(e) => {
+                self.ptt = None;
+                Err(e.context(format!("couldn't {what} the radio")))
+            }
+        }
     }
 
     fn get_level(&mut self, name: &str) -> Result<f32> {
@@ -465,5 +533,82 @@ mod tests {
         assert_eq!(bcd_be(1_407_400), [0x01, 0x40, 0x74, 0x00]);
         assert_eq!(from_bcd_be(&[0x01, 0x40, 0x74, 0x00]), Some(1_407_400));
         assert_eq!(from_bcd_be(&[0xFF, 0, 0, 0]), None);
+    }
+
+    use super::super::sim::{Kind, SimRadio};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU8, Ordering};
+
+    const OK: u8 = 0;
+    const WRITES_FAIL: u8 = 1;
+    /// Acknowledge PTT changes with F0 ("already in that state").
+    const ACK_F0: u8 = 2;
+
+    /// A simulated FT-817 whose port can break, or that answers F0 to PTT
+    /// commands. (The third field: the last command was a PTT command.)
+    struct Flaky(SimRadio, Arc<AtomicU8>, bool);
+
+    impl Wire for Flaky {
+        fn write_all(&mut self, b: &[u8]) -> std::io::Result<()> {
+            match self.1.load(Ordering::SeqCst) {
+                WRITES_FAIL => Err(std::io::Error::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    "unplugged",
+                )),
+                _ => {
+                    self.2 = matches!(b.last(), Some(0x08 | 0x88));
+                    self.0.write_all(b)
+                }
+            }
+        }
+        fn read_some(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            let n = self.0.read_some(buf)?;
+            if self.1.load(Ordering::SeqCst) == ACK_F0 && self.2 && n == 1 && buf[0] == 0 {
+                buf[0] = 0xF0;
+            }
+            Ok(n)
+        }
+        fn clear_input(&mut self) {
+            self.0.clear_input()
+        }
+    }
+
+    fn flaky() -> (Ft817, Arc<AtomicU8>) {
+        let mode = Arc::new(AtomicU8::new(OK));
+        let d = Ft817::probe(Box::new(Flaky(SimRadio::new(Kind::Ft817), mode.clone(), false))).unwrap();
+        (d, mode)
+    }
+
+    #[test]
+    fn ft817_failed_unkey_is_an_error_and_not_rx() {
+        let (mut d, mode) = flaky();
+        d.set_ptt(true).unwrap();
+        assert!(d.ptt().unwrap());
+        mode.store(WRITES_FAIL, Ordering::SeqCst);
+        assert!(d.set_ptt(false).is_err(), "a failed write must not be Ok");
+        assert!(d.ptt().is_err(), "can't read PTT through a broken port");
+        // The port comes back, but the unkey never reached the radio: PTT
+        // must not read as receive.
+        mode.store(OK, Ordering::SeqCst);
+        assert!(!matches!(d.ptt(), Ok(false)), "{:?}", d.ptt());
+        d.set_ptt(false).unwrap();
+        assert!(!d.ptt().unwrap());
+    }
+
+    #[test]
+    fn ft817_failed_key_is_an_error() {
+        let (mut d, mode) = flaky();
+        mode.store(WRITES_FAIL, Ordering::SeqCst);
+        assert!(d.set_ptt(true).is_err());
+    }
+
+    #[test]
+    fn ft817_already_in_that_state_is_fine() {
+        let (mut d, mode) = flaky();
+        mode.store(ACK_F0, Ordering::SeqCst);
+        d.set_ptt(false).unwrap();
+        assert!(!d.ptt().unwrap());
+        d.set_ptt(true).unwrap();
+        assert!(d.ptt().unwrap());
     }
 }

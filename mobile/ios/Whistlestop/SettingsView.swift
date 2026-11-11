@@ -74,11 +74,10 @@ struct SettingsView: View {
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) {
                     Button(saved ? "Saved" : "Save") {
-                        // A demo change needs a restart of the engine's
-                        // station, which Start does.
-                        let demoChanged = core.bool("demo") != (core.state.demo ?? false)
+                        // The engine restarts the station itself when a
+                        // connection setting (demo, modem, radio, callsign)
+                        // changed.
                         if core.saveConfig() {
-                            if demoChanged { restart() }
                             saved = true
                             DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { saved = false }
                         }
@@ -105,13 +104,5 @@ struct SettingsView: View {
                 // directly (and shares it with Mercury).
                 core.config["rig_mode"] = $0.trimmingCharacters(in: .whitespaces).isEmpty ? "External" : "Direct"
             })
-    }
-
-    private func restart() {
-        core.send("Stop")
-        if let data = try? JSONSerialization.data(withJSONObject: core.config),
-           let obj = try? JSONSerialization.jsonObject(with: data) {
-            core.send("Start", obj)
-        }
     }
 }

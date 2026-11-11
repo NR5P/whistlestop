@@ -412,6 +412,9 @@ fn run(
     let n = stations.len();
     let mut merc: Vec<Option<UnixStream>> = (0..n).map(|_| None).collect();
     let mut tx_prev: Vec<Vec<f64>> = vec![vec![0.0; BLOCK]; n];
+    // Samples each path still has to run after its input fell silent, so
+    // its filters (up to 511 taps) empty out instead of keeping a stale tail.
+    let mut path_tail: Vec<Vec<usize>> = vec![vec![0; n]; n];
     let mut paths: Vec<Vec<Path>> = (0..n)
         .map(|r| (0..n).map(|t| Path::new((r * 7 + t * 3) as f64)).collect())
         .collect();
@@ -453,7 +456,12 @@ fn run(
                     continue;
                 }
                 let delta = dials[t] - dials[r]; // caller above us -> higher audio
-                if delta.abs() < 4000.0 && tx_prev[t].iter().any(|v| *v != 0.0) {
+                if tx_prev[t].iter().any(|v| *v != 0.0) {
+                    path_tail[r][t] = 1024;
+                } else {
+                    path_tail[r][t] = path_tail[r][t].saturating_sub(BLOCK);
+                }
+                if delta.abs() < 4000.0 && path_tail[r][t] > 0 {
                     let (path, out) = (&mut paths[r][t], &mut rx[r]);
                     path.process(&tx_prev[t], delta, gain, ch.fading, out);
                 }

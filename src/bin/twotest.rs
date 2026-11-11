@@ -133,6 +133,22 @@ mod bench {
             h.state.lock().unwrap()
         }
 
+        /// Wait until neither modem has keyed the radio for `quiet_s`
+        /// seconds (at most `max_s`).
+        fn wait_air_quiet(&self, quiet_s: f64, max_s: f64) {
+            let start = Instant::now();
+            let mut quiet_since = Instant::now();
+            while start.elapsed().as_secs_f64() < max_s {
+                if self.ether.stats().iter().any(|s| s.mercury_ptt) {
+                    quiet_since = Instant::now();
+                } else if quiet_since.elapsed().as_secs_f64() >= quiet_s {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            println!("   air quiet after {:.0} s", start.elapsed().as_secs_f64());
+        }
+
         /// Wait for a condition on both stations' state.
         fn wait(&self, secs: f64, f: impl Fn(&State, &State) -> bool) -> Option<Duration> {
             let t = Instant::now();
@@ -545,6 +561,10 @@ mod bench {
         /// within Mercury's ±55 Hz, and does it ever pass ALPHA over?
         fn s_scan(&mut self) {
             self.disconnect_both();
+            // Let the last link's teardown finish first: a modem still sending
+            // DISCONNECT bursts mutes the scanning station's receiver (as a
+            // real radio does on TX), and the first trial would measure that.
+            self.wait_air_quiet(25.0, 240.0);
             let w = Config::default().whistle_s;
             let base = self.ether.channel.lock().unwrap().noise_dbfs;
             for (label, extra_db) in [("normal", 0.0), ("weak", 22.0), ("very weak", 28.0)] {

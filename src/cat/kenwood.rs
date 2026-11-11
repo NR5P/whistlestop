@@ -21,6 +21,9 @@ pub struct Kenwood {
     v: Variant,
     name: String,
     max_w: f32,
+    /// TS-990: the mode is `OM0` (main band), with the data modes as modes
+    /// of their own, rather than MD plus DA.
+    om: bool,
 }
 
 pub fn model_name(id: &str) -> &'static str {
@@ -59,7 +62,14 @@ impl Kenwood {
             };
             (v, format!("Kenwood {}", model_name(id)))
         };
-        let mut k = Kenwood { w, v, name, max_w };
+        let om = !elecraft && id == "024";
+        let mut k = Kenwood {
+            w,
+            v,
+            name,
+            max_w,
+            om,
+        };
         k.freq().map_err(|e| anyhow!("{}: {e}", k.name))?;
         Ok(k)
     }
@@ -107,6 +117,30 @@ impl Kenwood {
             _ => return None,
         })
     }
+}
+
+/// TS-990 `OM` mode codes (Hamlib's Kenwood mode table, which the TS-990
+/// backend uses with OM): 1 LSB, 2 USB, 3 CW, 4 FM, 5 AM, 6 FSK, 7 CW-R,
+/// 9 FSK-R, A PSK, B PSK-R, C LSB-D, D USB-D, E FM-D, F AM-D. PSK and AM-D
+/// have no name in our mode list and read as USB and AM.
+fn om_mode_name(c: char) -> &'static str {
+    match c {
+        'C' => "PKTLSB",
+        'D' => "PKTUSB",
+        'E' => "PKTFM",
+        'F' => "AM",
+        _ => mode_name(c, false),
+    }
+}
+
+fn om_code(mode_code: char, data: bool) -> Option<char> {
+    Some(match (mode_code, data) {
+        (c, false) => c,
+        ('1', true) => 'C',
+        ('2', true) => 'D',
+        ('4', true) => 'E',
+        _ => return None,
+    })
 }
 
 fn mode_name(c: char, data: bool) -> &'static str {
@@ -178,6 +212,10 @@ impl Driver for Kenwood {
     }
 
     fn mode(&mut self) -> Result<(String, i64)> {
+        if self.om {
+            let r = self.q("OM0;", "OM0")?;
+            return Ok((om_mode_name(r.chars().nth(3).unwrap_or('2')).into(), 0));
+        }
         let r = self.q("MD;", "MD")?;
         let c = r.chars().nth(2).unwrap_or('2');
         let (name, pb) = match self.v {
@@ -222,6 +260,10 @@ impl Driver for Kenwood {
             "PKTFM" => ('4', true),
             _ => return Err(unsupported(mode)),
         };
+        if self.om {
+            let c = om_code(code, data).ok_or_else(|| unsupported(mode))?;
+            return self.s(&format!("OM0{c};"));
+        }
         match self.v {
             Variant::Elecraft => {
                 if data {
@@ -427,5 +469,78 @@ impl Driver for Kenwood {
             if xit { "XT" } else { "RT" },
             (hz != 0) as u8
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::{Arc, Mutex};
+
+    /// Just enough of a TS-990 for its mode: FA, and OM0 (no MD, no DA).
+    struct Ts990 {
+        mode: char,
+        inb: Vec<u8>,
+        out: Vec<u8>,
+        log: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl Wire for Ts990 {
+        fn write_all(&mut self, b: &[u8]) -> std::io::Result<()> {
+            self.inb.extend_from_slice(b);
+            while let Some(i) = self.inb.iter().position(|&c| c == b';') {
+                let c: Vec<u8> = self.inb.drain(..=i).collect();
+                let cmd = String::from_utf8_lossy(&c[..c.len() - 1]).to_string();
+                self.log.lock().unwrap().push(cmd.clone());
+                let reply = match cmd.as_str() {
+                    "FA" => "FA00014074000;".to_string(),
+                    "OM0" => format!("OM0{};", self.mode),
+                    s if s.starts_with("OM0") && s.len() == 4 => {
+                        self.mode = s.chars().nth(3).unwrap();
+                        String::new()
+                    }
+                    _ => "?;".to_string(),
+                };
+                self.out.extend(reply.as_bytes());
+            }
+            Ok(())
+        }
+        fn read_some(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            let n = buf.len().min(self.out.len());
+            buf[..n].copy_from_slice(&self.out[..n]);
+            self.out.drain(..n);
+            Ok(n)
+        }
+        fn clear_input(&mut self) {
+            self.out.clear();
+        }
+    }
+
+    #[test]
+    fn ts990_uses_om() {
+        let log = Arc::new(Mutex::new(vec![]));
+        let w = Ts990 {
+            mode: '2',
+            inb: vec![],
+            out: vec![],
+            log: log.clone(),
+        };
+        let mut d = Kenwood::new(Box::new(w), "024", false, 200.0).unwrap();
+        assert!(d.describe().contains("TS-990"));
+        assert_eq!(d.mode().unwrap().0, "USB");
+        for m in ["PKTUSB", "PKTLSB", "PKTFM", "LSB", "CW", "CWR", "AM", "FM", "RTTY", "USB"] {
+            d.set_mode(m, 3000).unwrap();
+            assert_eq!(d.mode().unwrap().0, m);
+        }
+        d.set_mode("PKTUSB", 0).unwrap();
+        assert!(log.lock().unwrap().contains(&"OM0D".to_string()));
+        assert!(
+            !log.lock()
+                .unwrap()
+                .iter()
+                .any(|c| c.starts_with("MD") || c.starts_with("DA")),
+            "{:?}",
+            log.lock().unwrap()
+        );
     }
 }

@@ -25,10 +25,10 @@
 use std::ffi::{CStr, CString, c_char};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Mutex;
+use std::sync::{Mutex, MutexGuard, OnceLock};
 
 use whistlestop::config::Config;
-use whistlestop::engine::{self, Cmd, Handle};
+use whistlestop::engine::{self, Cmd, Handle, State};
 
 #[cfg(feature = "mercury")]
 pub mod mercury;
@@ -43,9 +43,57 @@ struct App {
 
 static APP: Mutex<Option<App>> = Mutex::new(None);
 static CHANGES: AtomicU64 = AtomicU64::new(0);
+/// The settings folder, fixed by the first start (see `start`).
+static SETTINGS_DIR: OnceLock<PathBuf> = OnceLock::new();
+
+/// A lock that a panic elsewhere can't poison for good: the data under it
+/// is plain state, still usable after a panic.
+fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(|e| e.into_inner())
+}
 
 fn with_app<T>(f: impl FnOnce(&mut App) -> T) -> Option<T> {
-    APP.lock().ok()?.as_mut().map(f)
+    lock(&APP).as_mut().map(f)
+}
+
+/// Run an entry point the app calls, so a panic never unwinds into Swift,
+/// Kotlin or the JVM: it's logged and the call returns `fallback`.
+fn guard<T>(fallback: T, f: impl FnOnce() -> T) -> T {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)).unwrap_or_else(|_| {
+        eprintln!("whistlestop: internal error (see the panic above); the call was ignored");
+        fallback
+    })
+}
+
+/// Settings whose change needs the station restarted (`Cmd::Start`): how
+/// it reaches the modem, the radio and the sound, and who it is. Anything
+/// else applies to the running station (`Cmd::Update`) without dropping a
+/// link.
+const RESTART_KEYS: &[&str] = &[
+    "callsign",
+    "demo",
+    "demo_real_mercury",
+    "mercury_host",
+    "mercury_port",
+    "mercury_bcast_port",
+    "mercury_bin",
+    "rigctld",
+    "rig_mode",
+    "managed_rig",
+    "cat",
+    "audio_in",
+    "audio_out",
+    "monitor_device",
+    "sdr",
+    "download_dir",
+    "depot_file",
+];
+
+fn needs_restart(old: &Config, new: &Config) -> bool {
+    let (Ok(a), Ok(b)) = (serde_json::to_value(old), serde_json::to_value(new)) else {
+        return true;
+    };
+    RESTART_KEYS.iter().any(|k| a.get(k) != b.get(k))
 }
 
 fn out(s: String) -> *mut c_char {
@@ -68,16 +116,40 @@ unsafe fn arg(p: *const c_char) -> Option<String> {
 /// Start the engine with the settings kept in `dir` (the app's own
 /// documents/files folder). Received files go to `dir/Downloads` unless
 /// the settings say otherwise. Starting twice does nothing.
+///
+/// The settings folder is fixed by the first start in this process: a later
+/// start (after `stop`) with another folder keeps using the first.
 pub fn start(dir: &str) -> anyhow::Result<()> {
-    let mut slot = APP.lock().unwrap();
+    let mut slot = lock(&APP);
     if slot.is_some() {
         return Ok(());
     }
-    let dir = PathBuf::from(dir);
-    std::fs::create_dir_all(&dir)?;
+    let asked = PathBuf::from(dir);
     // Settings live in the app's sandbox, not a desktop config folder.
-    // SAFETY: set once, before the engine's threads exist.
-    unsafe { std::env::set_var("WHISTLESTOP_CONFIG", dir.join("whistlestop.toml")) };
+    // Whistlestop's settings code (shared with the desktop) finds them
+    // through WHISTLESTOP_CONFIG, so it's set here, exactly once.
+    let dir = SETTINGS_DIR
+        .get_or_init(|| {
+            // SAFETY: setting the environment races with any other thread
+            // reading it. This runs once per process, on the first start,
+            // before Whistlestop has started any thread of its own (no
+            // engine, no Mercury yet). The host app's own threads could in
+            // principle read the environment at the same moment; that's
+            // the remaining risk, kept as small as it can be by never
+            // setting it again (a restart after `stop` doesn't, while the
+            // old engine's threads may still be winding down).
+            unsafe { std::env::set_var("WHISTLESTOP_CONFIG", asked.join("whistlestop.toml")) };
+            asked.clone()
+        })
+        .clone();
+    if dir != asked {
+        eprintln!(
+            "whistlestop: settings stay in {} (the folder of the first start), not {}",
+            dir.display(),
+            asked.display()
+        );
+    }
+    std::fs::create_dir_all(&dir)?;
     let mut cfg = Config::load();
     if cfg.download_dir.as_os_str().is_empty() || !cfg.download_dir.starts_with(&dir) {
         cfg.download_dir = dir.join("Downloads");
@@ -151,12 +223,18 @@ static MERCURY_STALE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicB
 /// engine opens the radio first (up to 30 s for the probe), and Mercury
 /// connects to the server once, at start.
 fn ensure_mercury(dir: &std::path::Path, cfg: &Config) {
-    let local = matches!(cfg.mercury_host.as_str(), "127.0.0.1" | "localhost" | "::1" | "");
+    let local = matches!(
+        cfg.mercury_host.trim(),
+        "127.0.0.1" | "localhost" | "::1" | ""
+    );
     #[cfg(feature = "mercury")]
     if !cfg.demo && local {
         let ptt = mercury_ptt(cfg);
         if mercury::running() {
-            MERCURY_STALE.store(mercury::ptt() != ptt, Ordering::Relaxed);
+            // Its engine can't be restarted inside the app: a change to how
+            // it keys the radio or to its ports needs the app reopened.
+            let ports = Some((cfg.mercury_port, cfg.mercury_bcast_port));
+            MERCURY_STALE.store(mercury::ptt() != ptt || mercury::ports() != ports, Ordering::Relaxed);
             return;
         }
         if MERCURY_WAITING.swap(true, Ordering::SeqCst) {
@@ -209,7 +287,7 @@ pub fn changes() -> u64 {
 
 pub fn state_json() -> String {
     with_app(|a| {
-        let g = a.h.state.lock().unwrap();
+        let g: MutexGuard<State> = lock(&a.h.state);
         serde_json::to_string(&*g).unwrap_or_else(|_| "{}".into())
     })
     .unwrap_or_else(|| "{}".into())
@@ -219,7 +297,7 @@ pub fn state_json() -> String {
 /// added since the last call.
 pub fn rows_json() -> String {
     with_app(|a| {
-        let g = a.h.state.lock().unwrap();
+        let g = lock(&a.h.state);
         let new = g.audio_seq.saturating_sub(a.rows_seen) as usize;
         a.rows_seen = g.audio_seq;
         let n = new.min(g.audio_rows.len());
@@ -248,21 +326,31 @@ pub fn config_json() -> String {
 }
 
 /// New settings from the app: saved, then applied to the running engine.
+/// A change to how the station connects (modem, radio, sound, callsign,
+/// demo) restarts the station, as the desktop's Settings → Apply does;
+/// anything else is applied without dropping a link. The embedded Mercury
+/// starts if it should and isn't running; it can't restart inside the app,
+/// so a change to its ports or keying asks for the app to be reopened.
 pub fn set_config_json(json: &str) -> anyhow::Result<()> {
     let mut cfg: Config = serde_json::from_str(json)?;
     adopt_usb_radio(&mut cfg);
     cfg.save()?;
     with_app(|a| {
+        let restart = needs_restart(&a.cfg, &cfg);
         ensure_mercury(&a.dir, &cfg);
         a.cfg = cfg.clone();
-        a.h.send(Cmd::Update(cfg));
+        a.h.send(if restart {
+            Cmd::Start(cfg)
+        } else {
+            Cmd::Update(cfg)
+        });
     });
     CHANGES.fetch_add(1, Ordering::Relaxed);
     Ok(())
 }
 
 pub fn stop() {
-    if let Some(a) = APP.lock().unwrap().take() {
+    if let Some(a) = lock(&APP).take() {
         a.h.send(Cmd::Stop);
     }
     #[cfg(feature = "mercury")]
@@ -270,6 +358,9 @@ pub fn stop() {
 }
 
 // ------------------------------------------------------------ C ABI
+//
+// Every entry point runs inside `guard`: a panic in Rust is logged and the
+// call returns its failure value instead of unwinding into the app.
 
 /// 0 on success, -1 on failure (the reason goes to the log).
 ///
@@ -277,73 +368,73 @@ pub fn stop() {
 /// `dir` is a NUL-terminated UTF-8 path.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ws_start(dir: *const c_char) -> i32 {
-    match unsafe { arg(dir) }.map(|d| start(&d)) {
+    guard(-1, || match unsafe { arg(dir) }.map(|d| start(&d)) {
         Some(Ok(())) => 0,
         Some(Err(e)) => {
             eprintln!("whistlestop: can't start: {e:#}");
             -1
         }
         None => -1,
-    }
+    })
 }
 
 /// 1 if Mercury runs inside the app.
 #[unsafe(no_mangle)]
 pub extern "C" fn ws_mercury_embedded() -> i32 {
-    mercury_embedded() as i32
+    guard(0, || mercury_embedded() as i32)
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn ws_changes() -> u64 {
-    changes()
+    guard(0, changes)
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn ws_state() -> *mut c_char {
-    out(state_json())
+    guard(std::ptr::null_mut(), || out(state_json()))
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn ws_rows() -> *mut c_char {
-    out(rows_json())
+    guard(std::ptr::null_mut(), || out(rows_json()))
 }
 
 /// # Safety
 /// `json` is a NUL-terminated UTF-8 string.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ws_send(json: *const c_char) -> i32 {
-    match unsafe { arg(json) }.map(|j| send_json(&j)) {
+    guard(-1, || match unsafe { arg(json) }.map(|j| send_json(&j)) {
         Some(Ok(())) => 0,
         Some(Err(e)) => {
             eprintln!("whistlestop: bad command: {e:#}");
             -1
         }
         None => -1,
-    }
+    })
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn ws_config() -> *mut c_char {
-    out(config_json())
+    guard(std::ptr::null_mut(), || out(config_json()))
 }
 
 /// # Safety
 /// `json` is a NUL-terminated UTF-8 string.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ws_set_config(json: *const c_char) -> i32 {
-    match unsafe { arg(json) }.map(|j| set_config_json(&j)) {
+    guard(-1, || match unsafe { arg(json) }.map(|j| set_config_json(&j)) {
         Some(Ok(())) => 0,
         Some(Err(e)) => {
             eprintln!("whistlestop: bad settings: {e:#}");
             -1
         }
         None => -1,
-    }
+    })
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn ws_stop() {
-    stop()
+    guard((), stop)
 }
 
 /// # Safety
@@ -359,7 +450,9 @@ pub unsafe extern "C" fn ws_free(s: *mut c_char) {
 
 #[cfg(target_os = "android")]
 mod android {
-    //! `com.nr5p.whistlestop.Core`'s native methods.
+    //! `com.nr5p.whistlestop.Core`'s native methods, each inside `guard` so
+    //! a panic never unwinds into the JVM.
+    use super::guard;
     use jni::JNIEnv;
     use jni::objects::{JClass, JString};
     use jni::sys::{jint, jlong, jstring};
@@ -388,20 +481,22 @@ mod android {
         _: JClass,
         dir: JString,
     ) -> jint {
-        let d = s(&mut env, &dir);
-        code(super::start(&d))
+        guard(-1, || {
+            let d = s(&mut env, &dir);
+            code(super::start(&d))
+        })
     }
     #[unsafe(no_mangle)]
     pub extern "system" fn Java_com_nr5p_whistlestop_Core_changes(_: JNIEnv, _: JClass) -> jlong {
-        super::changes() as jlong
+        guard(0, || super::changes() as jlong)
     }
     #[unsafe(no_mangle)]
     pub extern "system" fn Java_com_nr5p_whistlestop_Core_state(mut env: JNIEnv, _: JClass) -> jstring {
-        js(&mut env, super::state_json())
+        guard(std::ptr::null_mut(), || js(&mut env, super::state_json()))
     }
     #[unsafe(no_mangle)]
     pub extern "system" fn Java_com_nr5p_whistlestop_Core_rows(mut env: JNIEnv, _: JClass) -> jstring {
-        js(&mut env, super::rows_json())
+        guard(std::ptr::null_mut(), || js(&mut env, super::rows_json()))
     }
     #[unsafe(no_mangle)]
     pub extern "system" fn Java_com_nr5p_whistlestop_Core_send(
@@ -409,12 +504,14 @@ mod android {
         _: JClass,
         json: JString,
     ) -> jint {
-        let j = s(&mut env, &json);
-        code(super::send_json(&j))
+        guard(-1, || {
+            let j = s(&mut env, &json);
+            code(super::send_json(&j))
+        })
     }
     #[unsafe(no_mangle)]
     pub extern "system" fn Java_com_nr5p_whistlestop_Core_config(mut env: JNIEnv, _: JClass) -> jstring {
-        js(&mut env, super::config_json())
+        guard(std::ptr::null_mut(), || js(&mut env, super::config_json()))
     }
     #[unsafe(no_mangle)]
     pub extern "system" fn Java_com_nr5p_whistlestop_Core_setConfig(
@@ -422,16 +519,18 @@ mod android {
         _: JClass,
         json: JString,
     ) -> jint {
-        let j = s(&mut env, &json);
-        code(super::set_config_json(&j))
+        guard(-1, || {
+            let j = s(&mut env, &json);
+            code(super::set_config_json(&j))
+        })
     }
     #[unsafe(no_mangle)]
     pub extern "system" fn Java_com_nr5p_whistlestop_Core_stop(_: JNIEnv, _: JClass) {
-        super::stop()
+        guard((), super::stop)
     }
     #[unsafe(no_mangle)]
     pub extern "system" fn Java_com_nr5p_whistlestop_Core_mercuryEmbedded(_: JNIEnv, _: JClass) -> jint {
-        super::mercury_embedded() as jint
+        guard(0, || super::mercury_embedded() as jint)
     }
     /// The app's USB radio access (`UsbCat`) is ready: from now on the
     /// engine finds and opens USB radios through it.
@@ -459,9 +558,11 @@ mod android {
     /// The phone's sound devices for Mercury, "id\tin|out\tname" per line.
     #[unsafe(no_mangle)]
     pub extern "system" fn Java_com_nr5p_whistlestop_Core_setAudioDevices(mut env: JNIEnv, _: JClass, list: JString) {
-        let _l = s(&mut env, &list);
-        #[cfg(feature = "mercury")]
-        super::mercury::set_android_audio_devices(&_l);
+        guard((), || {
+            let _l = s(&mut env, &list);
+            #[cfg(feature = "mercury")]
+            super::mercury::set_android_audio_devices(&_l);
+        })
     }
 }
 
@@ -616,6 +717,36 @@ mod usb {
 
 #[cfg(test)]
 mod tests {
+    use whistlestop::config::Config;
+
+    #[test]
+    fn what_needs_a_restart() {
+        let a = Config::default();
+        let mut b = a.clone();
+        b.grid = "DM79".into();
+        b.auto_answer = !a.auto_answer;
+        assert!(!super::needs_restart(&a, &b));
+        let changes: [fn(&mut Config); 6] = [
+            |c: &mut Config| c.callsign = "N0NEW".into(),
+            |c: &mut Config| c.mercury_port += 10,
+            |c: &mut Config| c.mercury_host = "192.168.1.5".into(),
+            |c: &mut Config| c.cat.port = "radio.local:4532".into(),
+            |c: &mut Config| c.demo = !c.demo,
+            |c: &mut Config| c.audio_in = "USB Audio".into(),
+        ];
+        for f in changes {
+            let mut b = a.clone();
+            f(&mut b);
+            assert!(super::needs_restart(&a, &b));
+        }
+    }
+
+    #[test]
+    fn a_panic_doesnt_cross_the_boundary() {
+        assert_eq!(super::guard(-1, || panic!("boom")), -1);
+        assert_eq!(super::guard(-1, || 0), 0);
+    }
+
     /// The whole round trip the apps make: start in a fresh folder (demo
     /// station), read state as JSON, send a command as JSON, change a
     /// setting.
@@ -658,6 +789,17 @@ mod tests {
                 .unwrap()
                 .contains("DM79")
         );
+        // A new callsign restarts the station, so it's in use at once.
+        let mut cfg: serde_json::Value = serde_json::from_str(&super::config_json()).unwrap();
+        cfg["callsign"] = "N0NEW".into();
+        super::set_config_json(&cfg.to_string()).unwrap();
+        let t = std::time::Instant::now();
+        while serde_json::from_str::<serde_json::Value>(&super::state_json()).unwrap()["mycall"]
+            != "N0NEW"
+        {
+            assert!(t.elapsed().as_secs() < 20, "the new callsign isn't in use");
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
         super::stop();
         let _ = std::fs::remove_dir_all(&dir);
     }

@@ -27,9 +27,19 @@ struct EngineState: Decodable {
     var depot: Depot? = nil
     var away: Bool? = nil
     var qsyNote: String? = nil
-    var mailAlerts: [String]? = nil
+    var mailAlerts: [MailAlert]? = nil
 
     var freqHz: Double { rig?.freqHz ?? 0 }
+}
+
+/// Depot mail news (Rust `engine::MailAlert`).
+struct MailAlert: Decodable {
+    var call: String
+    /// We hold mail for them (true), or they hold mail for us (false).
+    var ours: Bool
+    var count: Int
+    /// Seconds ago.
+    var at: Double
 }
 
 struct Rig: Decodable {
