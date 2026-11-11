@@ -186,7 +186,7 @@ Listening is in two stages, the way military ALE scanners pause on a promising c
 
 When it finds a whistle it **retunes** by the coarse offset, **measures** the whistle precisely on the new frequency (three patterns, 1.2 s) and fine-tunes, then **waits up to 45 s for the CQ**. When Mercury decodes the caller's CQFRAME, the call appears under **Heard**. With **Answer automatically** ticked, Whistlestop connects at once.
 
-On the simulation, a half-second listen catches 86–88 % of whistles at −10 dB SNR (in 2500 Hz) on the first look and 98 % at −5 dB. Weaker than about −10 dB, Mercury itself struggles to link.
+On a simulated busy band with fading, a half-second listen catches 82–84 % of whistles at −10 dB SNR (in 2500 Hz) on the first look, and 94–97 % at −5 dB; those it misses at first mostly get the 2 s listen, which catches 96–99 % at −10 dB. Weaker than about −10 dB, Mercury itself struggles to link.
 
 ### Whistle watch (parked)
 

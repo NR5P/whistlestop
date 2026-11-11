@@ -97,7 +97,23 @@ For comparison, today's app scans with a 2.2 s dwell and an 1800 Hz step (0.8 kH
    - This matches every scanning system in the field. ALE repeats a 131 ms word against 200–500 ms dwells. DSC sends a 2 s dot pattern. Barrett's preamble is 0.5 s × the number of channels + 1 s.
 6. **Physics still rules weak signals.** Detection needs a certain amount of whistle energy in the dwell. At −15 dB no shape can be caught in under about a second, so a scanner that wants weak callers must dwell longer.
 
-## Recommendation (not built yet)
+## Built: whistle v2 (2026-11-11)
+
+The recommendation below is now Whistlestop's whistle (`whistle.rs`):
+1000→2000 Hz chirps of 0.2 s each way, a non-coherent scan detector
+(`TrackDetector`) with thresholds from `whistlelab calibrate`, a 0.5 s
+dwell that stretches to 2 s on a hint, a 2000 Hz step, and a 10 s CQ whistle.
+
+On the two-station real-Mercury bench (`docs/BENCH.md`), it found the caller
+12 times out of 12, at medians of 5–8.5 s. The first whistle took 14.5 s,
+with a whistle 2.4× as long.
+
+Things the simulation didn't show and the bench did:
+- strong signals crossing wrong tracks (fixed with a cell-count rule);
+- data bursts lighting every bin (fixed with per-frame whitening);
+- callers just past the passband edge (fixed by walking to them).
+
+## Recommendation (as made before building)
 
 - **Whistle v2**: 1000 Hz wide (1000→2000→1000 Hz audio), 0.2 s each way, repeated. It is the best or tied-best design at every signal level here. It's half as wide as today's whistle, so it takes less of the channel from others, and it still resolves the offset by the up/down pair (±500 Hz unambiguous; the alias check covers the rest).
 - **A time–frequency track detector** in place of the coherent matched filter for scanning. Keep the matched filter for the fine lock once the scanner has stopped.

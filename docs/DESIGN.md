@@ -97,7 +97,12 @@ who hears it knows a Whistlestop station is calling.
   survives fading, and it needs only the energy the dwell holds, not a
   whole chirp at the right moment. Its thresholds come from
   `whistlelab calibrate`: 1 % of empty busy-band dwells score above
-  `found(0.5 s)` = 6.4 (`found(2 s)` = 5.6), and 15 % above `MAYBE` = 5.07.
+  `found(0.5 s)` = 3.98 (`found(2 s)` = 1.99), and 15 % above `MAYBE` =
+  2.48. Each frame is also scaled by its median across the band, so a data
+  burst (which lights every bin at once) is levelled back to noise. A track
+  also needs enough cells over 3× the noise (3 σ more than
+  chance), so a loud signal crossing a wrong track at a few points can't
+  pass.
 * **Fine lock** (`whistle::Detector`): coherent matched filters on the UP and
   DOWN chirps, after clipping strong narrow peaks in the spectrum. Within
   ±150 Hz of where the scan said, a lower threshold is safe

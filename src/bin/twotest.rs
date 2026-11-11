@@ -569,7 +569,7 @@ impl Bench {
                 std::thread::sleep(Duration::from_millis(800 + 1700 * trial as u64));
                 let mark = self.st(&self.b).log.len();
                 self.a.send(Cmd::CallCq { table: None });
-                let t = self.wait(w + 25.0, |_, b| b.log.iter().skip(mark).any(|l| l.1.starts_with("Locked on")) && (b.rig.freq_hz - A_DIAL).abs() <= 55.0);
+                let t = self.wait(w + 25.0, |_, b| b.log.iter().skip(mark).any(|l| l.1.starts_with("Locked on") || l.1.starts_with("Whistle ended; staying")) && (b.rig.freq_hz - A_DIAL).abs() <= 55.0);
                 if let Some(t) = t {
                     times.push(t.as_secs_f64());
                 }
@@ -592,6 +592,59 @@ impl Bench {
             );
         }
         self.ether.channel.lock().unwrap().noise_dbfs = base;
+    }
+
+    /// QSY and the library over real Mercury, BRAVO away and serving:
+    /// ALPHA browses and downloads, asks BRAVO to move (and to another
+    /// band, refused), and both come home when the link ends.
+    fn s_qsylib(&mut self) {
+        self.disconnect_both();
+        let lib = self.work.join("BRAVO-library");
+        let _ = std::fs::remove_dir_all(&lib);
+        std::fs::create_dir_all(lib.join("logs")).unwrap();
+        let notes: Vec<u8> = (0..3000u32).map(|i| b"QSL via the Whistlestop library. "[i as usize % 33]).collect();
+        std::fs::write(lib.join("notes.txt"), &notes).unwrap();
+        std::fs::write(lib.join("logs/today.adi"), "<CALL:5>ALPHA<EOR>").unwrap();
+        let libdir = lib.to_string_lossy().to_string();
+        self.update(&self.b, |c| {
+            c.accept_qsy = true;
+            c.share_library = true;
+            c.library_dir = libdir.clone();
+        });
+        self.b.send(Cmd::SetAway(true));
+        std::thread::sleep(Duration::from_secs(1));
+        if !self.direct_link("qsy/library") {
+            return;
+        }
+        let home = A_DIAL;
+        self.a.send(Cmd::LibList(String::new()));
+        let t = self.wait(120.0, |a, _| a.library.as_ref().is_some_and(|l| l.entries.iter().any(|e| e.name == "notes.txt") && l.entries.iter().any(|e| e.name == "logs" && e.dir)));
+        self.record("library: browse over real Mercury", t.is_some(), format!("listing in {:.0} s", t.map(|d| d.as_secs_f64()).unwrap_or(-1.0)));
+        self.a.send(Cmd::LibFetch("notes.txt".into()));
+        let got = self.wait(300.0, |a, _| a.transfers.iter().any(|t| t.dir == Dir::In && t.name == "notes.txt" && matches!(t.state, XferState::Done(_))));
+        let same = std::fs::read(self.work.join("ALPHA-downloads/notes.txt")).map(|d| d == notes).unwrap_or(false);
+        self.record("library: download byte-exact", got.is_some() && same, format!("{:.0} s, byte-exact: {same}", got.map(|d| d.as_secs_f64()).unwrap_or(-1.0)));
+        self.a.send(Cmd::Qsy(7_102_000.0));
+        let refused = self.wait(120.0, |a, _| a.chat.iter().any(|c| c.text.contains("declined the QSY") && c.text.contains("only QSY within 20m")));
+        self.record("qsy: other band refused by BRAVO's rules", refused.is_some(), format!("{:.0} s", refused.map(|d| d.as_secs_f64()).unwrap_or(-1.0)));
+        let there = 14_106_000.0;
+        self.a.send(Cmd::Qsy(there));
+        let moved = self.wait(120.0, |a, b| a.rig.freq_hz == there && b.rig.freq_hz == there);
+        self.a.send(Cmd::Chat("Hello from the new frequency".into()));
+        let talk = self.wait(180.0, |_, b| b.depot.arrivals.iter().any(|m| m.text.contains("new frequency")) || b.chat.iter().any(|c| c.text.contains("new frequency")));
+        self.record(
+            "qsy: both move, link carries on",
+            moved.is_some() && talk.is_some(),
+            format!("moved in {:.0} s; chat across in {:.0} s", moved.map(|d| d.as_secs_f64()).unwrap_or(-1.0), talk.map(|d| d.as_secs_f64()).unwrap_or(-1.0)),
+        );
+        self.a.send(Cmd::Disconnect);
+        let back = self.wait(120.0, |a, b| a.link.is_none() && b.link.is_none() && a.rig.freq_hz == home && b.rig.freq_hz == home);
+        self.record("qsy: both back home when the link ends", back.is_some(), format!("{:.0} s", back.map(|d| d.as_secs_f64()).unwrap_or(-1.0)));
+        self.b.send(Cmd::SetAway(false));
+        self.update(&self.b, |c| {
+            c.accept_qsy = false;
+            c.share_library = false;
+        });
     }
 
     fn report(&self) -> String {
@@ -648,6 +701,9 @@ pub fn main() -> anyhow::Result<()> {
     }
     if run("weak") {
         b.s_weak();
+    }
+    if run("qsylib") {
+        b.s_qsylib();
     }
     if run("scan") {
         b.s_scan();

@@ -385,7 +385,7 @@ enum SearchPhase {
     Hold { from: u64 },
     /// Retuned onto a whistle the scan found (`coarse` Hz off the channel):
     /// measure it finely. `again`: this is the second listen.
-    Verify { target: f64, from: u64, coarse: f64, again: bool },
+    Verify { target: f64, from: u64, coarse: f64, again: bool, hops: u8 },
     WaitCq { until: Instant },
 }
 
@@ -500,6 +500,12 @@ struct Station {
     qsy_tune_now: bool,
     /// SWR stayed high on the QSY frequency: end the link, go home.
     qsy_fail: bool,
+    /// Link over after a QSY: go home (to, from, since).
+    qsy_home: Option<(f64, f64, Instant)>,
+    /// BYE sent (or received): disconnect once Mercury has sent it.
+    hangup_at: Option<Instant>,
+    /// The other station said BYE at this moment.
+    bye_at: Option<Instant>,
     /// Library downloads we asked for (their offers are accepted at once).
     wanted: std::collections::HashSet<u64>,
     last_sched: Option<Instant>,
@@ -643,6 +649,9 @@ impl Station {
             qsy_tuned: false,
             qsy_tune_now: false,
             qsy_fail: false,
+            qsy_home: None,
+            hangup_at: None,
+            bye_at: None,
             wanted: Default::default(),
             last_sched: None,
             sched_slot: None,
@@ -1139,10 +1148,10 @@ impl Station {
             }
             Cmd::Disconnect => {
                 if self.peer.is_some() {
-                    self.hi_queue.push_back(Link::Bye { text: "73".into() });
-                    self.pump().await?;
+                    self.hang_up("73").await?;
+                } else {
+                    self.tnc()?.command("DISCONNECT").await?;
                 }
-                self.tnc()?.command("DISCONNECT").await?;
                 self.set(|g| g.calling = None);
             }
             Cmd::Chat(text) => {
@@ -1449,7 +1458,7 @@ impl Station {
                     match self.tracker.scan(&x) {
                         Some(h) if found(h.z, dwell) => {
                             self.log(format!("🚂 Whistle on {:.1} kHz, {:+.0} Hz off (score {:.1}). Retuning onto it.", ch / 1e3, h.offset_hz, h.z));
-                            s.phase = SearchPhase::Verify { target: ch + h.offset_hz, from: 0, coarse: h.offset_hz, again: false };
+                            s.phase = SearchPhase::Verify { target: ch + h.offset_hz, from: 0, coarse: h.offset_hz, again: false, hops: 0 };
                         }
                         Some(h) if h.z >= TrackDetector::MAYBE && hold_s > dwell => s.phase = SearchPhase::Hold { from },
                         _ => next_channel = true,
@@ -1462,19 +1471,19 @@ impl Station {
                     match self.tracker.scan(&x) {
                         Some(h) if found(h.z, hold_s) => {
                             self.log(format!("🚂 Whistle on {:.1} kHz, {:+.0} Hz off (score {:.1}, after listening longer). Retuning onto it.", ch / 1e3, h.offset_hz, h.z));
-                            s.phase = SearchPhase::Verify { target: ch + h.offset_hz, from: 0, coarse: h.offset_hz, again: false };
+                            s.phase = SearchPhase::Verify { target: ch + h.offset_hz, from: 0, coarse: h.offset_hz, again: false, hops: 0 };
                         }
                         _ => next_channel = true,
                     }
                 }
             }
-            SearchPhase::Verify { target, from, coarse, again } => {
-                let (target, from, coarse, again) = (*target, *from, *coarse, *again);
+            SearchPhase::Verify { target, from, coarse, again, hops } => {
+                let (target, from, coarse, again, hops) = (*target, *from, *coarse, *again, *hops);
                 let got = if from == 0 { None } else { self.rx.lock().unwrap().range(from, n_verify) };
                 if from == 0 {
                     self.tune(target).await?;
                     tokio::time::sleep(Duration::from_millis(150)).await;
-                    s.phase = SearchPhase::Verify { target, from: audio::now_count(&self.rx).max(1), coarse, again };
+                    s.phase = SearchPhase::Verify { target, from: audio::now_count(&self.rx).max(1), coarse, again, hops };
                 } else if let Some(x) = got {
                     // Now within a few tens of hertz: the matched filter
                     // measures the rest to about a hertz.
@@ -1496,6 +1505,18 @@ impl Station {
                         (None, _) => self.detector.detect_near(&x, 60.0).map(|d| d.offset_hz),
                     };
                     let heard_something = coarse_now.is_some() || self.tracker.scan(&x).is_some_and(|h| h.z >= TrackDetector::MAYBE);
+                    // Clearly there, but further off than expected (a first
+                    // look that only caught the bottom of a sweep at the
+                    // passband edge): walk to it, up to two more hops.
+                    let walk = if v.is_none() && hops < 2 {
+                        self.tracker.scan(&x).filter(|h| h.z >= TrackDetector::found(secs) && h.offset_hz.abs() > 150.0 && h.offset_hz.abs() <= self.whistle_params().scan_reach_hz())
+                    } else {
+                        None
+                    };
+                    if let Some(h) = walk {
+                        self.log(format!("🚂 The whistle is {:+.0} Hz further; retuning again", h.offset_hz));
+                        s.phase = SearchPhase::Verify { target: target + h.offset_hz, from: 0, coarse: coarse + h.offset_hz, again: false, hops: hops + 1 };
+                    } else {
                     match v {
                         Some(off) => {
                             let fine = target + off;
@@ -1511,12 +1532,20 @@ impl Station {
                         }
                         _ if !again && heard_something => {
                             // Faded, or the pattern straddled the window: listen once more.
-                            s.phase = SearchPhase::Verify { target, from: audio::now_count(&self.rx).max(1), coarse, again: true };
+                            s.phase = SearchPhase::Verify { target, from: audio::now_count(&self.rx).max(1), coarse, again: true, hops };
+                        }
+                        // Reached by walking (two looks agreed where it is),
+                        // and now silent: the whistle has likely ended and its
+                        // CQ is about to follow. Wait for it here.
+                        _ if hops > 0 => {
+                            self.log(format!("Whistle ended; staying on {:.3} kHz (the scan's estimate) for the CQ…", target / 1e3));
+                            s.phase = SearchPhase::WaitCq { until: Instant::now() + Duration::from_secs(20) };
                         }
                         _ => {
                             self.log("Whistle not confirmed after retuning; resuming search".into());
                             next_channel = true;
                         }
+                    }
                     }
                 }
             }
@@ -1816,9 +1845,9 @@ impl Station {
                     g.library = None;
                 });
                 if let Some((home, at)) = self.qsy.take() {
-                    self.tune(home).await?;
-                    self.log(format!("↔ QSY over: back from {:.3} to {:.3} kHz", at / 1e3, home / 1e3));
-                    self.set(|g| g.qsy = None);
+                    // Stay a few seconds, so Mercury's disconnect finishes
+                    // here and the other station hears it too.
+                    self.qsy_home = Some((home, at, Instant::now()));
                 }
                 for o in self.outgoing.iter_mut() {
                     o.next = None; // re-offer (with resume) on the next link
@@ -2152,6 +2181,13 @@ impl Station {
                 self.set(|g| {
                     g.chat.push(ChatLine { at: Clock::now(), who: Who::Them, from: peer, text, id: 0, delivered: true })
                 });
+                // They're leaving and will disconnect (Mercury's disconnect
+                // takes ~20 s to arrive). If it never does (say, after a
+                // QSY), hang up from this end after 30 s; sooner would
+                // collide with theirs.
+                if self.bye_at.is_none() {
+                    self.bye_at = Some(Instant::now());
+                }
             }
             // Handled by the e2e channel before we get here.
             Link::Mail { id, from, to, created, hops, text } => {
@@ -2686,12 +2722,53 @@ impl Station {
         qsy_verdict(&self.cfg, self.qsy.map(|q| q.0).unwrap_or(self.dial()), hz)
     }
 
+    /// End the link politely: BYE, then DISCONNECT once Mercury has sent it.
+    async fn hang_up(&mut self, text: &str) -> anyhow::Result<()> {
+        self.hi_queue.push_back(Link::Bye { text: text.into() });
+        self.pump().await?;
+        self.hangup_at = Some(Instant::now());
+        Ok(())
+    }
+
     async fn step_qsy(&mut self) -> anyhow::Result<()> {
+        if let Some(at) = self.bye_at {
+            if self.peer.is_none() {
+                self.bye_at = None;
+            } else if at.elapsed() > Duration::from_secs(30) {
+                self.bye_at = None;
+                self.log("The other station said 73 but its disconnect didn't arrive; hanging up from here".into());
+                self.tnc()?.command("DISCONNECT").await?;
+            }
+        }
+        if let Some(at) = self.hangup_at {
+            if self.peer.is_none() {
+                self.hangup_at = None;
+            } else if (self.mercury_buffer == 0 && self.hi_queue.is_empty() && at.elapsed() > Duration::from_millis(500)) || at.elapsed() > Duration::from_secs(6) {
+                self.hangup_at = None;
+                self.tnc()?.command("DISCONNECT").await?;
+            }
+        }
+        if let Some((home, at, since)) = self.qsy_home
+            && (since.elapsed() > Duration::from_secs(8) || self.peer.is_some())
+        {
+            self.qsy_home = None;
+            if self.peer.is_none() {
+                self.tune(home).await?;
+                self.log(format!("↔ QSY over: back from {:.3} to {:.3} kHz", at / 1e3, home / 1e3));
+            }
+            self.set(|g| g.qsy = None);
+        }
         if let Some((hz, at, asked)) = self.qsy_move {
             // Both move a moment after the answer has crossed: the station
             // that asked, 3 s after it arrived (time for Mercury's ack);
             // the other, once Mercury has sent everything.
-            let due = if asked { at.elapsed() > Duration::from_secs(3) } else { self.mercury_buffer == 0 && at.elapsed() > Duration::from_secs(2) };
+            // (Mercury doesn't always report an empty buffer, so the station
+            // that agreed moves after 6 s at the latest.)
+            let due = if asked {
+                at.elapsed() > Duration::from_secs(3)
+            } else {
+                (self.mercury_buffer == 0 && at.elapsed() > Duration::from_secs(2)) || at.elapsed() > Duration::from_secs(6)
+            };
             if self.peer.is_none() {
                 self.qsy_move = None;
             } else if due {
@@ -2718,10 +2795,8 @@ impl Station {
         if self.qsy_fail && self.peer.is_some() {
             self.qsy_fail = false;
             self.log("⚠ SWR stays high on the QSY frequency: ending the link so both stations go home".into());
-            self.hi_queue.push_back(Link::Chat { id: 0, text: "SWR is too high for me here; ending the link so we both go back. 73".into() });
-            self.hi_queue.push_back(Link::Bye { text: "73".into() });
-            self.pump().await?;
-            self.tnc()?.command("DISCONNECT").await?;
+            self.hi_queue.push_back(Link::Chat { id: 0, text: "SWR is too high for me here; ending the link so we both go back.".into() });
+            self.hang_up("73").await?;
         }
         Ok(())
     }
@@ -2867,9 +2942,7 @@ impl Station {
             if done && self.mercury_buffer == 0 {
                 self.log(format!("Hanging up with {peer} (idle {idle:.0} s)"));
                 self.link_auto = None;
-                self.hi_queue.push_back(Link::Bye { text: "73".into() });
-                self.pump().await?;
-                self.tnc()?.command("DISCONNECT").await?;
+                self.hang_up("73").await?;
                 self.last_link_activity = Instant::now();
             }
         }
@@ -2992,7 +3065,7 @@ impl Station {
         self.search = Some(Search {
             channels: vec![dial],
             idx: 0,
-            phase: SearchPhase::Verify { target: dial, from: 0, coarse: 0.0, again: false },
+            phase: SearchPhase::Verify { target: dial, from: 0, coarse: 0.0, again: false, hops: 0 },
             scope: WIDE_SCOPE.into(),
         });
     }
@@ -3364,6 +3437,7 @@ mod tests {
         h.send(Cmd::Stop);
     }
 
+    #[allow(clippy::type_complexity)]
     fn demo_station(call: &str, f: impl FnOnce(&mut Config)) -> (Handle, impl Fn(&Handle, &str, u64, &dyn Fn(&State) -> bool)) {
         let h = spawn(|| {});
         let mut cfg = Config { demo: true, demo_real_mercury: false, callsign: call.into(), ..Default::default() };

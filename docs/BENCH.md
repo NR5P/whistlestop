@@ -26,8 +26,55 @@ cargo run --release --bin twotest -- ~/Desktop/mercury/source/mercury bench-run
 ```
 
 Add scenario names to run only some of them: `watch link chat files table
-narrow weak e2e depot`. Results go to `bench-run/REPORT.md`; Mercury and Whistlestop
+narrow weak e2e depot scan qsylib`. Results go to `bench-run/REPORT.md`; Mercury and Whistlestop
 logs are written beside it.
+
+## Whistle v2 against the first whistle (2026-11-11)
+
+Scenario `scan`: BRAVO scans the 20 m segment (10 channels), starting from a
+different channel and moment each trial; ALPHA calls CQ once. Time from the
+start of the whistle until BRAVO is tuned within Mercury's ±55 Hz. Both
+versions ran the same scenario on the same simulated band (one-sided USB
+passband, image rejection > 65 dB), each with its own defaults.
+
+| Signal | First whistle: 0.5 s chirps, 2.2 s dwell, 24 s whistle | Whistle v2: 0.2 s chirps, 0.5 s dwell (2 s when promising), 10 s whistle |
+|---|---|---|
+| strong | 4/4, median 14.5 s | 4/4, median 8.5 s |
+| weak (+14 dB) | 4/4, median 14.5 s | 4/4, median 6.2 s |
+| very weak (+8 dB) | 4/4, median 14.6 s | 4/4, median 5.1 s |
+
+v2 finds the caller in a third to a half of the time, inside a whistle less
+than half as long. The bench also shaped the scanner. It needed:
+
+- **Two whitenings in the scan detector.** Per frequency bin, so carriers,
+  RTTY and FT8 vanish; per frame, so a data burst (Mercury's OFDM) can't
+  pose as a whistle.
+- **A cell-count rule.** A loud signal crossing a wrong track at a few points
+  can't pass.
+- **Walking to a whistle.** A strong caller just below the passband edge
+  shows only the bottom of its sweep, so the first estimate can be hundreds
+  of hertz out. The scanner retunes again (up to two hops), and if the
+  whistle ends meanwhile, it waits for the CQ there.
+- **A one-sided simulated passband.** The ether used to let the opposite
+  sideband and fold-over through.
+
+## QSY and the file library (2026-11-11)
+
+BRAVO away, accepting QSYs (20 m only) and sharing a library:
+
+| Test | Result |
+|---|---|
+| Browse BRAVO's library over real Mercury | listing in 9 s |
+| Download a 3 KB file from it | 40 s, byte-exact |
+| QSY to 40 m | refused by BRAVO's rules ("I only QSY within 20m") |
+| QSY to 14.106 MHz | both moved in 12 s; chat crossed on the new frequency in 26 s |
+| End the link | both back on 14.10315 MHz |
+
+Making it reliable took a polite hang-up. A station now sends BYE and waits
+until Mercury has sent it before disconnecting. A station that receives BYE
+waits up to 30 s for the other's disconnect (Mercury's takes about 20 s)
+before hanging up itself; doing it sooner collides with theirs. A station
+back from a QSY stays 8 s so the disconnect finishes there.
 
 ## Results (Mercury 1.9.23 ×2, 2026-11-10): 18/18 passed, plus Depot 7/7
 

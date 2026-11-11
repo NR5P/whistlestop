@@ -178,7 +178,7 @@ fn click_search_link_chat() {
     click(&mut h, "Current band");
     wait(&mut h, 150.0, "link with K7BOT", |_, s| s.link.as_ref().is_some_and(|l| l.peer == "K7BOT"));
     wait(&mut h, 30.0, "greeting", |_, s| s.chat.iter().any(|c| c.who == Who::Them));
-    click(&mut h, "Chat");
+    click_exact(&mut h, "💬  Chat");
     type_into(&mut h, "Type a message", "hello from the click test");
     click(&mut h, "Send");
     wait(&mut h, 40.0, "reply", |_, s| s.chat.iter().any(|c| c.who == Who::Them && c.text.contains("hello from the click test")));
@@ -230,6 +230,14 @@ fn click_help_guide_settings_radio() {
     assert_eq!(h.state().cfg.rig_mode, whistlestop::rigsetup::RigMode::Direct);
     assert!(has_text(&h, "Share with Mercury on port"));
     assert!(has_button(&h, "Ask the radio"));
+    // New cards: QSY requests, File library, Schedule, all off by default.
+    for label in ["Accept QSY requests", "Share a file library", "Follow the schedule"] {
+        assert!(has_button(&h, label), "missing {label}: {:?}", buttons(&h));
+    }
+    let c = &h.state().cfg;
+    assert!(!c.accept_qsy && !c.share_library && !c.schedule_on, "new automation is off by default");
+    click(&mut h, "Add a time slot");
+    assert_eq!(h.state().cfg.schedule.len(), 1);
     // Radio controls window (demo radio has every control).
     h.state_mut().settings_open = false;
     frames(&mut h, 2);
@@ -294,10 +302,37 @@ fn click_real_mercury_demo() {
     click_exact(&mut h, "Answer");
     wait(&mut h, 120.0, "link with K7BOT over real Mercury", |_, s| s.link.as_ref().is_some_and(|l| l.peer == "K7BOT"));
     wait(&mut h, 120.0, "greeting", |_, s| s.chat.iter().any(|c| c.who == Who::Them));
-    click(&mut h, "Chat");
+    click_exact(&mut h, "💬  Chat");
     type_into(&mut h, "Type a message", "real Mercury click test");
     click(&mut h, "Send");
     wait(&mut h, 150.0, "reply over real Mercury", |_, s| s.chat.iter().any(|c| c.who == Who::Them && c.text.contains("real Mercury click test")));
     click(&mut h, "Disconnect");
     wait(&mut h, 60.0, "link down", |_, s| s.link.is_none());
+}
+
+/// Linked to K7BOT: the QSY row is there, and the Files tab browses its
+/// library and downloads a file, by clicks.
+#[test]
+fn click_library_and_qsy_row() {
+    let _g = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let mut h = app(demo_cfg("N0GUI"), 1400.0, 900.0);
+    wait(&mut h, 15.0, "Mercury", |_, s| s.mercury_ok);
+    type_into(&mut h, "Callsign", "K7BOT");
+    click_exact(&mut h, "Connect");
+    wait(&mut h, 40.0, "link", |_, s| s.link.is_some());
+    assert!(has_text(&h, "Move this link to"));
+    click(&mut h, "Files");
+    click(&mut h, "Browse");
+    wait(&mut h, 30.0, "listing", |_, s| s.library.is_some());
+    frames(&mut h, 3);
+    assert!(has_text(&h, "k7bot-qsl.txt"));
+    click_exact(&mut h, "Download");
+    wait(&mut h, 60.0, "downloaded", |_, s| s.transfers.iter().any(|t| t.name == "k7bot-qsl.txt" && matches!(t.state, XferState::Done(_))));
+    click_exact(&mut h, "💬  Chat");
+    type_into(&mut h, "kHz, e.g. 14106.5", "14106.5");
+    click_exact(&mut h, "Ask");
+    wait(&mut h, 40.0, "moved", |_, s| s.rig.freq_hz == 14_106_500.0 && s.qsy.is_some());
+    assert!(has_text(&h, "back to"));
+    click(&mut h, "Disconnect");
+    wait(&mut h, 30.0, "home", |_, s| s.link.is_none() && s.qsy.is_none());
 }

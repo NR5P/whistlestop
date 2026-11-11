@@ -407,17 +407,17 @@ pub struct TrackDetector {
 
 impl TrackDetector {
     /// "Worth listening longer" after a 0.5 s dwell: 15 % of busy-band
-    /// dwells with no whistle score this high; 86–88 % of whistles at
+    /// dwells with no whistle score this high; 82–84 % of whistles at
     /// −10 dB do (calibrated with `whistlelab calibrate`).
-    pub const MAYBE: f64 = 5.07;
+    pub const MAYBE: f64 = 2.48;
 
     /// "Whistle found" for a block of `secs` seconds: 1 % of busy-band
-    /// dwells with no whistle score above it (6.43 at 0.5 s, 5.64 at 2 s;
+    /// dwells with no whistle score above it (3.98 at 0.5 s, 1.99 at 2 s;
     /// longer blocks give steadier scores). Calibrated with
     /// `whistlelab calibrate`.
     pub fn found(secs: f64) -> f64 {
         let r = (secs.clamp(0.5, 2.0) / 0.5).log2() / 2.0; // 0 at 0.5 s, 1 at 2 s
-        6.43 + (5.64 - 6.43) * r
+        3.98 + (1.99 - 3.98) * r
     }
     /// Largest value one whitened cell may add.
     const CAP: f64 = 16.0;
@@ -468,7 +468,18 @@ impl TrackDetector {
             let mut col: Vec<f64> = rows.iter().map(|r| r[b]).collect();
             col.sort_by(|a, c| a.partial_cmp(c).unwrap());
             let q = (col[(col.len() * 3) / 4] / 4f64.ln()).max(1e-30);
-            rows.iter_mut().for_each(|r| r[b] = (r[b] / q).min(Self::CAP));
+            rows.iter_mut().for_each(|r| r[b] /= q);
+        }
+        // Then each frame by its own median across the band: a data burst
+        // (an OFDM modem, a CQFRAME) lights every bin at once and is levelled
+        // back to noise, while a whistle lights only one or two bins.
+        for r in rows.iter_mut() {
+            let mut v = r.clone();
+            let m = median(&mut v) / std::f64::consts::LN_2;
+            if m > 1.0 {
+                r.iter_mut().for_each(|c| *c /= m);
+            }
+            r.iter_mut().for_each(|c| *c = c.min(Self::CAP));
         }
         let pre: Vec<Vec<f64>> = rows
             .iter()
@@ -486,8 +497,13 @@ impl TrackDetector {
         let nd = (self.reach_hz / bw).ceil() as i64;
         let e = (-Self::CAP).exp();
         let (mu, var) = (1.0 - e, 1.0 - 2.0 * Self::CAP * e - e * e);
+        // Cells along a real track are mostly a bit above the noise; a loud
+        // signal crossing a wrong track makes only a few huge ones. So a
+        // track also needs enough cells over 3× the noise (a noise cell
+        // does that with probability e^-3).
+        let p0 = (-3.0f64).exp();
         let z_at = |dt: usize, df: i64| -> Option<f64> {
-            let (mut s, mut n) = (0.0, 0.0);
+            let (mut s, mut n, mut over) = (0.0, 0.0, 0.0);
             for (t, p) in pre.iter().enumerate() {
                 let tc = (t + dt) as f64 * hop_s;
                 let (fa, fb) = (self.track(tc), self.track(tc + frame_s));
@@ -500,10 +516,16 @@ impl TrackDetector {
                 }
                 s += p[bhi as usize + 1] - p[blo as usize];
                 n += (bhi - blo + 1) as f64;
+                over += (blo..=bhi).filter(|&b| rows[t][b as usize] > 3.0).count() as f64;
             }
             // At least half the track inside the passband: a sliver at
             // the edge is too easy to fake.
-            (n >= 0.5 * nt as f64).then(|| (s - n * mu) / (n * var).sqrt())
+            if n < 0.5 * nt as f64 {
+                return None;
+            }
+            let z = (s - n * mu) / (n * var).sqrt();
+            let z_over = (over - n * p0) / (n * p0 * (1.0 - p0)).sqrt();
+            Some(if z_over >= 3.0 { z } else { z.min(z_over) })
         };
         let mut best: Option<(TrackHit, usize, i64)> = None;
         for dt in 0..period_frames {
@@ -675,6 +697,37 @@ mod tests {
                 assert!((h.offset_hz - off).abs() < 80.0, "off={off}: got {}", h.offset_hz);
             }
         }
+    }
+
+    #[test]
+    fn data_bursts_dont_look_like_whistles_to_the_scan() {
+        // A strong OFDM burst (33 carriers, 62.5 Hz apart, new phases every
+        // 16 ms) for part of the window: every bin lights at once.
+        let mut rng = StdRng::seed_from_u64(23);
+        let nd = Normal::new(0.0, 0.05).unwrap();
+        let mut t = TrackDetector::new(WhistleParams::default());
+        let mut over = 0;
+        for trial in 0..60 {
+            let n = 12_800; // 1.6 s, the whistle watch's window
+            let mut x: Vec<f64> = (0..n).map(|_| nd.sample(&mut rng)).collect();
+            let (start, len) = (800 + trial * 97, 4000 + trial * 61);
+            let mut ph: Vec<f64> = (0..33).map(|k| k as f64).collect();
+            #[allow(clippy::needless_range_loop)]
+            for i in start..(start + len).min(n) {
+                if i % 128 == 0 {
+                    for p in ph.iter_mut() {
+                        *p = (nd.sample(&mut rng).abs() * 80.0).floor() % 4.0 * PI / 2.0;
+                    }
+                }
+                let tt = i as f64 / 8000.0;
+                x[i] += ph.iter().enumerate().map(|(k, p)| 0.15 * (2.0 * PI * (500.0 + 62.5 * k as f64) * tt + p).cos()).sum::<f64>();
+            }
+            let x = ssb_channel(&x, 0.0, FS, PASSBAND);
+            if t.scan(&x).is_some_and(|h| h.z > TrackDetector::found(1.6)) {
+                over += 1;
+            }
+        }
+        assert!(over <= 1, "{over} of 60 bursts looked like whistles");
     }
 
     #[test]

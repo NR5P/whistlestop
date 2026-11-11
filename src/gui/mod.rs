@@ -568,6 +568,9 @@ impl App {
                     self.send(Cmd::SetPower(self.power));
                 }
             });
+            if let Some(n) = &s.schedule_now {
+                ui.label(RichText::new(format!("🗓 Schedule: {n}")).color(TEAL)).help(&help::ST_SCHED_ON);
+            }
             ui.horizontal(|ui| {
                 let b = egui::Button::new(RichText::new("🎛  Radio controls").strong().color(if self.rigwin.open { BG } else { TEXT })).fill(if self.rigwin.open { TEAL } else { CARD_HI });
                 if ui.add(b).help(&help::RC_OPEN).clicked() {
