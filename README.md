@@ -106,6 +106,9 @@ per packet. Details: [docs/PROTOCOL.md](docs/PROTOCOL.md#encryption-optional).
 - [docs/DESIGN.md](docs/DESIGN.md): the whistle, search, CQ cycle, station
   wiring, prior art, limits, roadmap
 - [docs/PROTOCOL.md](docs/PROTOCOL.md): WSP, the application protocol
+- [docs/WHISTLE-LAB.md](docs/WHISTLE-LAB.md): which whistle shape and detector
+  let a scanner find a caller fastest (simulation study, `--bin whistlelab`)
+- [docs/BENCH.md](docs/BENCH.md): the two-station real-Mercury bench
 
 ## Layout
 
