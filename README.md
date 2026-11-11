@@ -34,6 +34,11 @@ nearby and can tune to them with one click.
   whole digital segment at once, finds whistles within about 1.5 s, and hands
   them to the main radio to fine-lock. Without a dongle, the one radio does
   the searching.
+- **Encryption (optional, off by default)**: 1:1 chat and files can be sealed
+  end to end (X25519 + ChaCha20-Poly1305, fresh keys per link, forgotten when
+  it ends), with a 6-digit code the two operators compare to rule out a man
+  in the middle. **Not legal on amateur bands** in the US (47 CFR
+  97.113(a)(4)) or most other countries. Roundtables are never encrypted.
 - **Demo mode**: the whole app with a simulated radio, band, Mercury and a
   demo station (K7BOT). No radio needed.
 
@@ -63,6 +68,24 @@ is a 6 s sample).
 3. In Whistlestop **Settings**: callsign, untick Demo, choose the radio's audio
    in/out, then **Save & connect**.
 
+## Encryption
+
+Settings → **Encryption** has three choices: **Off** (default), **Prefer**
+(encrypt when the other station does too) and **Require** (encrypt or hang
+up). Turning it on shows the legal warning below and asks you to confirm.
+
+> ⚠ Encryption is **not legal on amateur radio bands** in the US
+> (47 CFR 97.113(a)(4)) and in most other countries: amateur transmissions may
+> not be encoded to obscure their meaning. Use it only where it is lawful.
+> Whistlestop does not check which band you are on.
+
+When a link is encrypted the link header shows **🔒 encrypted** and a code
+such as `482 913`. Read it to the other operator by voice or another channel
+no one else controls. If both screens show the same code, no one is in the
+middle; if not, disconnect. Each link makes new keys, and they are wiped
+from memory when it ends. Nothing is written to disk. Sealing costs 17 bytes
+per packet. Details: [docs/PROTOCOL.md](docs/PROTOCOL.md#encryption-optional).
+
 ## Docs
 
 - [docs/DESIGN.md](docs/DESIGN.md): the whistle, search, CQ cycle, station
@@ -76,6 +99,7 @@ is a 6 s sample).
 | `src/whistle.rs` | chirp generator, detector, offset estimator |
 | `src/engine.rs` | search, whistle watch, CQ, link, files, Roundtable |
 | `src/protocol.rs` | WSP encoding and file/Roundtable state |
+| `src/e2e.rs` | optional link encryption: key exchange, sealing, SAS |
 | `src/tnc.rs` | Mercury TNC client |
 | `src/rig.rs` | rigctld client |
 | `src/audio.rs` | sound card, simulated band, audio spectrum |
@@ -86,5 +110,6 @@ is a 6 s sample).
 | `src/gui/` | the egui interface |
 | `prototype-python/` | first Python prototype of the whistle maths (reference only) |
 
-Tests: `cargo test --release` (33, including a full headless demo: search →
-lock → CQ → connect → chat → zipped file).
+Tests: `cargo test --release` (47, including a full headless demo: search →
+lock → CQ → connect → chat → zipped file, and the same over an encrypted
+link).

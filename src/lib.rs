@@ -1,6 +1,7 @@
 pub mod audio;
 pub mod bandplan;
 pub mod config;
+pub mod e2e;
 pub mod engine;
 pub mod fake_mercury;
 pub mod modes;

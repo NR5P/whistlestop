@@ -4,7 +4,8 @@ mod waterfall;
 
 use whistlestop::bandplan::{self, SearchScope};
 use whistlestop::config::Config;
-use whistlestop::engine::{self, Cmd, Dir, Handle, State, Who, XferState};
+use whistlestop::e2e::{self, Policy};
+use whistlestop::engine::{self, Cmd, Dir, E2eView, Handle, State, Who, XferState};
 use whistlestop::modes::{self, Bandwidth};
 use whistlestop::protocol;
 use eframe::egui::{
@@ -146,6 +147,9 @@ pub struct App {
     logo: Option<egui::TextureHandle>,
     last_err: Option<String>,
     wf_share: f32,
+    /// Encryption setting the operator picked, waiting for them to confirm
+    /// the legal warning.
+    e2e_confirm: Option<Policy>,
     /// WHISTLESTOP_SHOTS=<dir>: a scripted tour of the demo, with screenshots.
     tour: Option<Tour>,
 }
@@ -189,6 +193,7 @@ impl App {
             logo: None,
             last_err: None,
             wf_share: 0.30,
+            e2e_confirm: None,
             tour: std::env::var_os("WHISTLESTOP_SHOTS").map(|d| Tour {
                 dir: d.into(),
                 step: 0,
@@ -647,6 +652,29 @@ impl App {
                     }
                     ui.label(RichText::new(who.join(" · ")).color(TEXT));
                     ui.label(RichText::new(format!("{} Hz", l.bw)).color(DIM));
+                    match &l.e2e {
+                        E2eView::Off => {}
+                        E2eView::Negotiating => {
+                            ui.label(RichText::new("⏳ setting up encryption…").color(BRASS))
+                                .on_hover_text("Exchanging keys. Chat and files wait until this is done.");
+                        }
+                        E2eView::Encrypted { sas } => {
+                            Frame::NONE.fill(GREEN.linear_multiply(0.25)).stroke(Stroke::new(1.0, GREEN)).corner_radius(6.0).inner_margin(Margin::symmetric(8, 2)).show(ui, |ui| {
+                                ui.label(RichText::new("🔒 encrypted").strong().color(GREEN));
+                                ui.label(RichText::new(format!("code {sas}")).size(18.0).monospace().strong().color(TEXT));
+                            })
+                            .response
+                            .on_hover_text(format!(
+                                "Chat and files on this link are encrypted with keys made for this link only, and forgotten when it ends.\n\n\
+                                 Read the code {sas} to {} by voice (or any channel no one else controls). \
+                                 If their screen shows the same code, no one is in the middle. If it differs, disconnect.",
+                                l.peer
+                            ));
+                        }
+                        E2eView::Plain { why } => {
+                            ui.label(RichText::new("🔓 not encrypted").color(DIM)).on_hover_text(why.as_str());
+                        }
+                    }
                     if let Some(r) = l.their_report_db {
                         ui.label(RichText::new(format!("hears you {r:+} dB")).color(TEAL));
                     }
@@ -1330,6 +1358,33 @@ impl App {
                         ui.checkbox(&mut c.auto_ramp, "Roundtable speed ramp-up (host)");
                     });
                     ui.add_space(6.0);
+                    card(ui, "Encryption (1:1 chat and files)", |ui| {
+                        let mut want = c.e2e;
+                        ui.horizontal(|ui| {
+                            for p in [Policy::Off, Policy::Prefer, Policy::Require] {
+                                ui.selectable_value(&mut want, p, p.label());
+                            }
+                        });
+                        if want != c.e2e {
+                            if c.e2e == Policy::Off {
+                                self.e2e_confirm = Some(want); // ask first
+                            } else {
+                                c.e2e = want;
+                            }
+                        }
+                        ui.label(
+                            RichText::new(match c.e2e {
+                                Policy::Off => "Links are plain text (the default).",
+                                Policy::Prefer => "Encrypt when the other station does too; otherwise plain text.",
+                                Policy::Require => "Encrypt or hang up: never plain text.",
+                            })
+                            .small()
+                            .color(DIM),
+                        );
+                        ui.label(RichText::new(format!("⚠ {}", e2e::LEGAL_WARNING)).small().color(RED));
+                        ui.label(RichText::new("Roundtables are never encrypted. Keys are made per link and never saved.").small().color(DIM));
+                    });
+                    ui.add_space(6.0);
                     card(ui, "Files", |ui| {
                         ui.horizontal(|ui| {
                             ui.label(c.download_dir.display().to_string());
@@ -1348,6 +1403,42 @@ impl App {
                     ui.label(RichText::new(format!("Saved to {}", whistlestop::config::path().display())).small().color(DIM));
                 });
             });
+        if let Some(want) = self.e2e_confirm {
+            let mut decided = None;
+            egui::Window::new(RichText::new("Turn on encryption?").strong().color(RED))
+                .collapsible(false)
+                .resizable(false)
+                .default_width(440.0)
+                .anchor(Align2::CENTER_CENTER, vec2(0.0, 0.0))
+                .order(egui::Order::Foreground)
+                .show(ctx, |ui| {
+                    ui.label(RichText::new(e2e::LEGAL_WARNING).color(TEXT));
+                    ui.add_space(6.0);
+                    ui.label(
+                        RichText::new("You are responsible for where you transmit. Whistlestop does not check which band you are on.")
+                            .small()
+                            .color(DIM),
+                    );
+                    ui.add_space(8.0);
+                    ui.horizontal(|ui| {
+                        let b = egui::Button::new(RichText::new(format!("I understand: set {}", want.label())).strong()).fill(RED.linear_multiply(0.4));
+                        if ui.add(b).clicked() {
+                            decided = Some(true);
+                        }
+                        if ui.button("Cancel").clicked() {
+                            decided = Some(false);
+                        }
+                    });
+                });
+            match decided {
+                Some(true) => {
+                    self.cfg.e2e = want;
+                    self.e2e_confirm = None;
+                }
+                Some(false) => self.e2e_confirm = None,
+                None => {}
+            }
+        }
         if apply {
             if let Err(e) = self.cfg.save() {
                 self.toast(format!("Could not save settings: {e}"));
