@@ -193,6 +193,31 @@ impl LiveInput {
     }
 }
 
+impl LiveInput {
+    /// Receive audio from the test ether (f32 LE at 8 kHz over TCP).
+    pub fn ether(mut stream: std::net::TcpStream, rx: SharedRx) -> Self {
+        use std::io::Read;
+        let stop = Arc::new(AtomicBool::new(false));
+        let st = stop.clone();
+        std::thread::spawn(move || {
+            let mut buf = vec![0u8; 8192];
+            let mut carry: Vec<u8> = vec![];
+            while !st.load(Ordering::Relaxed) {
+                let n = match stream.read(&mut buf) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => n,
+                };
+                carry.extend_from_slice(&buf[..n]);
+                let whole = carry.len() / 4 * 4;
+                let x: Vec<f32> = carry[..whole].chunks(4).map(|b| f32::from_le_bytes(b.try_into().unwrap())).collect();
+                carry.drain(..whole);
+                rx.lock().unwrap().push(&x);
+            }
+        });
+        Self { stop }
+    }
+}
+
 impl Drop for LiveInput {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
@@ -249,6 +274,38 @@ impl LiveOutput {
         });
         let rate = ready_rx.recv_timeout(Duration::from_secs(5)).map_err(|_| anyhow!("audio output did not start"))??;
         Ok(Self { queue, rate, stop })
+    }
+
+    /// Send audio to the test ether, paced in real time at 8 kHz.
+    pub fn ether(mut stream: std::net::TcpStream) -> Self {
+        use std::io::Write;
+        let queue: Arc<Mutex<VecDeque<f32>>> = Default::default();
+        let stop = Arc::new(AtomicBool::new(false));
+        let (q, st) = (queue.clone(), stop.clone());
+        std::thread::spawn(move || {
+            let block = FS as usize / 50;
+            let mut next = std::time::Instant::now();
+            while !st.load(Ordering::Relaxed) {
+                let chunk: Vec<f32> = {
+                    let mut q = q.lock().unwrap();
+                    let n = q.len().min(block);
+                    q.drain(..n).collect()
+                };
+                if !chunk.is_empty() {
+                    let bytes: Vec<u8> = chunk.iter().flat_map(|v| v.to_le_bytes()).collect();
+                    if stream.write_all(&bytes).is_err() {
+                        return;
+                    }
+                }
+                next += Duration::from_millis(20);
+                if let Some(w) = next.checked_duration_since(std::time::Instant::now()) {
+                    std::thread::sleep(w);
+                } else {
+                    next = std::time::Instant::now();
+                }
+            }
+        });
+        Self { queue, rate: FS, stop }
     }
 
     pub async fn play(&self, samples: &[f32]) {

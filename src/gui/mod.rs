@@ -252,20 +252,6 @@ impl App {
                     ui.label(RichText::new(s.snr_db.map(|v| format!("{v:+.0} dB")).unwrap_or("—".into())).monospace().color(DIM));
                 });
             });
-            ui.add_space(10.0);
-            ui.vertical(|ui| {
-                ui.set_width(170.0);
-                let speed = match &s.link {
-                    Some(l) => format!(
-                        "{} · {:.0} bps",
-                        l.mode.map(|m| m.name).unwrap_or("linking"),
-                        l.bps
-                    ),
-                    None => format!("{} listen", s.listen_mode.map(|m| m.name).unwrap_or("—")),
-                };
-                ui.label(RichText::new("SPEED").size(10.5).color(DIM));
-                ui.label(RichText::new(speed).strong().color(TEAL));
-            });
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 if ui.add(egui::Button::new(RichText::new("⚙  Settings").size(14.0))).clicked() {
                     self.settings_open = true;
@@ -317,6 +303,85 @@ impl App {
             f.set_width(r.width() * v);
             p.rect_filled(f, 4.0, color);
         }
+    }
+
+    // --------------------------------------------------------- modem strip
+
+    /// What the modem is doing right now, spelled out.
+    fn modem_strip(&mut self, ui: &mut Ui, s: &State) {
+        let user_bw = s.bandwidth.unwrap_or(self.cfg.bandwidth);
+        let (mode, context) = match &s.link {
+            Some(l) => (l.mode, format!("1:1 link with {}", l.peer)),
+            None if s.table.is_some() => (s.listen_mode, "Roundtable (broadcast)".to_string()),
+            None => (s.listen_mode, "idle · listening".to_string()),
+        };
+        let seg = |ui: &mut Ui, label: &str, value: RichText, sub: Option<String>| {
+            ui.vertical(|ui| {
+                ui.spacing_mut().item_spacing.y = 1.0;
+                ui.label(RichText::new(label).size(10.0).color(DIM).strong());
+                ui.label(value);
+                if let Some(sub) = sub {
+                    ui.label(RichText::new(sub).size(10.5).color(DIM));
+                }
+            });
+            ui.add_space(6.0);
+            ui.separator();
+            ui.add_space(6.0);
+        };
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 4.0;
+            let (state, col) = if s.tx { ("TRANSMITTING", RED) } else { ("RECEIVING", GREEN) };
+            seg(ui, "MODEM", RichText::new(state).strong().color(col), Some(context));
+            match mode {
+                Some(m) => {
+                    seg(ui, "MODE", RichText::new(m.name).strong().size(15.0).color(BRASS), Some(m.modulation.to_string()));
+                    let tones = if m.modulation.contains("MFSK") { "tones" } else { "carriers" };
+                    seg(ui, "CARRIERS", RichText::new(format!("{} {tones}", m.carriers)).strong(), Some(format!("{:.1} Hz apart", m.spacing_hz)));
+                    seg(
+                        ui,
+                        "BANDWIDTH",
+                        RichText::new(format!("{} Hz used", m.bandwidth_hz)).strong(),
+                        Some(match &s.link {
+                            Some(l) => format!("your limit {} · agreed {} Hz", user_bw, l.bw),
+                            None => format!("your limit {user_bw}"),
+                        }),
+                    );
+                    let measured = if s.link.is_some() && s.est_bps > 0.0 { format!("measured {:.0} bps", s.est_bps) } else { "raw rate of this mode".into() };
+                    seg(ui, "SPEED", RichText::new(format!("{:.0} bps", s.modem_bps.filter(|_| s.link.is_some()).unwrap_or(m.payload_bps))).strong().color(TEAL), Some(measured));
+                    seg(ui, "ERROR CORRECTION", RichText::new(m.fec).strong(), Some(format!("{} B per {:.1} s frame", m.frame_bytes, m.frame_s)));
+                }
+                None => seg(ui, "MODE", RichText::new("connecting…").color(DIM), None),
+            }
+            seg(ui, "SNR", RichText::new(s.snr_db.map(|v| format!("{v:+.1} dB")).unwrap_or("—".into())).strong(), Some("Mercury's measure".into()));
+            // The speed ladder: where Mercury sits, and the rungs it can use.
+            let session_bw = s.link.as_ref().map(|l| l.bw).unwrap_or(user_bw.mercury_arq_bw());
+            let ladder = modes::arq_ladder(session_bw);
+            ui.vertical(|ui| {
+                ui.spacing_mut().item_spacing.y = 2.0;
+                ui.label(RichText::new("SPEED LADDER").size(10.0).color(DIM).strong());
+                let (r, resp) = ui.allocate_exact_size(vec2(16.0 * ladder.len() as f32, 26.0), Sense::hover());
+                let p = ui.painter();
+                let mut tip = vec![];
+                for (i, m) in ladder.iter().enumerate() {
+                    let h = 6.0 + 20.0 * (i + 1) as f32 / ladder.len() as f32;
+                    let x = r.left() + i as f32 * 16.0;
+                    let bar = Rect::from_min_max(Pos2::new(x + 2.0, r.bottom() - h), Pos2::new(x + 13.0, r.bottom()));
+                    let on = mode.is_some_and(|c| c.name == m.name) && s.link.is_some();
+                    p.rect_filled(bar, 2.0, if on { BRASS } else { CARD_HI });
+                    tip.push(format!("{}{}: {} · {:.0} bps · needs ≈{:+.0} dB", if on { "▶ " } else { "   " }, m.name, m.modulation, m.payload_bps, m.min_snr_db));
+                }
+                resp.on_hover_text(format!(
+                    "Mercury climbs and descends this ladder by itself during a 1:1 link,\nfrom what actually gets through. Session bandwidth {session_bw} Hz.\n\n{}",
+                    tip.join("\n")
+                ));
+                ui.label(RichText::new(if s.link.is_some() { "automatic" } else { "used when linked" }).size(10.5).color(DIM));
+            });
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                if let Some(v) = &s.modem_version {
+                    ui.label(RichText::new(v).size(10.5).color(DIM));
+                }
+            });
+        });
     }
 
     // ---------------------------------------------------------- left panel
@@ -716,13 +781,7 @@ impl App {
                                             ui.label(RichText::new(&c.from).strong().color(if mine { BRASS } else { TEAL }));
                                             ui.label(RichText::new(c.at.hhmm()).small().color(DIM));
                                             if mine {
-                                                let (t, col) = if c.seen {
-                                                    ("✓✓ seen", TEAL)
-                                                } else if c.delivered {
-                                                    ("✓ sent", DIM)
-                                                } else {
-                                                    ("… on air", BRASS)
-                                                };
+                                                let (t, col) = if c.delivered { ("✓ delivered", TEAL) } else { ("… sending", BRASS) };
                                                 ui.label(RichText::new(t).small().color(col));
                                             }
                                         });
@@ -1400,6 +1459,8 @@ impl eframe::App for App {
                 listen_mode: g.listen_mode,
                 est_bps: g.est_bps,
                 wide: g.wide.clone(),
+                modem_version: g.modem_version.clone(),
+                modem_bps: g.modem_bps,
             }
         };
 
@@ -1407,6 +1468,9 @@ impl eframe::App for App {
             .frame(Frame::NONE.fill(BG).inner_margin(Margin::symmetric(14, 10)))
             .show(ui, |ui| self.top_bar(ui, &snap));
         let screen_h = ctx.content_rect().height();
+        egui::Panel::top("modem")
+            .frame(Frame::NONE.fill(PANEL).inner_margin(Margin::symmetric(14, 6)).stroke(Stroke::new(1.0, BORDER)))
+            .show(ui, |ui| self.modem_strip(ui, &snap));
         egui::Panel::bottom("wf")
             .resizable(false)
             .exact_size((screen_h * self.wf_share).clamp(140.0, screen_h * 0.6))

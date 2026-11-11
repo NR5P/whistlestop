@@ -118,7 +118,8 @@ fn read_varint_prefix(b: &[u8]) -> Option<(usize, usize)> {
 pub enum Link {
     Hello { version: u8, caps: u8, name: String, grid: String, app: String },
     Chat { id: u64, text: String },
-    Seen { id: u64 },
+    /// The CHAT `id` arrived (sent automatically on receipt).
+    Received { id: u64 },
     Offer { fid: u64, name: String, size: u64, sha: [u8; 32], zipped: bool, files: u64 },
     Answer { fid: u64, accept: bool, resume_from: u64 },
     Chunk { fid: u64, offset: u64, data: Vec<u8> },
@@ -140,7 +141,7 @@ impl Link {
             Link::Chat { id, text } => {
                 w.u8(0x02).uv(*id).str(text);
             }
-            Link::Seen { id } => {
+            Link::Received { id } => {
                 w.u8(0x03).uv(*id);
             }
             Link::Offer { fid, name, size, sha, zipped, files } => {
@@ -184,7 +185,7 @@ impl Link {
         Ok(match r.u8()? {
             0x01 => Link::Hello { version: r.u8()?, caps: r.u8()?, name: r.str()?, grid: r.str()?, app: r.str()? },
             0x02 => Link::Chat { id: r.uv()?, text: r.str()? },
-            0x03 => Link::Seen { id: r.uv()? },
+            0x03 => Link::Received { id: r.uv()? },
             0x04 => Link::Offer {
                 fid: r.uv()?,
                 name: r.str()?,

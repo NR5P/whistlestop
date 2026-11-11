@@ -139,14 +139,16 @@ async fn serve(ctl: TcpListener, data: TcpListener, bc: TcpListener, opts: FakeO
                 }
                 _ = tick.tick() => s.tick(tick_ms as f64 / 1000.0),
             }
-            // Flush what the session produced.
+            // Flush what the session produced. Data goes first: real Mercury
+            // can deliver link data before its CONNECTED line arrives, and
+            // the app must cope (this keeps that race covered).
             let mut dead = false;
-            for l in s.ctl_out.drain(..) {
-                dead |= cw.write_all(format!("{l}\r").as_bytes()).await.is_err();
-            }
             if !s.data_out.is_empty() {
                 let d: Vec<u8> = std::mem::take(&mut s.data_out);
                 dead |= dw.write_all(&d).await.is_err();
+            }
+            for l in s.ctl_out.drain(..) {
+                dead |= cw.write_all(format!("{l}\r").as_bytes()).await.is_err();
             }
             if !s.bcast_out.is_empty() {
                 if let Some(w) = bc_w.lock().await.as_mut() {
@@ -200,6 +202,7 @@ struct Session {
     next_cq: f64,
     table_msg_id: u64,
     answered_cq: bool,
+    t0: std::time::Instant,
 }
 
 impl Session {
@@ -225,6 +228,7 @@ impl Session {
             next_cq: 3.0,
             table_msg_id: 0,
             answered_cq: false,
+            t0: std::time::Instant::now(),
         }
     }
 
@@ -242,6 +246,9 @@ impl Session {
     }
 
     fn on_ctl(&mut self, line: &str) {
+        if std::env::var_os("WS_FAKE_DEBUG").is_some() {
+            eprintln!("[fake {:.1}s real {:.1}s] ctl < {line}  (peer {:?}, uplink {}, downlink {})", self.now, self.t0.elapsed().as_secs_f64(), self.peer, self.uplink.len(), self.downlink.len());
+        }
         let mut w = line.split_whitespace();
         let cmd = w.next().unwrap_or("").to_ascii_uppercase();
         match cmd.as_str() {
@@ -310,6 +317,9 @@ impl Session {
     }
 
     fn connect_bot(&mut self) {
+        if std::env::var_os("WS_FAKE_DEBUG").is_some() {
+            eprintln!("[fake {:.1}s] bot connects", self.now);
+        }
         let bot = self.o.bot_call.clone();
         self.peer = Some(bot.clone());
         let l = format!("CONNECTED {} {} 2300", bot, self.mycall);
@@ -327,12 +337,15 @@ impl Session {
             self.mycall
         );
         self.bot_send(Link::Chat { id: self.bot_chat_id, text: hi });
+        // Greeting goes out with CONNECTED, ahead of it on the wire.
+        let early: Vec<u8> = self.downlink.drain(..).collect();
+        self.data_out.extend(early);
     }
 
     fn on_link(&mut self, p: Link) {
         match p {
             Link::Chat { id, text } => {
-                self.bot_send(Link::Seen { id });
+                self.bot_send(Link::Received { id });
                 let t = text.to_lowercase();
                 let reply = if t.contains("file") || t.contains("send me") {
                     let body = format!(

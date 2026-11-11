@@ -50,7 +50,7 @@ body   := type(u8) fields...
 |---|---|---|---|
 | `0x01` | HELLO | `u8 version`, `u8 caps`, `str name`, `str grid`, `str app` | First thing each side sends after `CONNECTED`. `caps` bit 0 = resume, bit 1 = zip. |
 | `0x02` | CHAT | `uv id`, `str text` | A chat line. `id` counts up per sender. |
-| `0x03` | SEEN | `uv id` | The CHAT `id` has been shown to the operator (a read receipt). |
+| `0x03` | RECEIVED | `uv id` | The CHAT `id` arrived. Sent automatically on receipt, so the sender sees "✓ delivered". (No read receipts and no typing indicators: they cost airtime.) |
 | `0x04` | OFFER | `uv fid`, `str name`, `uv size`, `hash32 sha`, `u8 flags`, `uv files` | A file is offered. `flags` bit 0 = zip made by Whistlestop. `files` = entries inside the zip. |
 | `0x05` | ANSWER | `uv fid`, `u8 accept`, `uv resume_from` | Accept (`1`) or decline (`0`). `resume_from` = bytes already held. |
 | `0x06` | CHUNK | `uv fid`, `uv offset`, `bytes data` | Piece of an accepted file, at most 1024 bytes. |

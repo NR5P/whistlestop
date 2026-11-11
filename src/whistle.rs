@@ -288,8 +288,15 @@ impl Detector {
             for &id in &downs {
                 let td = refine(&rd, id);
                 let gap = lo + (td - tu - lo).rem_euclid(period);
+                let edge = 0.04 * period;
+                if gap - lo < edge || lo + period - gap < edge {
+                    continue; // UP and DOWN coincide: an impulse, not a whistle
+                }
                 cand.push(((gap - t) / fs * p.k() / 2.0, 0.5 * (ru[iu] + rd[id]), iu));
             }
+        }
+        if cand.is_empty() {
+            return None;
         }
         let med = median(&mut cand.iter().map(|c| c.0).collect::<Vec<_>>());
         let kept: Vec<_> = cand.into_iter().filter(|c| (c.0 - med).abs() < 25.0).collect();
@@ -415,6 +422,29 @@ mod tests {
         let d = Detector::new(p).detect(&x).expect("partial whistle still detected");
         assert!((d.offset_hz + 550.0).abs() < 3.0, "{}", d.offset_hz);
         assert!((p.alias_of(d.offset_hz) - 1450.0).abs() < 3.0);
+    }
+
+    #[test]
+    fn data_bursts_and_clicks_are_not_whistles() {
+        // OFDM-like bursts with hard onsets (what Mercury's frames look like
+        // to the detector) and isolated clicks.
+        let mut rng = StdRng::seed_from_u64(11);
+        let nd = Normal::new(0.0, 1.0).unwrap();
+        let mut d = Detector::new(WhistleParams::default());
+        for trial in 0..20 {
+            let mut x = vec![0.0f64; 17600];
+            let mut t = 800 + trial * 37;
+            while t + 3000 < x.len() {
+                for v in x[t..t + 2500].iter_mut() {
+                    *v = nd.sample(&mut rng);
+                }
+                t += 4000 + trial * 13;
+            }
+            x[400] = 8.0;
+            x[9000] = -8.0;
+            let x = ssb_channel(&x, 0.0, FS, PASSBAND);
+            assert!(d.detect(&x).is_none(), "trial {trial}: {:?}", d.detect(&x));
+        }
     }
 
     #[test]

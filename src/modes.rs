@@ -23,6 +23,14 @@ pub struct Mode {
     pub frame_s: f64,
     /// SNR (dB, 2500 Hz) at which the mode delivers reliably (MODES.md MPP figures).
     pub min_snr_db: f64,
+    /// e.g. "OFDM QPSK", "OFDM 16-QAM", "32-MFSK".
+    pub modulation: &'static str,
+    /// OFDM carriers, or MFSK tones.
+    pub carriers: u16,
+    /// Carrier (or tone) spacing, Hz.
+    pub spacing_hz: f64,
+    /// Forward error correction: code and rate.
+    pub fec: &'static str,
 }
 
 impl Mode {
@@ -33,16 +41,32 @@ impl Mode {
 }
 
 /// Runtime-switchable payload modes, slowest/most robust first.
+///
+/// Carriers, spacing and modulation are from Mercury's
+/// `modem/freedv/ofdm_mode.c` (OFDM symbol 16 ms -> 62.5 Hz spacing; 2 bits
+/// per symbol = QPSK unless set to 4 = 16-QAM) and its 32-MFSK floor; FEC and
+/// rates from `docs/MODES.md` (v1.9.23).
 pub const MODES: &[Mode] = &[
-    Mode { name: "MFSK500", index: 12, bitrate_code: 100, bandwidth_hz: 500, payload_bps: 31.0, frame_bytes: 98, frame_s: 26.2, min_snr_db: -14.0 },
-    Mode { name: "MFSK", index: 11, bitrate_code: 100, bandwidth_hz: 1000, payload_bps: 60.0, frame_bytes: 98, frame_s: 13.5, min_snr_db: -11.0 },
-    Mode { name: "DATAC15", index: 7, bitrate_code: 15, bandwidth_hz: 200, payload_bps: 68.0, frame_bytes: 30, frame_s: 3.74, min_snr_db: -7.0 },
-    Mode { name: "DATAC4", index: 3, bitrate_code: 4, bandwidth_hz: 250, payload_bps: 87.0, frame_bytes: 54, frame_s: 5.17, min_snr_db: -4.0 },
-    Mode { name: "DATAC3", index: 1, bitrate_code: 3, bandwidth_hz: 500, payload_bps: 321.0, frame_bytes: 126, frame_s: 3.19, min_snr_db: 0.0 },
-    Mode { name: "DATAC1", index: 0, bitrate_code: 1, bandwidth_hz: 1700, payload_bps: 980.0, frame_bytes: 510, frame_s: 4.18, min_snr_db: 5.0 },
-    Mode { name: "DATAC17", index: 9, bitrate_code: 17, bandwidth_hz: 2100, payload_bps: 1410.0, frame_bytes: 1180, frame_s: 6.71, min_snr_db: 10.0 },
-    Mode { name: "QAM16C2", index: 10, bitrate_code: 25, bandwidth_hz: 2100, payload_bps: 3100.0, frame_bytes: 1213, frame_s: 3.2, min_snr_db: 15.7 },
+    Mode { name: "MFSK500", index: 12, bitrate_code: 100, bandwidth_hz: 500, payload_bps: 31.0, frame_bytes: 98, frame_s: 26.2, min_snr_db: -14.0, modulation: "32-MFSK", carriers: 32, spacing_hz: 15.6, fec: "LDPC 1/2 (N=1600)" },
+    Mode { name: "MFSK", index: 11, bitrate_code: 100, bandwidth_hz: 1000, payload_bps: 60.0, frame_bytes: 98, frame_s: 13.5, min_snr_db: -11.0, modulation: "32-MFSK", carriers: 32, spacing_hz: 31.25, fec: "LDPC 1/2 (N=1600)" },
+    Mode { name: "DATAC15", index: 7, bitrate_code: 15, bandwidth_hz: 200, payload_bps: 68.0, frame_bytes: 30, frame_s: 3.74, min_snr_db: -7.0, modulation: "OFDM QPSK", carriers: 3, spacing_hz: 62.5, fec: "LDPC 1/3 (768,256)" },
+    Mode { name: "DATAC4", index: 3, bitrate_code: 4, bandwidth_hz: 250, payload_bps: 87.0, frame_bytes: 54, frame_s: 5.17, min_snr_db: -4.0, modulation: "OFDM QPSK", carriers: 4, spacing_hz: 62.5, fec: "LDPC 0.30 (1472,448)" },
+    Mode { name: "DATAC3", index: 1, bitrate_code: 3, bandwidth_hz: 500, payload_bps: 321.0, frame_bytes: 126, frame_s: 3.19, min_snr_db: 0.0, modulation: "OFDM QPSK", carriers: 9, spacing_hz: 62.5, fec: "LDPC 1/2 (2048,1024)" },
+    Mode { name: "DATAC1", index: 0, bitrate_code: 1, bandwidth_hz: 1700, payload_bps: 980.0, frame_bytes: 510, frame_s: 4.18, min_snr_db: 5.0, modulation: "OFDM QPSK", carriers: 27, spacing_hz: 62.5, fec: "LDPC 1/2 (8192,4096)" },
+    Mode { name: "DATAC17", index: 9, bitrate_code: 17, bandwidth_hz: 2100, payload_bps: 1410.0, frame_bytes: 1180, frame_s: 6.71, min_snr_db: 10.0, modulation: "OFDM QPSK", carriers: 33, spacing_hz: 62.5, fec: "LDPC 0.59 (15936,9456)" },
+    Mode { name: "QAM16C2", index: 10, bitrate_code: 25, bandwidth_hz: 2100, payload_bps: 3100.0, frame_bytes: 1213, frame_s: 3.2, min_snr_db: 15.7, modulation: "OFDM 16-QAM", carriers: 33, spacing_hz: 62.5, fec: "LDPC 0.60 (16200,9720)" },
 ];
+
+/// Mercury's ARQ speed ladder for a session bandwidth (BW500 or wide),
+/// slowest rung first.
+pub fn arq_ladder(session_bw: u32) -> Vec<&'static Mode> {
+    let names: &[&str] = if session_bw == 500 {
+        &["MFSK500", "DATAC15", "DATAC4", "DATAC3"]
+    } else {
+        &["MFSK", "DATAC15", "DATAC4", "DATAC3", "DATAC1", "DATAC17", "QAM16C2"]
+    };
+    names.iter().filter_map(|n| mode_by_name(n)).collect()
+}
 
 pub fn mode_by_name(name: &str) -> Option<&'static Mode> {
     MODES.iter().find(|m| m.name.eq_ignore_ascii_case(name))
@@ -196,18 +220,22 @@ pub struct ThroughputEstimator {
     pub reported_bps: Option<f64>,
     pub reported_mode: Option<&'static Mode>,
     pub snr_db: Option<f64>,
+    samples: u32,
 }
 
 impl ThroughputEstimator {
     pub fn on_buffer(&mut self, now: std::time::Instant, queued: usize) {
         if let Some((t0, q0)) = self.last {
             let dt = now.duration_since(t0).as_secs_f64();
-            if queued < q0 && dt > 0.5 {
+            // A short message's drain is mostly turnaround time, and a long
+            // gap includes idle time: neither says anything about speed.
+            if queued < q0 && q0 - queued >= 512 && (0.5..=30.0).contains(&dt) {
                 let bps = (q0 - queued) as f64 * 8.0 / dt;
                 self.bps_ewma = Some(match self.bps_ewma {
                     Some(e) => 0.7 * e + 0.3 * bps,
                     None => bps,
                 });
+                self.samples += 1;
             }
         }
         self.last = Some((now, queued));
@@ -237,11 +265,11 @@ impl ThroughputEstimator {
 
     /// Best current guess of goodput in bits/s.
     pub fn bps(&self, bw: Bandwidth) -> f64 {
-        if let Some(b) = self.bps_ewma {
-            return b;
-        }
-        if let Some(b) = self.reported_bps {
-            return b * ARQ_EFFICIENCY;
+        match (self.bps_ewma, self.reported_bps) {
+            (Some(b), _) if self.samples >= 2 => return b,
+            (_, Some(r)) => return r * ARQ_EFFICIENCY,
+            (Some(b), None) => return b,
+            _ => {}
         }
         let snr = self.snr_db.unwrap_or(0.0);
         8.0 / (predict_arq_s(1, bw, snr) - 8.0)
@@ -293,7 +321,14 @@ mod tests {
         let t0 = std::time::Instant::now();
         e.on_buffer(t0, 10_000);
         e.on_buffer(t0 + std::time::Duration::from_secs(10), 9_000);
+        e.on_buffer(t0 + std::time::Duration::from_secs(20), 8_000);
         assert!((e.bps(Bandwidth::Hz2300) - 800.0).abs() < 1e-6);
+        // A 40-byte chat line draining over 9 s is not a speed measurement.
+        let mut f = ThroughputEstimator::default();
+        f.on_bitrate_line("BITRATE (25) 3100 BPS");
+        f.on_buffer(t0, 40);
+        f.on_buffer(t0 + std::time::Duration::from_secs(9), 0);
+        assert!((f.bps(Bandwidth::Hz2300) - 3100.0 * ARQ_EFFICIENCY).abs() < 1e-6);
         e.on_bitrate_line("BITRATE (25) 3100 BPS");
         assert_eq!(e.reported_mode.unwrap().name, "QAM16C2");
     }

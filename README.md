@@ -14,7 +14,7 @@ nearby and can tune to them with one click.
 
 ## Features
 
-- **Chat** 1:1 over Mercury ARQ, with sent/seen receipts and live air-time
+- **Chat** 1:1 over Mercury ARQ, with "✓ delivered" confirmation and live air-time
   estimates as you type
 - **Roundtable**: group conversation wherever the host calls it. The host ramps
   the speed up to the fastest mode every member can copy. Missed pieces are

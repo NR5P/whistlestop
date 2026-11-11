@@ -73,8 +73,8 @@ pub struct ChatLine {
     pub from: String,
     pub text: String,
     pub id: u64,
+    /// The other station confirmed it arrived (a RECEIVED packet).
     pub delivered: bool,
-    pub seen: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -206,6 +206,10 @@ pub struct State {
     pub listen_mode: Option<&'static Mode>,
     pub est_bps: f64,
     pub wide: WideView,
+    /// What Mercury says about itself (VERSION) and its current speed
+    /// (BITRATE, raw bits/s of the mode on the air).
+    pub modem_version: Option<String>,
+    pub modem_bps: Option<f64>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -347,6 +351,11 @@ struct Station {
     /// When the radio last changed frequency: audio from before then
     /// belongs to another frequency.
     last_tune: Instant,
+    /// Roundtable host: the speed to switch to once the announcement is out.
+    pending_speed: Option<(&'static Mode, Instant)>,
+    last_query: Instant,
+    /// Link data that arrived before Mercury's CONNECTED line.
+    prelink: Vec<u8>,
 }
 
 async fn run(mut cmds: mpsc::UnboundedReceiver<Cmd>, st: SharedState, sdr: sdr::Shared, repaint: Arc<dyn Fn() + Send + Sync>) {
@@ -446,6 +455,9 @@ impl Station {
             wide_auto: cfg.sdr.wide_auto,
             wide_tried: vec![],
             last_tune: Instant::now(),
+            pending_speed: None,
+            last_query: Instant::now(),
+            prelink: vec![],
         };
         {
             let mut g = st.lock().unwrap();
@@ -481,6 +493,19 @@ impl Station {
             audio::run_sim(band, rx.clone(), sim_stop.clone());
             s.set(|g| g.audio_ok = true);
         } else {
+            if let Some(addr) = cfg.audio_in.strip_prefix("ether:") {
+                // Test bench: audio to and from the ether over TCP.
+                match std::net::TcpStream::connect(addr) {
+                    Ok(t) => {
+                        t.set_nodelay(true).ok();
+                        s._input = Some(LiveInput::ether(t.try_clone().expect("clone"), rx.clone()));
+                        s.output = Some(Arc::new(LiveOutput::ether(t)));
+                        s.set(|g| g.audio_ok = true);
+                        s.log(format!("Audio: test ether at {addr}"));
+                    }
+                    Err(e) => s.log(format!("⚠ Audio: ether at {addr}: {e}")),
+                }
+            } else {
             match LiveInput::start(&cfg.audio_in, rx.clone()) {
                 Ok(i) => {
                     s._input = Some(i);
@@ -491,6 +516,7 @@ impl Station {
             match LiveOutput::start(&cfg.audio_out) {
                 Ok(o) => s.output = Some(Arc::new(o)),
                 Err(e) => s.log(format!("⚠ Audio output: {e} (CQ whistle disabled)")),
+            }
             }
         }
 
@@ -511,6 +537,7 @@ impl Station {
             Ok(mut t) => match t.setup(&cfg.callsign, bw.mercury_arq_bw()).await {
                 Ok(()) => {
                     let _ = t.command("MODE 1").await; // calling mode: DATAC3
+                    let _ = t.send_line("VERSION").await;
                     s.tnc = Some(t);
                     s.tnc_rx = Some(erx);
                     s.set(|g| {
@@ -703,7 +730,7 @@ impl Station {
                 self.hi_queue.push_back(Link::Chat { id, text: text.clone() }.encode());
                 let me = self.mycall();
                 self.set(|g| {
-                    g.chat.push(ChatLine { at: Clock::now(), who: Who::Me, from: me, text, id, delivered: false, seen: false })
+                    g.chat.push(ChatLine { at: Clock::now(), who: Who::Me, from: me, text, id, delivered: false })
                 });
                 self.pump().await?;
             }
@@ -1060,6 +1087,14 @@ impl Station {
         match e {
             TncEvent::Line(l) => self.on_line(l).await?,
             TncEvent::Data(d) => {
+                // Mercury reports CONNECTED on the control port and delivers
+                // data on the data port: the first bytes can win the race.
+                // Hold them until the link is confirmed.
+                if self.peer.is_none() {
+                    self.prelink.extend_from_slice(&d);
+                    self.prelink.truncate(1 << 20);
+                    return Ok(());
+                }
                 for p in self.dec.feed(&d)? {
                     self.on_link(p).await?;
                 }
@@ -1090,6 +1125,7 @@ impl Station {
                 }
                 self.peer = Some(peer.clone());
                 self.dec = LinkDecoder::default();
+                let early = std::mem::take(&mut self.prelink);
                 self.est = ThroughputEstimator::default();
                 self.mercury_buffer = 0;
                 self.set(|g| {
@@ -1103,7 +1139,6 @@ impl Station {
                         text: format!("Linked with {peer} ({bw} Hz)"),
                         id: 0,
                         delivered: true,
-                        seen: true,
                     });
                 });
                 self.log(format!("Linked with {peer}, {bw} Hz"));
@@ -1122,6 +1157,11 @@ impl Station {
                     self.hi_queue.push_back(o.offer().encode());
                 }
                 self.pump().await?;
+                if !early.is_empty() {
+                    for p in self.dec.feed(&early)? {
+                        self.on_link(p).await?;
+                    }
+                }
             }
             "DISCONNECTED" => {
                 if let Some(p) = self.peer.take() {
@@ -1134,7 +1174,6 @@ impl Station {
                             text: format!("Link with {p} ended"),
                             id: 0,
                             delivered: true,
-                            seen: true,
                         })
                     });
                 }
@@ -1146,6 +1185,8 @@ impl Station {
                     o.next = None; // re-offer (with resume) on the next link
                 }
                 self.hi_queue.clear();
+                self.prelink.clear();
+                self.dec = LinkDecoder::default();
                 self.set(|g| {
                     g.link = None;
                     g.tx = false;
@@ -1192,19 +1233,26 @@ impl Station {
                 self.mercury_buffer = n;
                 self.est.on_buffer(Instant::now(), n);
                 self.pump().await?;
-                if n == 0 {
-                    self.set(|g| {
-                        for c in g.chat.iter_mut().filter(|c| c.who == Who::Me) {
-                            c.delivered = true;
-                        }
-                    });
-                }
+
             }
-            "BITRATE" => self.est.on_bitrate_line(&l),
+            "BITRATE" => {
+                self.est.on_bitrate_line(&l);
+                let (bps, mode) = (self.est.reported_bps, self.est.reported_mode);
+                self.set(|g| {
+                    g.modem_bps = bps;
+                    if let (Some(m), Some(link)) = (mode, g.link.as_mut()) {
+                        link.mode = Some(m);
+                    }
+                });
+            }
             "SN" => {
                 self.est.on_snr_line(&l);
                 let v = self.est.snr_db;
                 self.set(|g| g.snr_db = v);
+            }
+            _ if l.to_ascii_lowercase().contains("mercury") || word == "VERSION" => {
+                let v = l.trim_start_matches("VERSION").trim().to_string();
+                self.set(|g| g.modem_version = Some(v));
             }
             _ => {}
         }
@@ -1233,15 +1281,14 @@ impl Station {
                 });
             }
             Link::Chat { id, text } => {
-                self.hi_queue.push_back(Link::Seen { id }.encode());
+                self.hi_queue.push_back(Link::Received { id }.encode());
                 self.set(|g| {
-                    g.chat.push(ChatLine { at: Clock::now(), who: Who::Them, from: peer, text, id, delivered: true, seen: true })
+                    g.chat.push(ChatLine { at: Clock::now(), who: Who::Them, from: peer, text, id, delivered: true })
                 });
                 self.pump().await?;
             }
-            Link::Seen { id } => self.set(|g| {
+            Link::Received { id } => self.set(|g| {
                 for c in g.chat.iter_mut().filter(|c| c.who == Who::Me && c.id == id) {
-                    c.seen = true;
                     c.delivered = true;
                 }
             }),
@@ -1352,7 +1399,7 @@ impl Station {
             }),
             Link::Bye { text } => {
                 self.set(|g| {
-                    g.chat.push(ChatLine { at: Clock::now(), who: Who::Them, from: peer, text, id: 0, delivered: true, seen: true })
+                    g.chat.push(ChatLine { at: Clock::now(), who: Who::Them, from: peer, text, id: 0, delivered: true })
                 });
             }
             Link::Unknown(_) => {}
@@ -1529,6 +1576,14 @@ impl Station {
 
     /// Transmit queued table frames one modem frame at a time.
     async fn step_table_tx(&mut self) -> anyhow::Result<()> {
+        if let Some((m, at)) = self.pending_speed {
+            if Instant::now() < at {
+                return Ok(()); // hold table traffic until the switch
+            }
+            self.pending_speed = None;
+            self.apply_table_mode(m).await?;
+            self.log(format!("Roundtable speed → {} ({} bps)", m.name, m.payload_bps));
+        }
         if Instant::now() < self.table_busy_until || self.tnc.is_none() {
             return Ok(());
         }
@@ -1634,17 +1689,21 @@ impl Station {
         let Some(id) = self.table_id() else { return Ok(()) };
         let me = self.mycall();
         let f = TableFrame { table: id, from: me, body: TableBody::Speed { mode_index: m.index } }.encode();
-        // Announce twice in the old mode, then switch.
+        // Announce twice in the old mode, and switch only once Mercury has
+        // actually sent both (switching sooner sends them in the new mode,
+        // which members still on the old one cannot hear).
+        let old = self.st.lock().unwrap().listen_mode.unwrap_or(&modes::MODES[4]);
         self.tnc()?.send_broadcast(&f).await?;
         self.tnc()?.send_broadcast(&f).await?;
-        self.apply_table_mode(m).await?;
-        self.log(format!("Roundtable speed → {} ({} bps)", m.name, m.payload_bps));
+        let at = Instant::now() + Duration::from_secs_f64(2.0 * old.frame_s + 3.0);
+        self.pending_speed = Some((m, at));
+        self.log(format!("Roundtable: announcing speed change {} → {} ({} bps)", old.name, m.name, m.payload_bps));
         Ok(())
     }
 
     /// Host only: move the table to the fastest mode everyone can copy.
     async fn ramp(&mut self) -> anyhow::Result<()> {
-        if !self.cfg.auto_ramp {
+        if !self.cfg.auto_ramp || self.pending_speed.is_some() {
             return Ok(());
         }
         let (host, worst, current) = {
@@ -1694,6 +1753,13 @@ impl Station {
                     }
                 }
             });
+            if self.last_query.elapsed() > Duration::from_secs(5) {
+                self.last_query = Instant::now();
+                if let Some(t) = self.tnc.as_mut() {
+                    let _ = t.send_line("BITRATE").await;
+                    let _ = t.send_line("SN").await;
+                }
+            }
             if self.last_report.elapsed() > Duration::from_secs(30) {
                 self.last_report = Instant::now();
                 if let Some(t) = self.tnc.as_mut() {
@@ -1814,7 +1880,7 @@ impl Station {
             return;
         }
         self.last_watch = Instant::now();
-        if self.st.lock().unwrap().tx {
+        if self.st.lock().unwrap().tx || self.peer.is_some() {
             return;
         }
         let n = (self.cfg.dwell_s * FS as f64) as usize;
@@ -1870,6 +1936,24 @@ mod tests {
                 let g = h.state.lock().unwrap();
                 let log: Vec<_> = g.log.iter().map(|l| l.1.clone()).collect();
                 panic!("no link; wide {:?}\n{}", g.wide, log.join("\n"));
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        // The link must carry data, both ways.
+        h.send(Cmd::Chat("hello over the wide-search link".into()));
+        let t2 = Instant::now();
+        loop {
+            {
+                let g = h.state.lock().unwrap();
+                let reply = g.chat.iter().any(|c| c.who == Who::Them && c.text.contains("wide-search link"));
+                let delivered = g.chat.iter().any(|c| c.who == Who::Me && c.delivered);
+                if reply && delivered {
+                    break;
+                }
+                if t2.elapsed() > Duration::from_secs(40) {
+                    let log: Vec<_> = g.log.iter().map(|l| l.1.clone()).collect();
+                    panic!("no chat over the link; chat {:?}\n{}", g.chat.iter().map(|c| (&c.who, &c.text, c.delivered)).collect::<Vec<_>>(), log.join("\n"));
+                }
             }
             std::thread::sleep(Duration::from_millis(100));
         }

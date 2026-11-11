@@ -2,6 +2,7 @@ pub mod audio;
 pub mod bandplan;
 pub mod config;
 pub mod engine;
+pub mod ether;
 pub mod fake_mercury;
 pub mod modes;
 pub mod protocol;
