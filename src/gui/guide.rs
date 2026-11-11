@@ -1,4 +1,4 @@
-//! The 📖 Guide tab: renders docs/USER-GUIDE.md (built into the app) with a
+//! The 📖 Guide window: renders docs/USER-GUIDE.md (built into the app) with a
 //! table of contents and search. One source for the app and the repo docs.
 
 use super::{BORDER, BRASS, CARD, CARD_HI, DIM, TEAL, TEXT};

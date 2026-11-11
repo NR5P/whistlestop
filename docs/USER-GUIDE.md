@@ -1,6 +1,6 @@
 # Whistlestop User Guide
 
-Everything about Whistlestop: what each part of the screen does, how calling, searching, chatting, files and Roundtables work, how to set up a station, and what to do when something goes wrong. This same guide is in the app under the **📖 Guide** tab, and turning on **? Help mode** in the top bar explains any control you hover over.
+Everything about Whistlestop: what each part of the screen does, how calling, searching, chatting, files and Roundtables work, how to set up a station, and what to do when something goes wrong. This same guide opens in its own window from the **📖 Guide** button in the top bar, and turning on **? Help** mode explains any control you hover over.
 
 ## Welcome
 
@@ -67,20 +67,20 @@ Set levels so Mercury's own level meters sit in their recommended range. The whi
 
 An RTL-SDR dongle connected to your radio's **RX OUT** (receive antenna output) or **IF OUT** jack gives a wide band waterfall and the instant **wide search**. See "Wide receiver (RTL-SDR)". Nothing to install: Whistlestop talks to the dongle directly over USB.
 
-## Help mode and this Guide
+## Help mode and the Guide
 
-- **📖 Guide** (the last tab) is this manual. **Contents** on the left lists every section; **Search the guide** filters sections and highlights the words you typed; **← / →** at the bottom of a section move to the previous or next one.
+- **📖 Guide** in the top bar opens this manual in **its own window**, so you can keep it beside the main one while you work. The button is lit while the window is open; click it again, or close the window, to put it away. **Contents** on the left lists every section; **Search the guide** filters sections and highlights the words you typed; **← / →** at the bottom of a section move to the previous or next one.
 - **? Help** in the top bar turns on **Help mode**. A brass banner confirms it's on. Hover over any control (a button, slider, readout, waterfall or setting) and a card explains what it does, with the Guide section to read for more. Turn it off with **? Help** again or **Turn off** on the banner. It is **off every time Whistlestop starts**, so the cards never get in the way once you know your way around.
-- **Open the Guide** on the Help banner jumps to "A tour of the screen".
+- **Open the Guide** on the Help banner opens the Guide window at "A tour of the screen".
 
 ## A tour of the screen
 
 From top to bottom:
 
-- **Top bar**: the Whistlestop mark; the **frequency display** (TX/RX lamp, dial frequency, band, radio mode); the **S-meter** and **SNR** meters; the **status pills** (Radio, Mercury, Audio, SDR: green means connected); **DEMO** when in Demo mode; the **? Help** toggle; and **Settings**.
+- **Top bar**: the Whistlestop mark; the **frequency display** (TX/RX lamp, dial frequency, band, radio mode); the **S-meter** and **SNR** meters; the **status pills** (Radio, Mercury, Audio, SDR: green means connected); **DEMO** when in Demo mode; **📖 Guide** (this manual, in its own window); the **? Help** toggle; and **Settings**.
 - **Modem strip**: what Mercury is doing right now (see "The modem strip").
 - **Left column** (top to bottom): **Call CQ**, **Search for whistles**, **Heard**, **Bandwidth**, **Radio**.
-- **Centre**: tabs for **Chat**, **Roundtable**, **Files**, **Log**, and this **Guide**.
+- **Centre**: tabs for **Chat**, **Roundtable**, **Files** and **Log**.
 - **Bottom**: the **Radio audio** waterfall (what your radio hears, 0–3 kHz) and, with an SDR, the **Wide receiver** waterfall. Drag the line above the waterfalls to resize them.
 
 ## The whistle

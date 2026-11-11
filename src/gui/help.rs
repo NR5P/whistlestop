@@ -44,7 +44,7 @@ impl Help for Response {
 /// (title, explanation, Guide section)
 pub type Topic = (&'static str, &'static str, &'static str);
 
-pub const HELP_TOGGLE: Topic = ("Help mode", "When on, hovering over any control explains it, like this. Turn it off when you know your way around: it's off every time Whistlestop starts.", "A tour of the screen");
+pub const HELP_TOGGLE: Topic = ("Help mode", "When on, hovering over any control explains it, like this. Turn it off when you know your way around: it's off every time Whistlestop starts.", "Help mode and the Guide");
 pub const FREQ: Topic = ("Frequency display", "The radio's dial frequency (USB), band and mode, read from the radio about once a second, including changes you make on the radio itself. The lamp is green when receiving and red when transmitting.", "Rig controls");
 pub const S_METER: Topic = ("S-meter", "The radio's signal strength reading (rigctld STRENGTH), shown as an S-unit. Not all radios report it.", "Rig controls");
 pub const SNR_METER: Topic = ("SNR", "Mercury's signal-to-noise measurement of the last signal it decoded, in dB. Mercury uses it to choose its speed. Above about +15 dB it can reach its fastest mode; near 0 dB it slows to DATAC3 or below.", "Bandwidth and speed");
@@ -88,7 +88,8 @@ pub const R_MODE: Topic = ("Radio mode", "PKTUSB (data USB) or USB for Whistlest
 pub const R_POWER: Topic = ("RF power", "The radio's transmit power, if it supports remote setting. Data and the whistle are full duty cycle while transmitting: run the radio cool.", "Rig controls");
 pub const R_TUNE: Topic = ("Tune carrier", "Mercury sends a steady 1 kHz tone for your antenna tuner. It always stops by itself after 60 s; Stop ends it sooner.", "Rig controls");
 
-pub const TABS: Topic = ("Tabs", "Chat: 1:1 conversation. Roundtable: group conversation. Files: send and receive files. Log: everything that happened. Guide: this manual.", "A tour of the screen");
+pub const TABS: Topic = ("Tabs", "Chat: 1:1 conversation. Roundtable: group conversation. Files: send and receive files. Log: everything that happened.", "A tour of the screen");
+pub const GUIDE_BTN: Topic = ("Guide", "Opens the full manual in its own window, so you can keep it beside the main one. Contents and search on the left. Click again (or close its window) to put it away.", "Help mode and the Guide");
 pub const L_CONNECT: Topic = ("Connect", "Call a station by callsign. Mercury places the call; when it answers, the link header shows their name, grid and signal report.", "Chat");
 pub const L_DISCONNECT: Topic = ("Disconnect (73)", "Says goodbye, lets Mercury deliver anything still queued, then hangs up.", "Chat");
 pub const C_INPUT: Topic = ("Message", "Type and press Enter. The line below shows how many bytes go on the air and about how long that takes at the current speed. Messages show '… sending' until the other station confirms, then '✓ delivered'.", "Chat");

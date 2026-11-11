@@ -119,6 +119,10 @@ fn fmt_freq(hz: f64) -> String {
     format!("{}.{:03}.{:03}", hz / 1_000_000, (hz / 1000) % 1000, hz % 1000)
 }
 
+pub fn guide_window_id() -> egui::ViewportId {
+    egui::ViewportId::from_hash_of("whistlestop-guide")
+}
+
 // -------------------------------------------------------------------- app
 
 #[derive(PartialEq, Clone, Copy)]
@@ -127,7 +131,6 @@ enum Tab {
     Roundtable,
     Files,
     Log,
-    Guide,
 }
 
 pub struct App {
@@ -154,6 +157,8 @@ pub struct App {
     logo: Option<egui::TextureHandle>,
     last_err: Option<String>,
     guide: guide::Guide,
+    /// The Guide's own window is open.
+    guide_open: bool,
     wf_share: f32,
     call_cq_at: Option<Pos2>,
     call_cq_hovered: bool,
@@ -205,6 +210,7 @@ impl App {
             logo: None,
             last_err: None,
             guide: guide::Guide::default(),
+            guide_open: false,
             wf_share: 0.30,
             call_cq_at: None,
             call_cq_hovered: false,
@@ -289,6 +295,11 @@ impl App {
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 if ui.add(egui::Button::new(RichText::new("⚙  Settings").size(14.0))).help(&help::SETTINGS).clicked() {
                     self.settings_open = true;
+                }
+                let gb = egui::Button::new(RichText::new("📖  Guide").size(14.0).strong().color(if self.guide_open { BG } else { TEXT }))
+                    .fill(if self.guide_open { TEAL } else { CARD_HI });
+                if ui.add(gb).help(&help::GUIDE_BTN).clicked() {
+                    self.guide_open = !self.guide_open;
                 }
                 let on = help::on();
                 let hb = egui::Button::new(RichText::new("?  Help").size(14.0).strong().color(if on { BG } else { TEXT })).fill(if on { BRASS } else { CARD_HI });
@@ -734,7 +745,7 @@ impl App {
 
     fn centre(&mut self, ui: &mut Ui, s: &State) {
         ui.horizontal(|ui| {
-            for (t, label) in [(Tab::Chat, "💬  Chat"), (Tab::Roundtable, "◎  Roundtable"), (Tab::Files, "📁  Files"), (Tab::Log, "≡  Log"), (Tab::Guide, "📖  Guide")] {
+            for (t, label) in [(Tab::Chat, "💬  Chat"), (Tab::Roundtable, "◎  Roundtable"), (Tab::Files, "📁  Files"), (Tab::Log, "≡  Log")] {
                 let on = self.tab == t;
                 let badge = match t {
                     Tab::Files => s.transfers.iter().filter(|x| x.state == XferState::WaitingForYou).count(),
@@ -753,7 +764,6 @@ impl App {
             Tab::Roundtable => self.table_tab(ui, s),
             Tab::Files => self.files_tab(ui, s),
             Tab::Log => self.log_tab(ui, s),
-            Tab::Guide => self.guide.show(ui),
         }
     }
 
@@ -1346,17 +1356,19 @@ impl App {
             }
             11 if since > Duration::from_secs(24) => {
                 ctx.send_viewport_cmd(shoot(t.dir.join("4-roundtable.ppm")));
-                self.tab = Tab::Guide;
+                self.guide_open = true;
                 self.guide.open("The whistle");
                 next = true;
             }
             12 if since > Duration::from_secs(2) => {
-                ctx.send_viewport_cmd(shoot(t.dir.join("5-guide.ppm")));
+                ctx.send_viewport_cmd_to(guide_window_id(), shoot(t.dir.join("5-guide.ppm")));
+                ctx.send_viewport_cmd(shoot(t.dir.join("5-main-with-guide.ppm")));
                 help::set(true);
                 self.hover_at = self.call_cq_at;
                 next = true;
             }
             13 if since > Duration::from_secs(3) => {
+                self.guide_open = false;
                 ctx.send_viewport_cmd(shoot(t.dir.join("6-help-hover.ppm")));
                 let _ = std::fs::write(t.dir.join("hover.txt"), format!("target {:?} hovered {} pointer {:?}", self.call_cq_at, self.call_cq_hovered, ctx.input(|i| i.pointer.hover_pos())));
                 next = true;
@@ -1648,13 +1660,13 @@ impl eframe::App for App {
             egui::Panel::top("help-banner").frame(Frame::NONE.fill(BRASS.linear_multiply(0.2)).inner_margin(Margin::symmetric(14, 5))).show(ui, |ui| {
                 ui.horizontal(|ui| {
                     ui.label(RichText::new("?  HELP MODE").strong().color(BRASS));
-                    ui.label(RichText::new("Hover over anything for an explanation. The full manual is in the 📖 Guide tab.").color(TEXT));
+                    ui.label(RichText::new("Hover over anything for an explanation. The full manual: 📖 Guide (top right).").color(TEXT));
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         if ui.button("Turn off").clicked() {
                             help::set(false);
                         }
                         if ui.button("Open the Guide").clicked() {
-                            self.tab = Tab::Guide;
+                            self.guide_open = true;
                             self.guide.open("A tour of the screen");
                         }
                     });
@@ -1679,6 +1691,21 @@ impl eframe::App for App {
 
         if self.settings_open {
             self.settings(&ctx);
+        }
+        if self.guide_open {
+            let builder = egui::ViewportBuilder::default()
+                .with_title("Whistlestop Guide")
+                .with_app_id("whistlestop")
+                .with_inner_size([1080.0, 820.0])
+                .with_min_inner_size([640.0, 420.0]);
+            ctx.show_viewport_immediate(guide_window_id(), builder, |ui, _| {
+                egui::CentralPanel::default()
+                    .frame(Frame::NONE.fill(BG).inner_margin(Margin::same(14)))
+                    .show(ui, |ui| self.guide.show(ui));
+                if ui.input(|i| i.viewport().close_requested()) {
+                    self.guide_open = false;
+                }
+            });
         }
         self.tour_step(&ctx, &snap);
         if let Some((at, msg)) = &self.toast {
