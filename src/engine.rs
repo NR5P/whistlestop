@@ -54,6 +54,18 @@ pub enum Cmd {
     PassFloor(String),
     SetSdr(bool),
     SetSdrSpan(f64),
+    /// Rig controls (only what the radio's capabilities list).
+    RigLevel(String, f32),
+    RigFunc(String, bool),
+    RigOp(String),
+    RigVfo(String),
+    RigSplit(bool),
+    RigOffset { xit: bool, hz: i32 },
+    RigPassband(i64),
+    /// The Radio Controls window is open: poll the extended controls.
+    RigWatch(bool),
+    /// Start the antenna tuner now.
+    TuneAntenna,
     /// Wide whistle search on the SDR; `auto` tunes the radio to hits.
     WideSearch { on: bool, auto: bool },
     /// Tune to an SDR hit and fine-lock on it with the radio's own audio.
@@ -226,6 +238,29 @@ pub struct State {
     /// (BITRATE, raw bits/s of the mode on the air).
     pub modem_version: Option<String>,
     pub modem_bps: Option<f64>,
+    pub rig_desc: String,
+    pub rig_caps: Option<crate::rig::RigCaps>,
+    pub rig_ext: RigExt,
+}
+
+/// Radio controls beyond the basics, polled while their window is open,
+/// plus transmit meters.
+#[derive(Clone, Debug, Default)]
+pub struct RigExt {
+    pub levels: std::collections::BTreeMap<String, f32>,
+    pub funcs: std::collections::BTreeMap<String, bool>,
+    pub vfo: String,
+    pub split: bool,
+    pub rit: i32,
+    pub xit: i32,
+    /// SWR now (while transmitting) and the peak of the last transmission.
+    pub swr: Option<f32>,
+    pub swr_last_tx: Option<f32>,
+    pub alc: Option<f32>,
+    pub power_out: Option<f32>,
+    /// What the tuner is doing ("Tuning…", "Tuned on 40m at 14:02").
+    pub tuner_note: String,
+    pub tune_pending: bool,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -374,6 +409,14 @@ struct Station {
     /// When the radio last changed frequency: audio from before then
     /// belongs to another frequency.
     last_tune: Instant,
+    rigctld: Option<crate::rigsetup::RigctldProcess>,
+    rig_caps: crate::rig::RigCaps,
+    rig_watch: bool,
+    last_ext_poll: Instant,
+    tx_was: bool,
+    swr_peak: f32,
+    pending_tune: bool,
+    last_autotune: Option<(Instant, Option<&'static str>)>,
     /// Roundtable host: the speed to switch to once the announcement is out.
     pending_speed: Option<(&'static Mode, Instant)>,
     last_query: Instant,
@@ -479,6 +522,14 @@ impl Station {
             wide_auto: cfg.sdr.wide_auto,
             wide_tried: vec![],
             last_tune: Instant::now(),
+            rigctld: None,
+            rig_caps: Default::default(),
+            rig_watch: false,
+            last_ext_poll: Instant::now(),
+            tx_was: false,
+            swr_peak: 0.0,
+            pending_tune: false,
+            last_autotune: None,
             pending_speed: None,
             last_query: Instant::now(),
         };
@@ -492,15 +543,53 @@ impl Station {
         if cfg.demo {
             s.rig = Some(Rig::sim(14_096_000.0, vfo.clone()));
             s.set(|g| g.rig_ok = true);
+            s.set(|g| g.rig_desc = "Demo transceiver (simulated)".into());
         } else {
-            match RigctldClient::connect(&cfg.rigctld).await {
-                Ok(c) => {
-                    s.rig = Some(Rig::Rigctld(c));
-                    s.set(|g| g.rig_ok = true);
-                    s.log(format!("Radio: rigctld at {}", cfg.rigctld));
+            let mut addr = cfg.rigctld.clone();
+            let mut desc = format!("rigctld at {addr}");
+            if cfg.rig_mode == crate::rigsetup::RigMode::Managed {
+                match crate::rigsetup::start_rigctld(&cfg.managed_rig) {
+                    Ok(p) => {
+                        addr = p.addr.clone();
+                        desc = p.description.clone();
+                        s.log(format!("Radio: started rigctld for {} (listening on {addr}; point Mercury at it too)", p.description));
+                        s.rigctld = Some(p);
+                    }
+                    Err(e) => s.log(format!("⚠ Radio: {e}")),
                 }
-                Err(e) => s.log(format!("⚠ Radio: {e}. Start rigctld or RigHelm's rigctld server.")),
             }
+            // A freshly started rigctld needs a moment to open the radio.
+            let mut last = None;
+            for _ in 0..(if s.rigctld.is_some() { 30 } else { 1 }) {
+                match RigctldClient::connect(&addr).await {
+                    Ok(c) => {
+                        s.rig = Some(Rig::Rigctld(c));
+                        break;
+                    }
+                    Err(e) => {
+                        last = Some(e);
+                        tokio::time::sleep(Duration::from_millis(200)).await;
+                    }
+                }
+            }
+            if s.rig.is_some() {
+                s.set(|g| {
+                    g.rig_ok = true;
+                    g.rig_desc = desc.clone();
+                });
+                s.log(format!("Radio: {desc}"));
+            } else if let Some(e) = last {
+                s.log(format!("⚠ Radio: {e}. Start rigctld or RigHelm's rigctld server, or let Whistlestop run it (Settings → Radio)."));
+            }
+        }
+        if let Some(r) = s.rig.as_mut() {
+            // What this radio can do decides which controls are offered.
+            let caps = tokio::time::timeout(Duration::from_secs(4), r.caps()).await.ok().and_then(|c| c.ok()).unwrap_or_default();
+            if !caps.model.is_empty() {
+                s.log(format!("Radio reports: {} ({} adjustable levels, {} functions{})", caps.model, caps.set_levels.len(), caps.set_funcs.len(), if caps.has_tuner() { ", antenna tuner" } else { "" }));
+            }
+            s.set(|g| g.rig_caps = Some(caps.clone()));
+            s.rig_caps = caps;
         }
 
         // Audio.
@@ -632,6 +721,130 @@ impl Station {
         Ok(())
     }
 
+    /// Transmit meters, the SWR peak of each transmission, and whether the
+    /// antenna tuner should be asked to tune afterwards.
+    async fn poll_meters(&mut self) {
+        let tx = self.st.lock().unwrap().tx;
+        let caps = self.rig_caps.clone();
+        let Some(r) = self.rig.as_mut() else { return };
+        if tx {
+            let swr = if caps.can_get_level("SWR") { r.get_level("SWR").await.ok().filter(|v| *v >= 1.0) } else { None };
+            let alc = if caps.can_get_level("ALC") { r.get_level("ALC").await.ok() } else { None };
+            let po = if caps.can_get_level("RFPOWER_METER") { r.get_level("RFPOWER_METER").await.ok() } else { None };
+            if let Some(v) = swr {
+                self.swr_peak = self.swr_peak.max(v);
+            }
+            self.set(|g| {
+                g.rig_ext.swr = swr;
+                g.rig_ext.alc = alc;
+                g.rig_ext.power_out = po;
+            });
+        } else if self.tx_was {
+            // A transmission just ended.
+            let peak = self.swr_peak;
+            self.swr_peak = 0.0;
+            if peak >= 1.0 {
+                let band = bandplan::band_of(self.dial());
+                self.set(|g| g.rig_ext.swr_last_tx = Some(peak));
+                if peak > self.cfg.swr_limit {
+                    let recently = self.last_autotune.is_some_and(|(at, b)| b == band && at.elapsed() < Duration::from_secs(120));
+                    let can = caps.has_tuner();
+                    self.log(format!(
+                        "⚠ High SWR: {peak:.1} on {} (limit {:.1}){}",
+                        band.unwrap_or("this frequency"),
+                        self.cfg.swr_limit,
+                        if self.cfg.auto_tune && can && !recently {
+                            "; the antenna tuner will tune when the band is quiet"
+                        } else if !can {
+                            "; this radio has no tuner control"
+                        } else {
+                            ""
+                        }
+                    ));
+                    if self.cfg.auto_tune && can && !recently {
+                        self.pending_tune = true;
+                        self.set(|g| g.rig_ext.tune_pending = true);
+                    }
+                }
+            }
+        }
+        if !tx && self.tx_was {
+            self.set(|g| {
+                g.rig_ext.swr = None;
+                g.rig_ext.alc = None;
+                g.rig_ext.power_out = None;
+            });
+        }
+        self.tx_was = tx;
+    }
+
+    /// Everything the Radio Controls window shows that the radio reports.
+    async fn poll_ext(&mut self) {
+        const LEVELS: [&str; 10] = ["AF", "RF", "SQL", "MICGAIN", "COMP", "NR", "AGC", "PREAMP", "ATT", "RFPOWER"];
+        const FUNCS: [&str; 7] = ["NB", "NR", "ANF", "COMP", "VOX", "MON", "TUNER"];
+        let caps = self.rig_caps.clone();
+        let Some(r) = self.rig.as_mut() else { return };
+        let mut ext = self.st.lock().unwrap().rig_ext.clone();
+        for l in LEVELS.iter().filter(|l| caps.can_get_level(l)) {
+            if let Ok(v) = r.get_level(l).await {
+                ext.levels.insert(l.to_string(), v);
+            }
+        }
+        for f in FUNCS.iter().filter(|f| caps.get_funcs.iter().any(|x| x == *f)) {
+            if let Ok(v) = r.get_func(f).await {
+                ext.funcs.insert(f.to_string(), v);
+            }
+        }
+        if let Ok(v) = r.vfo().await {
+            ext.vfo = v;
+        }
+        if let Ok(v) = r.split().await {
+            ext.split = v;
+        }
+        if let Ok(v) = r.offset(false).await {
+            ext.rit = v;
+        }
+        if let Ok(v) = r.offset(true).await {
+            ext.xit = v;
+        }
+        let (swr, swr_last, alc, po, note, pend) = {
+            let g = self.st.lock().unwrap();
+            (g.rig_ext.swr, g.rig_ext.swr_last_tx, g.rig_ext.alc, g.rig_ext.power_out, g.rig_ext.tuner_note.clone(), g.rig_ext.tune_pending)
+        };
+        ext.swr = swr;
+        ext.swr_last_tx = swr_last;
+        ext.alc = alc;
+        ext.power_out = po;
+        ext.tuner_note = note;
+        ext.tune_pending = pend;
+        self.set(|g| g.rig_ext = ext);
+    }
+
+    /// Ask the radio's antenna tuner to tune: switch it in, then start a
+    /// tune cycle (the radio sends its own short carrier).
+    async fn tune_antenna(&mut self, why: &str) -> anyhow::Result<()> {
+        let caps = self.rig_caps.clone();
+        let band = bandplan::band_of(self.dial());
+        let Some(r) = self.rig.as_mut() else { anyhow::bail!("no radio") };
+        if caps.can_func("TUNER") {
+            r.set_func("TUNER", true).await?;
+        }
+        if caps.can_op("TUNE") {
+            r.vfo_op("TUNE").await?;
+        } else if !caps.can_func("TUNER") {
+            anyhow::bail!("this radio doesn't offer tuner control through Hamlib");
+        }
+        self.last_autotune = Some((Instant::now(), band));
+        self.pending_tune = false;
+        let when = Clock::now().hhmm();
+        self.set(|g| {
+            g.rig_ext.tune_pending = false;
+            g.rig_ext.tuner_note = format!("Tuned on {} at {when}", band.unwrap_or("this frequency"));
+        });
+        self.log(format!("Antenna tuner: tune started ({why})"));
+        Ok(())
+    }
+
     async fn poll_rig(&mut self) {
         let Some(r) = self.rig.as_mut() else { return };
         match r.poll().await {
@@ -653,6 +866,11 @@ impl Station {
                         g.tx = true;
                     }
                 });
+                self.poll_meters().await;
+                if self.rig_watch && self.last_ext_poll.elapsed() > Duration::from_millis(1500) {
+                    self.last_ext_poll = Instant::now();
+                    self.poll_ext().await;
+                }
             }
             Err(e) => {
                 self.set(|g| g.rig_ok = false);
@@ -796,6 +1014,57 @@ impl Station {
                     self.sdr_stop.store(true, Ordering::Relaxed);
                 }
             }
+            Cmd::RigLevel(name, v) => {
+                if let Some(r) = self.rig.as_mut() {
+                    r.set_level(&name, v).await?;
+                }
+                self.set(|g| {
+                    g.rig_ext.levels.insert(name, v);
+                });
+            }
+            Cmd::RigFunc(name, on) => {
+                if let Some(r) = self.rig.as_mut() {
+                    r.set_func(&name, on).await?;
+                }
+                self.set(|g| {
+                    g.rig_ext.funcs.insert(name, on);
+                });
+            }
+            Cmd::RigOp(op) => {
+                if let Some(r) = self.rig.as_mut() {
+                    r.vfo_op(&op).await?;
+                }
+                self.last_ext_poll = Instant::now() - Duration::from_secs(10);
+            }
+            Cmd::RigVfo(v) => {
+                if let Some(r) = self.rig.as_mut() {
+                    r.set_vfo(&v).await?;
+                }
+                self.set(|g| g.rig_ext.vfo = v);
+            }
+            Cmd::RigSplit(on) => {
+                if let Some(r) = self.rig.as_mut() {
+                    r.set_split(on).await?;
+                }
+                self.set(|g| g.rig_ext.split = on);
+            }
+            Cmd::RigOffset { xit, hz } => {
+                if let Some(r) = self.rig.as_mut() {
+                    r.set_offset(xit, hz).await?;
+                }
+                self.set(|g| if xit { g.rig_ext.xit = hz } else { g.rig_ext.rit = hz });
+            }
+            Cmd::RigPassband(hz) => {
+                let mode = self.st.lock().unwrap().rig.mode.clone();
+                if let Some(r) = self.rig.as_mut() {
+                    r.set_mode(if mode.is_empty() { "PKTUSB" } else { &mode }, hz).await?;
+                }
+            }
+            Cmd::RigWatch(on) => {
+                self.rig_watch = on;
+                self.last_ext_poll = Instant::now() - Duration::from_secs(10);
+            }
+            Cmd::TuneAntenna => self.tune_antenna("by hand").await?,
             Cmd::SetSdrSpan(hz) => *self.sdr_span.lock().unwrap() = hz.clamp(5_000.0, 1_600_000.0),
             Cmd::LockOn(dial) => {
                 if self.cq.is_some() || self.peer.is_some() {
@@ -1282,6 +1551,9 @@ impl Station {
             "PTT" => {
                 let on = l.ends_with("ON");
                 self.set(|g| g.tx = on);
+                if let Some(r) = self.rig.as_mut().filter(|r| r.is_sim()) {
+                    let _ = r.ptt(on).await;
+                }
             }
             "BUFFER" => {
                 let n = l[6..].trim().parse().unwrap_or(0);
@@ -1840,6 +2112,18 @@ impl Station {
     async fn tick(&mut self) -> anyhow::Result<()> {
         self.step_waterfall();
         self.step_wide().await?;
+        if self.pending_tune {
+            let quiet = {
+                let g = self.st.lock().unwrap();
+                !g.tx && g.link.is_none() && g.calling.is_none()
+            } && self.cq.is_none() && self.search.is_none() && self.table_queue.is_empty();
+            if quiet
+                && let Err(e) = self.tune_antenna("high SWR").await {
+                    self.pending_tune = false;
+                    self.set(|g| g.rig_ext.tune_pending = false);
+                    self.log(format!("⚠ Antenna tuner: {e}"));
+                }
+        }
         if self.search.is_some() {
             self.step_search().await?;
         } else if self.cq.is_none() {
@@ -2024,6 +2308,42 @@ impl Station {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// SWR watch: on 40 m the demo antenna shows SWR 2.8. With auto-tune
+    /// off (the default) Whistlestop only warns; with it on, it tunes, but
+    /// only once the CQ is over.
+    #[test]
+    fn swr_watch_and_optional_autotune() {
+        for auto in [false, true] {
+            let h = spawn(|| {});
+            let mut cfg = Config { demo: true, callsign: "N0SWR".into(), whistle_s: 3.0, cq_cycles: 2, cq_listen_s: 2.0, ..Default::default() };
+            assert!(!cfg.auto_tune, "auto-tune must be off by default");
+            cfg.auto_tune = auto;
+            cfg.sdr.enabled = false;
+            cfg.sdr.wide_search = false;
+            h.send(Cmd::Start(cfg));
+            let wait = |secs: u64, f: &dyn Fn(&State) -> bool| {
+                let t = Instant::now();
+                while t.elapsed() < Duration::from_secs(secs) {
+                    if f(&h.state.lock().unwrap()) {
+                        return true;
+                    }
+                    std::thread::sleep(Duration::from_millis(100));
+                }
+                false
+            };
+            assert!(wait(10, &|s| s.mercury_ok));
+            h.send(Cmd::SetFreq(7_100_000.0));
+            h.send(Cmd::CallCq { table: None });
+            assert!(wait(30, &|s| s.log.iter().any(|l| l.1.contains("High SWR: 2.8 on 40m"))), "auto={auto}: no SWR warning");
+            // Still calling: never tune in the middle of it.
+            assert!(!h.state.lock().unwrap().log.iter().any(|l| l.1.contains("tune started")));
+            h.send(Cmd::StopCq);
+            let tuned = wait(8, &|s| s.log.iter().any(|l| l.1.contains("Antenna tuner: tune started (high SWR)")));
+            assert_eq!(tuned, auto, "auto-tune {auto}");
+            h.send(Cmd::Stop);
+        }
+    }
 
     /// Wide search: the (simulated) SDR spots the demo station anywhere in
     /// the segment, the radio tunes there and fine-locks on its own audio,

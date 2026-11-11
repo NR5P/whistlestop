@@ -1,6 +1,7 @@
 //! Whistlestop's graphical interface (egui).
 
 mod guide;
+mod rigwin;
 mod help;
 mod waterfall;
 
@@ -30,6 +31,7 @@ pub const DIM: Color32 = Color32::from_rgb(134, 148, 165);
 pub const BRASS: Color32 = Color32::from_rgb(242, 169, 59);
 pub const TEAL: Color32 = Color32::from_rgb(60, 200, 180);
 pub const RED: Color32 = Color32::from_rgb(235, 87, 75);
+pub const AMBER: Color32 = Color32::from_rgb(232, 168, 56);
 pub const GREEN: Color32 = Color32::from_rgb(70, 190, 100);
 
 fn style(ctx: &egui::Context) {
@@ -159,6 +161,10 @@ pub struct App {
     guide: guide::Guide,
     /// The Guide's own window is open.
     guide_open: bool,
+    rigwin: rigwin::RigWindow,
+    /// Settings: radio detection results and the model filter.
+    detected: Vec<whistlestop::rigsetup::RadioGuess>,
+    model_filter: String,
     wf_share: f32,
     call_cq_at: Option<Pos2>,
     call_cq_hovered: bool,
@@ -211,6 +217,9 @@ impl App {
             last_err: None,
             guide: guide::Guide::default(),
             guide_open: false,
+            rigwin: rigwin::RigWindow::default(),
+            detected: vec![],
+            model_filter: String::new(),
             wf_share: 0.30,
             call_cq_at: None,
             call_cq_hovered: false,
@@ -527,6 +536,17 @@ impl App {
                 ui.label(RichText::new(format!("{:.0}%", self.power * 100.0)).monospace());
                 if r.drag_stopped() || (r.changed() && !r.dragged()) {
                     self.send(Cmd::SetPower(self.power));
+                }
+            });
+            ui.horizontal(|ui| {
+                let b = egui::Button::new(RichText::new("🎛  Radio controls").strong().color(if self.rigwin.open { BG } else { TEXT })).fill(if self.rigwin.open { TEAL } else { CARD_HI });
+                if ui.add(b).help(&help::RC_OPEN).clicked() {
+                    self.rigwin.open = !self.rigwin.open;
+                    self.send(Cmd::RigWatch(self.rigwin.open));
+                }
+                if let Some(v) = s.rig_ext.swr.or(s.rig_ext.swr_last_tx) {
+                    let bad = v > self.cfg.swr_limit;
+                    ui.add_sized([86.0, 20.0], egui::Label::new(RichText::new(format!("SWR {v:.1}")).monospace().color(if bad { RED } else { DIM }))).help(&help::RC_SWR);
                 }
             });
             ui.horizontal(|ui| {
@@ -1376,15 +1396,25 @@ impl App {
             14 if since > Duration::from_secs(1) => {
                 help::set(false);
                 self.hover_at = None;
+                self.rigwin.open = true;
+                cmds.push(Cmd::RigWatch(true));
+                next = true;
+            }
+            15 if since > Duration::from_secs(3) => {
+                ctx.send_viewport_cmd(shoot(t.dir.join("7-radio-controls.ppm")));
+                next = true;
+            }
+            16 if since > Duration::from_secs(1) => {
+                self.rigwin.open = false;
+                self.cfg.rig_mode = whistlestop::rigsetup::RigMode::Managed; // tour only, not saved
                 self.settings_open = true;
-                self.e2e_confirm = Some(whistlestop::e2e::Policy::Require);
                 next = true;
             }
-            15 if since > Duration::from_secs(2) => {
-                ctx.send_viewport_cmd(shoot(t.dir.join("7-settings.ppm")));
+            17 if since > Duration::from_secs(2) => {
+                ctx.send_viewport_cmd(shoot(t.dir.join("8-settings.ppm")));
                 next = true;
             }
-            16 if since > Duration::from_secs(2) => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
+            18 if since > Duration::from_secs(2) => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
             _ => {}
         }
         if next {
@@ -1446,11 +1476,88 @@ impl App {
                         ui.label(RichText::new("Set Mercury's radio to Hamlib model 2 (NET rigctl) at the rigctld address below, so both share the radio.").small().color(DIM));
                     });
                     ui.add_space(6.0);
-                    card(ui, "Radio & audio", |ui| {
+                    card(ui, "Radio connection", |ui| {
+                        use whistlestop::rigsetup::{self as rs, RigMode};
+                        ui.horizontal(|ui| {
+                            ui.selectable_value(&mut c.rig_mode, RigMode::External, "Use a running rigctld / RigHelm").help(&help::ST_RIGMODE);
+                            ui.selectable_value(&mut c.rig_mode, RigMode::Managed, "Let Whistlestop run rigctld").help(&help::ST_RIGMODE);
+                        });
+                        match c.rig_mode {
+                            RigMode::External => {
+                                ui.horizontal(|ui| {
+                                    ui.label("rigctld address");
+                                    ui.text_edit_singleline(&mut c.rigctld).help(&help::ST_RIGCTLD);
+                                });
+                            }
+                            RigMode::Managed => {
+                                if rs::hamlib_bin("rigctld").is_none() {
+                                    ui.label(RichText::new("Hamlib isn't installed. On macOS: brew install hamlib").color(RED));
+                                }
+                                ui.horizontal(|ui| {
+                                    if ui.button("🔍  Detect radios").help(&help::ST_DETECT).clicked() {
+                                        self.detected = rs::detect();
+                                    }
+                                    ui.label(RichText::new(format!("{} found", self.detected.len())).color(DIM));
+                                });
+                                for g in self.detected.clone() {
+                                    ui.horizontal(|ui| {
+                                        ui.label(RichText::new(&g.what).strong());
+                                        ui.label(RichText::new(&g.port).monospace().small().color(DIM));
+                                        if ui.small_button("Use").help(&help::ST_DETECT).clicked() {
+                                            c.managed_rig.port = g.port.clone();
+                                            if let Some(m) = &g.model {
+                                                c.managed_rig.model = m.id;
+                                            }
+                                        }
+                                    })
+                                    .response
+                                    .on_hover_text(&g.why);
+                                }
+                                let models = rs::hamlib_models();
+                                egui::Grid::new("mr").num_columns(2).spacing(vec2(10.0, 8.0)).show(ui, |ui| {
+                                    ui.label("Model");
+                                    let cur = models.iter().find(|m| m.id == c.managed_rig.model).map(|m| m.label()).unwrap_or("Automatic (detect at start)".into());
+                                    egui::ComboBox::from_id_salt("model").width(300.0).selected_text(cur).show_ui(ui, |ui| {
+                                        ui.add(egui::TextEdit::singleline(&mut self.model_filter).hint_text("Type to filter, e.g. 7300"));
+                                        ui.selectable_value(&mut c.managed_rig.model, 0, "Automatic (detect at start)");
+                                        let f = self.model_filter.to_lowercase();
+                                        for m in models.iter().filter(|m| f.is_empty() || m.label().to_lowercase().contains(&f)).take(200) {
+                                            ui.selectable_value(&mut c.managed_rig.model, m.id, m.label());
+                                        }
+                                    })
+                                    .response
+                                    .help(&help::ST_MODEL);
+                                    ui.end_row();
+                                    ui.label("Port");
+                                    egui::ComboBox::from_id_salt("port").width(300.0).selected_text(if c.managed_rig.port.is_empty() { "Automatic".to_string() } else { c.managed_rig.port.clone() }).show_ui(ui, |ui| {
+                                        ui.selectable_value(&mut c.managed_rig.port, String::new(), "Automatic");
+                                        for p in rs::all_serial_paths() {
+                                            ui.selectable_value(&mut c.managed_rig.port, p.clone(), p);
+                                        }
+                                    })
+                                    .response
+                                    .help(&help::ST_PORT);
+                                    ui.end_row();
+                                    ui.label("Speed");
+                                    egui::ComboBox::from_id_salt("baud").selected_text(if c.managed_rig.baud == 0 { "Automatic".to_string() } else { c.managed_rig.baud.to_string() }).show_ui(ui, |ui| {
+                                        for b in [0u32, 4800, 9600, 19200, 38400, 57600, 115200] {
+                                            ui.selectable_value(&mut c.managed_rig.baud, b, if b == 0 { "Automatic".to_string() } else { b.to_string() });
+                                        }
+                                    })
+                                    .response
+                                    .help(&help::ST_BAUD);
+                                    ui.end_row();
+                                    ui.label("rigctld port");
+                                    ui.add(egui::DragValue::new(&mut c.managed_rig.listen_port).range(1024..=65535)).help(&help::ST_RIGPORT);
+                                    ui.end_row();
+                                });
+                                ui.label(RichText::new(format!("Mercury: Hamlib model 2 (NET rigctl) at 127.0.0.1:{}. RTS and DTR are held off so connecting can't key the radio.", c.managed_rig.listen_port)).small().color(DIM));
+                            }
+                        }
+                    });
+                    ui.add_space(6.0);
+                    card(ui, "Audio", |ui| {
                         egui::Grid::new("ra").num_columns(2).spacing(vec2(10.0, 8.0)).show(ui, |ui| {
-                            ui.label("rigctld");
-                            ui.text_edit_singleline(&mut c.rigctld).help(&help::ST_RIGCTLD);
-                            ui.end_row();
                             ui.label("Audio in").help(&help::ST_AUDIO);
                             egui::ComboBox::from_id_salt("ain").width(280.0).selected_text(if c.audio_in.is_empty() { "System default" } else { &c.audio_in }).show_ui(ui, |ui| {
                                 ui.selectable_value(&mut c.audio_in, String::new(), "System default");
@@ -1644,6 +1751,9 @@ impl eframe::App for App {
                 wide: g.wide.clone(),
                 modem_version: g.modem_version.clone(),
                 modem_bps: g.modem_bps,
+                rig_desc: g.rig_desc.clone(),
+                rig_caps: g.rig_caps.clone(),
+                rig_ext: g.rig_ext.clone(),
             }
         };
 
@@ -1691,6 +1801,16 @@ impl eframe::App for App {
 
         if self.settings_open {
             self.settings(&ctx);
+        }
+        if self.rigwin.open {
+            let (cmds, changed) = self.rigwin.show(&ctx, &snap, &mut self.cfg);
+            for c in cmds {
+                self.send(c);
+            }
+            if changed {
+                let _ = self.cfg.save();
+                self.send(Cmd::Update(self.cfg.clone()));
+            }
         }
         if self.guide_open {
             let builder = egui::ViewportBuilder::default()

@@ -129,3 +129,42 @@ pub const ST_RAMP: Topic = ("Roundtable speed ramp-up", "As host, speed the tabl
 pub const ST_E2E: Topic = ("Encryption", "Off (default), Prefer (encrypt when the other station also wants to) or Require (encrypt or hang up). Fresh keys every link, never saved. Not legal on amateur bands.", "Encryption (optional)");
 pub const ST_DOWNLOAD: Topic = ("Download folder", "Where received files are saved. Partial files (for resuming) are kept in a .partial folder inside it.", "Files");
 pub const ST_SAVE: Topic = ("Save & connect", "Save settings to whistlestop.toml and reconnect to the radio, Mercury and audio with them.", "Settings reference");
+
+// ------------------------------------------------------------ Radio controls
+pub const RC_OPEN: Topic = ("Radio controls", "Opens a window with everything your radio offers through Hamlib: transmit meters (SWR, ALC, power), the antenna tuner, receive and transmit settings, VFO, split and RIT/XIT. It closes again so the main screen stays uncluttered.", "Rig controls");
+pub const RC_RADIO: Topic = ("Radio", "The model Hamlib reports and how Whistlestop reaches it (a rigctld it started, or one already running).", "Rig controls");
+pub const RC_SWR: Topic = ("SWR", "Standing-wave ratio while transmitting: how well the antenna matches. 1.0 is perfect, under 1.5 is good; above your limit the line is red. Read only while transmitting.", "Antenna tuner and SWR");
+pub const RC_ALC: Topic = ("ALC", "The radio's automatic level control. For data it should barely move: if it climbs, lower the audio drive, or the signal distorts.", "Antenna tuner and SWR");
+pub const RC_PO: Topic = ("Power out", "Transmit power as the radio measures it, as a fraction of full scale.", "Antenna tuner and SWR");
+pub const RC_ATU: Topic = ("ATU", "Switches the radio's built-in antenna tuner in or out of the antenna line.", "Antenna tuner and SWR");
+pub const RC_TUNE_NOW: Topic = ("Tune now", "Starts the radio's antenna tuner: it switches the tuner in and sends its own short carrier while it finds a match. Listen first: tuning transmits.", "Antenna tuner and SWR");
+pub const RC_AUTOTUNE: Topic = ("Auto-tune on high SWR", "Off by default. When on, a transmission whose SWR goes above the limit makes Whistlestop start the tuner, but only once the band is quiet: never during a link, CQ or Roundtable traffic, and at most once every 2 minutes per band.", "Antenna tuner and SWR");
+pub const RC_SWR_LIMIT: Topic = ("SWR limit", "Above this the SWR meter turns red, the log warns, and (if auto-tune is on) the tuner is started. 2.0 : 1 is a common safe limit for solid-state radios.", "Antenna tuner and SWR");
+pub const RC_AF: Topic = ("Volume (AF)", "The radio's audio volume to the speaker. It doesn't change what Whistlestop and Mercury hear over USB on most radios.", "Rig controls");
+pub const RC_RFG: Topic = ("RF gain", "Receiver gain. Leave it at maximum for data unless a very strong signal overloads the receiver.", "Rig controls");
+pub const RC_SQL: Topic = ("Squelch", "Mutes weak signals. Keep it fully open (0) for data: squelch cuts off the start of frames and whistles.", "Rig controls");
+pub const RC_AGC: Topic = ("AGC", "Automatic gain control speed. Medium or slow suits data; fast can pump on OFDM signals.", "Rig controls");
+pub const RC_PREAMP: Topic = ("Preamp", "Extra receive gain for weak signals on quiet higher bands. Usually off on 80 and 40 m.", "Rig controls");
+pub const RC_ATT: Topic = ("Attenuator", "Cuts receive signal strength when strong stations overload the receiver.", "Rig controls");
+pub const RC_NB: Topic = ("Noise blanker", "Removes impulse noise (ignition, power lines). Leave it off for data: it distorts OFDM and the whistle.", "Rig controls");
+pub const RC_NR: Topic = ("Noise reduction", "The radio's DSP noise reduction (on/off and level). Off for data: it smears the signals Mercury and the whistle detector need.", "Rig controls");
+pub const RC_ANF: Topic = ("Auto notch", "Removes steady tones. Off for data: it can notch out OFDM carriers.", "Rig controls");
+pub const RC_FILTER: Topic = ("Filter width", "The receive filter (passband) width. At least 2.4 kHz for wide bandwidths; 500 Hz settings work with narrow filters.", "Rig controls");
+pub const RC_MIC: Topic = ("Mic gain", "Audio drive on transmit for radios that use mic gain for USB audio. Set so ALC barely moves.", "Rig controls");
+pub const RC_COMP: Topic = ("Speech compressor", "For voice only. Off for data: it distorts the signal.", "Rig controls");
+pub const RC_VOX: Topic = ("VOX", "Voice-operated transmit. Off: Whistlestop and Mercury key the radio through rig control.", "Rig controls");
+pub const RC_MON: Topic = ("Monitor", "Hear your own transmitted audio.", "Rig controls");
+pub const RC_VFO: Topic = ("VFO A / B", "Which VFO is active.", "Rig controls");
+pub const RC_CPY: Topic = ("A = B", "Copy VFO A's frequency and mode to VFO B.", "Rig controls");
+pub const RC_XCHG: Topic = ("A ⇄ B", "Swap VFOs A and B.", "Rig controls");
+pub const RC_SPLIT: Topic = ("Split", "Transmit on VFO B while receiving on A. Keep it off for Whistlestop: both stations must transmit where they listen.", "Rig controls");
+pub const RC_RIT: Topic = ("RIT", "Receive offset. Keep it at 0 for data, or you'll listen beside the other station.", "Rig controls");
+pub const RC_XIT: Topic = ("XIT", "Transmit offset. Keep it at 0 for data, or you'll transmit beside the other station.", "Rig controls");
+
+// ---------------------------------------------------------- Radio connection
+pub const ST_RIGMODE: Topic = ("Radio connection", "Use a rig control server that's already running (Hamlib rigctld, or RigHelm's server), or let Whistlestop run rigctld for your radio. Either way Mercury should use the same address.", "Setting up your station");
+pub const ST_DETECT: Topic = ("Detect radios", "Looks at the USB devices macOS already knows about (it never opens a port, which could key a radio) and recognises Icom, Yaesu, Kenwood, QRP Labs and others. Use fills in the model and port.", "Setting up your station");
+pub const ST_MODEL: Topic = ("Radio model", "Hamlib's model for your radio. Automatic detects it at start from the USB description.", "Setting up your station");
+pub const ST_PORT: Topic = ("Serial port", "The radio's CAT port. On Yaesu radios with two ports, the first (Enhanced) carries CAT. Automatic uses the detected radio.", "Setting up your station");
+pub const ST_BAUD: Topic = ("Speed", "Serial speed, matching the radio's CAT setting. Automatic uses Hamlib's default for the model.", "Setting up your station");
+pub const ST_RIGPORT: Topic = ("rigctld port", "The TCP port Whistlestop's rigctld listens on (127.0.0.1). Point Mercury's Hamlib NET rigctl at the same address.", "Setting up your station");

@@ -49,6 +49,15 @@ pub struct Config {
     pub segments: Vec<Segment>,
     pub download_dir: PathBuf,
     pub sdr: SdrConfig,
+
+    /// How to reach the radio: an existing rigctld (External) or one
+    /// Whistlestop runs (Managed, with auto-detect).
+    pub rig_mode: crate::rigsetup::RigMode,
+    pub managed_rig: crate::rigsetup::ManagedRig,
+    /// Ask the antenna tuner to tune when a transmission's SWR is above
+    /// `swr_limit` (off by default; tuning transmits a carrier).
+    pub auto_tune: bool,
+    pub swr_limit: f32,
 }
 
 impl Default for Config {
@@ -78,6 +87,10 @@ impl Default for Config {
             segments: default_segments(),
             download_dir: dirs::download_dir().unwrap_or_else(std::env::temp_dir).join("Whistlestop"),
             sdr: SdrConfig::default(),
+            rig_mode: crate::rigsetup::RigMode::External,
+            managed_rig: crate::rigsetup::ManagedRig::default(),
+            auto_tune: false,
+            swr_limit: 2.0,
         }
     }
 }

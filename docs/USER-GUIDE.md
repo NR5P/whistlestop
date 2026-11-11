@@ -32,20 +32,33 @@ When you're ready for the air, open **Settings**, enter your callsign, untick **
 
 You need four things: a radio with CAT control, an audio interface to it (most modern radios have USB audio built in), the **Mercury** modem, and a **rig control server** that both Mercury and Whistlestop share.
 
-### 1. Rig control: rigctld or RigHelm
+### 1. Rig control
 
-Only one program can open the radio's CAT (serial/USB) port. So a rig control *server* owns it, and everything else talks to the server over the network on this computer:
+Only one program can open the radio's CAT (serial/USB) port. So a rig control *server* owns it, and everything else (Whistlestop and Mercury) talks to that server over the network on this computer. In **Settings → Radio connection** choose one of two ways:
+
+**Let Whistlestop run rigctld** (easiest). Whistlestop starts Hamlib's `rigctld` for your radio and stops it when you quit.
+
+- Install Hamlib once (macOS: `brew install hamlib`).
+- Press **🔍 Detect radios**. Whistlestop looks at the USB devices macOS already knows about and recognises:
+  - Icom radios by name (an IC-7300 names itself in its USB serial number), plus the IC-705 and IC-905 by Icom's own USB IDs;
+  - Yaesu radios by their two-port USB chip (CAT is on the first port);
+  - Kenwood, Elecraft, QRP Labs (QMX/QDX, which speak Kenwood TS-480), Xiegu and others by their USB names.
+- Press **Use** beside your radio, or choose **Model**, **Port** and **Speed** yourself. Leaving them on **Automatic** detects them every time Whistlestop starts.
+- **Detection never opens a port.** Opening a serial port raises its RTS and DTR lines, and on some radios that keys the transmitter. When Whistlestop starts rigctld, it holds RTS and DTR off.
+- rigctld listens on `127.0.0.1:4532` (change **rigctld port** if something else uses it). Point Mercury there.
+
+**Use a running rigctld / RigHelm**. If something already owns the radio:
 
 - **RigHelm**: enable its built-in rigctld server (default `127.0.0.1:4532`).
-- **Hamlib rigctld**: run `rigctld -m <model> -r <port>`. Find your model number with `rigctl -l`.
+- **Hamlib rigctld** you start yourself: `rigctld -m <model> -r <port>` (find the model number with `rigctl -l`).
 
-In Whistlestop **Settings → Radio & audio**, set **rigctld** to that address (default `127.0.0.1:4532`). The **Radio** pill in the top bar turns green when connected.
+Set **rigctld address** to it. Either way, the **Radio** pill in the top bar turns green when connected, and the log names the radio Hamlib reports.
 
 ### 2. Mercury
 
 Install Mercury (macOS: drag `Mercury.app` to Applications). Then set it up so it shares the radio:
 
-- **Radio / PTT**: Hamlib model **2 (NET rigctl)** pointing at the same rigctld address. Mercury then keys the transmitter through the same server.
+- **Radio / PTT**: Hamlib model **2 (NET rigctl)** pointing at the same rigctld address (`127.0.0.1:4532` by default, whether Whistlestop runs rigctld or something else does). Mercury then keys the transmitter through the same server.
 - **Sound card**: the radio's USB audio codec, both directions.
 - **Ports**: leave the TNC port at **8300** (data on 8301) and the broadcast port at **8100**, or set the same numbers in Whistlestop **Settings → Mercury modem**.
 
@@ -302,16 +315,59 @@ An RTL-SDR dongle adds a second, wide receiver. It is optional.
 
 ## Rig controls
 
-The **Radio** card:
+### On the main screen
+
+The **Radio** card keeps only the essentials:
 
 - **Band buttons** (80–10 m): jump to that band's digital segment.
 - **−1k / −100 / +100 / +1k**: nudge the dial.
 - **Frequency box**: type kHz (`14103.15`) or Hz and press **Tune** or Enter.
 - **Mode**: PKTUSB, USB or LSB (Whistlestop's signals are USB).
 - **Power**: the radio's RF power, if it supports remote setting.
-- **Tune carrier**: Mercury sends a steady 1 kHz tone for your antenna tuner. It always stops by itself after 60 s; **Stop** ends it.
+- **🎛 Radio controls**: opens the full controls window (below). The button is lit while it's open.
+- **SWR 1.3**: the SWR of the current or last transmission, red when above your limit.
+- **Tune carrier** / **Stop**: Mercury sends a steady 1 kHz tone for an external antenna tuner. It always stops by itself after 60 s.
 
 The top bar's S-meter and frequency display follow the radio, including changes you make on the radio's own knob.
+
+### The Radio Controls window
+
+**🎛 Radio controls** opens a separate, movable window with everything your radio offers through Hamlib. Close it when you're done, so the main screen stays uncluttered. Whistlestop asks the radio for its capabilities when it connects and **shows only the controls your radio reports**, so there are no buttons that do nothing. Values are read from the radio about every 1.5 s while the window is open.
+
+- **Transmit meters**: **SWR**, **ALC** and **Power out**, read while transmitting, plus the SWR of the last transmission. See "Antenna tuner and SWR".
+- **Antenna tuner**: **ATU** (tuner in or out), **⟳ Tune now**, the Mercury **Tune carrier**, and **Auto-tune when SWR is above …** with its limit.
+- **Receive**: **Volume (AF)**, **RF gain**, **Squelch**, **AGC** (Off, Fast, Medium, Slow, Auto), **Preamp** and **Attenuator** (the steps your radio offers), **NB**, **NR** (with level), **Notch**, and **Filter width** (300–4000 Hz).
+- **Transmit**: **Power**, **Mic gain**, **Compression**, and the **Comp**, **VOX** and **Monitor** switches.
+- **VFO, split and offsets**: **A / B**, **A = B**, **A ⇄ B**, **Split**, **RIT** and **XIT** (type an offset, **Set**, **Clear**).
+
+> For data, keep NB, NR, Notch, compression, VOX, split, RIT and XIT **off** and squelch **open**. They distort data signals or move you off the other station. The window reminds you.
+
+## Antenna tuner and SWR
+
+### The SWR watch
+
+Whenever the radio transmits (a CQ whistle, Mercury data, a tune carrier), Whistlestop reads **SWR**, **ALC** and **power out** from the radio, if it reports them. It keeps the highest SWR of each transmission:
+
+- The **Radio** card and the Radio Controls window show it (**SWR 1.3**).
+- If it's above your **SWR limit** (default **2.0 : 1**), the reading turns red and the log warns: "High SWR: 2.8 on 40m (limit 2.0)".
+
+Watching never transmits anything.
+
+### Tuning
+
+- **ATU** switches the radio's built-in tuner in or out.
+- **⟳ Tune now** switches the tuner in and starts a tune cycle. The radio sends its own short carrier while it finds a match, so **listen first**.
+- **Tune carrier** is for an *external* tuner: Mercury sends a steady 1 kHz tone (at most 60 s) while you tune by hand.
+
+### Auto-tune (optional, off by default)
+
+Tick **Auto-tune when SWR is above** in the Radio Controls window to let Whistlestop start the tuner by itself after a transmission whose SWR went above the limit. Because tuning puts a carrier on the air, it is careful:
+
+- It waits until the band is quiet: **never** during a 1:1 link, while calling CQ or searching, or with Roundtable messages waiting. "High SWR: will tune as soon as the band is quiet" shows meanwhile.
+- At most once every **2 minutes** per band, so a bad antenna doesn't keep it tuning.
+- It needs a radio whose tuner Hamlib can control (the **ATU** and **Tune now** buttons appear when it can).
+
+After a tune, the window shows "Tuned on 40m at 14:02". The setting and the limit are saved.
 
 ## Band plan
 
@@ -340,7 +396,10 @@ Settings are saved to `~/Library/Application Support/Whistlestop/whistlestop.tom
 | Name, Grid | Sent to the other station at connect (HELLO) | empty |
 | Demo mode | Simulated radio, band, Mercury and demo station | on |
 | Mercury host / TNC port / Broadcast port | Where Mercury listens | 127.0.0.1 / 8300 / 8100 |
-| rigctld | Rig control server address | 127.0.0.1:4532 |
+| Radio connection | Use a running rigctld / RigHelm, or let Whistlestop run rigctld | running rigctld |
+| rigctld address | The running server's address | 127.0.0.1:4532 |
+| Model / Port / Speed | For the rigctld Whistlestop runs; Automatic detects at start | Automatic |
+| rigctld port | Where Whistlestop's rigctld listens (point Mercury here) | 4532 |
 | Audio in / out | The radio's sound device | system default |
 | Wide receiver | Use an RTL-SDR; RX OUT or IF OUT; IF Hz and inversion; crystal ppm | off |
 | Dwell per channel | How long search listens on each channel | 2.2 s |
@@ -350,6 +409,8 @@ Settings are saved to `~/Library/Application Support/Whistlestop/whistlestop.tom
 | Whistle watch | Report whistles while parked | on |
 | Roundtable speed ramp-up | Host adjusts the table's speed | on |
 | Encryption | Off / Prefer / Require (see Encryption) | Off |
+| Auto-tune on high SWR | Start the antenna tuner after a high-SWR transmission, when quiet (Radio Controls window) | off |
+| SWR limit | Above this: red reading, log warning, auto-tune if on | 2.0 : 1 |
 | Download folder | Where received files go | ~/Downloads/Whistlestop |
 
 The **Whistle** length and **Answer automatically** are set on the main screen and saved too.
@@ -362,6 +423,16 @@ The **Whistle** length and **Answer automatically** are set on the main screen a
 - **Mercury**: Mercury isn't running, the ports differ, or another program (VarAC, vARIM) already holds Mercury's TNC port. Only one program at a time.
 - **Audio**: the audio device in Settings isn't available. Pick it again; on macOS allow microphone access for Whistlestop in System Settings → Privacy.
 - **SDR**: no dongle found, or the wide receiver is off in Settings.
+
+**The radio isn't detected.**
+
+- Is it switched on and connected by USB (not just an audio cable)? Some radios need their USB driver (Silicon Labs CP210x) on older macOS.
+- Detection recognises radios by their USB descriptions. If yours shows as "USB serial (choose the model)", or not at all, choose **Model** and **Port** by hand.
+- The radio's CAT speed must match **Speed** (or leave it Automatic and set the radio to Hamlib's default for the model).
+
+**High SWR warnings.**
+
+Check the antenna and feed line first. With a built-in tuner, press **Tune now** or turn on auto-tune. If SWR stays high after tuning, the antenna is outside what the tuner can match on that band.
 
 **Search never stops on a whistle.**
 

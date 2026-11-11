@@ -8,6 +8,7 @@ pub mod fake_mercury;
 pub mod modes;
 pub mod protocol;
 pub mod rig;
+pub mod rigsetup;
 pub mod sdr;
 pub mod tnc;
 pub mod whistle;

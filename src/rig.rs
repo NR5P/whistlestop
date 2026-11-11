@@ -76,9 +76,104 @@ impl RigctldClient {
 
 pub struct SimRig {
     pub status: RigStatus,
+    pub levels: std::collections::HashMap<String, f32>,
+    pub funcs: std::collections::HashMap<String, bool>,
+    pub vfo: String,
+    pub split: bool,
+    pub rit: i32,
+    pub xit: i32,
+    /// The band the antenna tuner last matched (demo: the antenna is
+    /// resonant on 20 m and needs the tuner elsewhere).
+    pub tuned_band: Option<&'static str>,
     /// Shared with the simulated band and fake Mercury, so they know where
     /// the "radio" is tuned.
     pub freq_link: std::sync::Arc<std::sync::Mutex<f64>>,
+}
+
+impl SimRig {
+    /// Demo antenna: resonant on 20 m (SWR 1.3); elsewhere 2.8 until the
+    /// tuner has matched that band.
+    fn swr(&self) -> f32 {
+        if !self.status.ptt {
+            return 1.0;
+        }
+        let band = crate::bandplan::band_of(self.status.freq_hz);
+        let tuned = *self.funcs.get("TUNER").unwrap_or(&false) && self.tuned_band.is_some() && self.tuned_band == band;
+        if tuned { 1.15 } else if band == Some("20m") { 1.3 } else { 2.8 }
+    }
+}
+
+/// What a radio supports, from Hamlib's capability report.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct RigCaps {
+    pub model: String,
+    pub get_levels: Vec<String>,
+    pub set_levels: Vec<String>,
+    pub get_funcs: Vec<String>,
+    pub set_funcs: Vec<String>,
+    pub vfo_ops: Vec<String>,
+    pub preamp_db: Vec<i32>,
+    pub att_db: Vec<i32>,
+    pub modes: Vec<String>,
+}
+
+impl RigCaps {
+    pub fn parse(text: &str) -> RigCaps {
+        let mut c = RigCaps::default();
+        let words = |v: &str| -> Vec<String> {
+            v.split_whitespace().map(|w| w.split('(').next().unwrap_or(w).to_string()).filter(|w| !w.is_empty() && w != "None").collect()
+        };
+        let db = |v: &str| -> Vec<i32> { v.split_whitespace().filter_map(|w| w.trim_end_matches("dB").parse().ok()).filter(|d| *d != 0).collect() };
+        for line in text.lines() {
+            let Some((k, v)) = line.split_once(':') else { continue };
+            match k.trim() {
+                "Model name" => c.model = v.trim().to_string(),
+                "Mfg name" if c.model.is_empty() => c.model = v.trim().to_string(),
+                "Get level" => c.get_levels = words(v),
+                "Set level" => c.set_levels = words(v),
+                "Get functions" => c.get_funcs = words(v),
+                "Set functions" => c.set_funcs = words(v),
+                "VFO Ops" => c.vfo_ops = words(v),
+                "Preamp" => c.preamp_db = db(v),
+                "Attenuator" => c.att_db = db(v),
+                "Mode list" => c.modes = words(v),
+                _ => {}
+            }
+        }
+        c
+    }
+
+    /// The demo radio's abilities.
+    pub fn demo() -> RigCaps {
+        let v = |s: &str| s.split_whitespace().map(String::from).collect::<Vec<_>>();
+        RigCaps {
+            model: "Demo transceiver".into(),
+            get_levels: v("AF RF SQL MICGAIN COMP NR AGC PREAMP ATT RFPOWER SWR ALC RFPOWER_METER STRENGTH"),
+            set_levels: v("AF RF SQL MICGAIN COMP NR AGC PREAMP ATT RFPOWER"),
+            get_funcs: v("NB NR ANF COMP VOX MON TUNER"),
+            set_funcs: v("NB NR ANF COMP VOX MON TUNER"),
+            vfo_ops: v("CPY XCHG TUNE UP DOWN BAND_UP BAND_DOWN"),
+            preamp_db: vec![10, 20],
+            att_db: vec![6, 12, 18],
+            modes: v("USB LSB PKTUSB CW AM FM"),
+        }
+    }
+
+    pub fn can_set_level(&self, l: &str) -> bool {
+        self.set_levels.iter().any(|x| x == l)
+    }
+    pub fn can_get_level(&self, l: &str) -> bool {
+        self.get_levels.iter().any(|x| x == l)
+    }
+    pub fn can_func(&self, f: &str) -> bool {
+        self.set_funcs.iter().any(|x| x == f)
+    }
+    pub fn can_op(&self, op: &str) -> bool {
+        self.vfo_ops.iter().any(|x| x == op)
+    }
+    pub fn has_tuner(&self) -> bool {
+        self.can_func("TUNER") || self.can_op("TUNE")
+    }
 }
 
 pub enum Rig {
@@ -91,6 +186,19 @@ impl Rig {
         *freq_link.lock().unwrap() = freq_hz;
         Rig::Sim(SimRig {
             freq_link,
+            levels: [("AF", 0.5), ("RF", 1.0), ("SQL", 0.0), ("MICGAIN", 0.5), ("COMP", 0.0), ("NR", 0.3), ("AGC", 5.0), ("PREAMP", 0.0), ("ATT", 0.0)]
+                .into_iter()
+                .map(|(k, v)| (k.to_string(), v))
+                .collect(),
+            funcs: [("NB", false), ("NR", false), ("ANF", false), ("COMP", false), ("VOX", false), ("MON", false), ("TUNER", true)]
+                .into_iter()
+                .map(|(k, v)| (k.to_string(), v))
+                .collect(),
+            vfo: "VFOA".into(),
+            split: false,
+            rit: 0,
+            xit: 0,
+            tuned_band: Some("20m"),
             status: RigStatus {
                 freq_hz,
                 mode: "PKTUSB".into(),
@@ -175,6 +283,147 @@ impl Rig {
         }
     }
 
+    /// What the radio can do, from rigctld's capability report.
+    pub async fn caps(&mut self) -> Result<RigCaps> {
+        match self {
+            Rig::Rigctld(c) => {
+                c.w.write_all(b"\\dump_caps\n").await?;
+                let mut text = String::new();
+                loop {
+                    let l = c.line().await?;
+                    if l.starts_with("RPRT") {
+                        break;
+                    }
+                    text.push_str(&l);
+                    text.push('\n');
+                }
+                Ok(RigCaps::parse(&text))
+            }
+            Rig::Sim(_) => Ok(RigCaps::demo()),
+        }
+    }
+
+    pub async fn get_level(&mut self, name: &str) -> Result<f32> {
+        match self {
+            Rig::Rigctld(c) => Ok(c.get(&format!("l {name}"), 1).await?[0].parse()?),
+            Rig::Sim(s) => Ok(match name {
+                "SWR" => s.swr(),
+                "ALC" => if s.status.ptt { 0.25 } else { 0.0 },
+                "RFPOWER_METER" => if s.status.ptt { s.status.rf_power.unwrap_or(0.5) } else { 0.0 },
+                "STRENGTH" => s.status.strength_db.unwrap_or(-30) as f32,
+                _ => *s.levels.get(name).unwrap_or(&0.0),
+            }),
+        }
+    }
+
+    pub async fn set_level(&mut self, name: &str, v: f32) -> Result<()> {
+        match self {
+            Rig::Rigctld(c) => {
+                let val = if matches!(name, "AGC" | "PREAMP" | "ATT" | "KEYSPD" | "NOTCHF" | "IF" | "CWPITCH") { format!("{}", v.round() as i64) } else { format!("{v:.3}") };
+                c.set(&format!("L {name} {val}")).await
+            }
+            Rig::Sim(s) => {
+                s.levels.insert(name.into(), v);
+                if name == "RFPOWER" {
+                    s.status.rf_power = Some(v);
+                }
+                Ok(())
+            }
+        }
+    }
+
+    pub async fn get_func(&mut self, name: &str) -> Result<bool> {
+        match self {
+            Rig::Rigctld(c) => Ok(c.get(&format!("u {name}"), 1).await?[0] == "1"),
+            Rig::Sim(s) => Ok(*s.funcs.get(name).unwrap_or(&false)),
+        }
+    }
+
+    pub async fn set_func(&mut self, name: &str, on: bool) -> Result<()> {
+        match self {
+            Rig::Rigctld(c) => c.set(&format!("U {name} {}", on as u8)).await,
+            Rig::Sim(s) => {
+                s.funcs.insert(name.into(), on);
+                Ok(())
+            }
+        }
+    }
+
+    /// A VFO operation: TUNE (start the antenna tuner), CPY (A=B),
+    /// XCHG (swap A/B), UP, DOWN, BAND_UP, BAND_DOWN...
+    pub async fn vfo_op(&mut self, op: &str) -> Result<()> {
+        match self {
+            Rig::Rigctld(c) => c.set(&format!("G {op}")).await,
+            Rig::Sim(s) => {
+                match op {
+                    "TUNE" => {
+                        s.funcs.insert("TUNER".into(), true);
+                        s.tuned_band = crate::bandplan::band_of(s.status.freq_hz);
+                    }
+                    "XCHG" => s.vfo = if s.vfo == "VFOA" { "VFOB".into() } else { "VFOA".into() },
+                    _ => {}
+                }
+                Ok(())
+            }
+        }
+    }
+
+    pub async fn vfo(&mut self) -> Result<String> {
+        match self {
+            Rig::Rigctld(c) => Ok(c.get("v", 1).await?[0].clone()),
+            Rig::Sim(s) => Ok(s.vfo.clone()),
+        }
+    }
+
+    pub async fn set_vfo(&mut self, vfo: &str) -> Result<()> {
+        match self {
+            Rig::Rigctld(c) => c.set(&format!("V {vfo}")).await,
+            Rig::Sim(s) => {
+                s.vfo = vfo.into();
+                Ok(())
+            }
+        }
+    }
+
+    pub async fn split(&mut self) -> Result<bool> {
+        match self {
+            Rig::Rigctld(c) => Ok(c.get("s", 2).await?[0] == "1"),
+            Rig::Sim(s) => Ok(s.split),
+        }
+    }
+
+    pub async fn set_split(&mut self, on: bool) -> Result<()> {
+        match self {
+            Rig::Rigctld(c) => c.set(&format!("S {} VFOB", on as u8)).await,
+            Rig::Sim(s) => {
+                s.split = on;
+                Ok(())
+            }
+        }
+    }
+
+    /// RIT (`xit = false`) or XIT offset in Hz.
+    pub async fn offset(&mut self, xit: bool) -> Result<i32> {
+        match self {
+            Rig::Rigctld(c) => Ok(c.get(if xit { "z" } else { "j" }, 1).await?[0].parse()?),
+            Rig::Sim(s) => Ok(if xit { s.xit } else { s.rit }),
+        }
+    }
+
+    pub async fn set_offset(&mut self, xit: bool, hz: i32) -> Result<()> {
+        match self {
+            Rig::Rigctld(c) => c.set(&format!("{} {hz}", if xit { "Z" } else { "J" })).await,
+            Rig::Sim(s) => {
+                if xit {
+                    s.xit = hz
+                } else {
+                    s.rit = hz
+                }
+                Ok(())
+            }
+        }
+    }
+
     pub fn is_sim(&self) -> bool {
         matches!(self, Rig::Sim(_))
     }
@@ -225,6 +474,45 @@ mod tests {
             }
         });
         addr
+    }
+
+    /// Against Hamlib's real rigctld with its Dummy radio (skipped when
+    /// Hamlib isn't installed).
+    #[tokio::test]
+    async fn full_controls_against_real_rigctld() {
+        let Ok(p) = crate::rigsetup::start_dummy(45_871) else { return };
+        let mut rig = None;
+        for _ in 0..50 {
+            if let Ok(c) = RigctldClient::connect(&p.addr).await {
+                rig = Some(Rig::Rigctld(c));
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        let mut rig = rig.expect("rigctld dummy");
+        let caps = rig.caps().await.unwrap();
+        assert!(caps.can_set_level("AF") && caps.can_func("TUNER") && caps.can_op("TUNE"), "{caps:?}");
+        assert!(!caps.att_db.is_empty());
+        rig.set_level("AF", 0.4).await.unwrap();
+        assert!((rig.get_level("AF").await.unwrap() - 0.4).abs() < 0.01);
+        rig.set_func("TUNER", true).await.unwrap();
+        assert!(rig.get_func("TUNER").await.unwrap());
+        rig.vfo_op("TUNE").await.unwrap();
+        rig.set_offset(false, 120).await.unwrap();
+        assert_eq!(rig.offset(false).await.unwrap(), 120);
+        rig.set_split(true).await.unwrap();
+        assert!(rig.split().await.unwrap());
+        assert_eq!(rig.vfo().await.unwrap(), "VFOA");
+        let _ = rig.get_level("SWR").await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn demo_antenna_needs_the_tuner_off_20m() {
+        let mut rig = Rig::sim(7_100_000.0, Default::default());
+        rig.ptt(true).await.unwrap();
+        assert!(rig.get_level("SWR").await.unwrap() > 2.0);
+        rig.vfo_op("TUNE").await.unwrap();
+        assert!(rig.get_level("SWR").await.unwrap() < 1.5);
     }
 
     #[tokio::test]
