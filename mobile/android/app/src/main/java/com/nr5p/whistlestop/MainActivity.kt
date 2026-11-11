@@ -53,6 +53,8 @@ import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.NavigationBarItemDefaults
+import androidx.compose.material3.RadioButton
+import androidx.compose.material3.RadioButtonDefaults
 import androidx.compose.material3.SecondaryTabRow
 import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
@@ -564,15 +566,7 @@ private fun SettingsScreen(station: Station, s: EngineState) {
             }
             Text("Takes effect when you tap Save.", color = C.dim, fontSize = 12.sp)
         }
-        WCard("Radio", HelpTopic.radio) {
-            Field((cat?.get("port") as? JsonPrimitive)?.content ?: "", { v ->
-                station.edit { m ->
-                    val c = (m["cat"] as? JsonObject)?.toMutableMap() ?: mutableMapOf()
-                    c["port"] = JsonPrimitive(v)
-                    m["cat"] = JsonObject(c)
-                }
-            }, "CAT bridge host:port", Modifier.fillMaxWidth(), caps = false)
-        }
+        RadioCard(station, s, cfg)
         WCard("Modem (Mercury)", HelpTopic.modem) {
             Field(str("mercury_host"), { set("mercury_host", it) }, "Host", Modifier.fillMaxWidth(), caps = false)
             Field(str("mercury_port"), { v -> v.toIntOrNull()?.let { n -> station.edit { it["mercury_port"] = JsonPrimitive(n) } } },
@@ -580,14 +574,123 @@ private fun SettingsScreen(station: Station, s: EngineState) {
         }
         BrassButton(if (saved) "Saved" else "Save") {
             val demoChanged = ((cfg["demo"] as? JsonPrimitive)?.content == "true") != s.demo
+            val radioChanged = station.radioChanged()
             if (station.saveConfig()) {
-                if (demoChanged) station.restart()
+                if (demoChanged || radioChanged) station.restart()
                 saved = true
             }
         }
         WCard("About") {
             Text("Modem: ${s.modemVersion.ifEmpty { "—" }}", color = C.dim, fontSize = 13.sp)
             Text("Whistlestop is free software (GPL-3.0). It includes the Mercury modem by Rhizomatica.", color = C.dim, fontSize = 12.sp)
+        }
+    }
+}
+
+// ------------------------------------------------------------------- Radio
+
+/** How the phone reaches the radio's CAT. */
+private enum class CatLink(val label: String) {
+    Usb("USB cable"),
+    Bridge("Serial bridge (host:port)"),
+    Rigctld("rigctld (host:port)"),
+    None("None (VOX)"),
+}
+
+/** The radio's protocol (`cat.family`). */
+private val families = listOf(
+    "Auto" to "Automatic (detect)",
+    "Icom" to "Icom CI-V (and Xiegu)",
+    "Kenwood" to "Kenwood (QRP Labs, truSDX, Flex)",
+    "Elecraft" to "Elecraft K3 / K4 / KX",
+    "Yaesu" to "Yaesu (FT-991, FT-891, FT-710, FTDX…)",
+    "Yaesu817" to "Yaesu FT-817 / 818 / 857 / 897",
+)
+
+@Composable
+private fun RadioCard(station: Station, s: EngineState, cfg: JsonObject) {
+    val cat = cfg["cat"] as? JsonObject
+    fun catStr(k: String) = (cat?.get(k) as? JsonPrimitive)?.content ?: ""
+    val mode = (cfg["rig_mode"] as? JsonPrimitive)?.content ?: "External"
+    val rigctld = (cfg["rigctld"] as? JsonPrimitive)?.content ?: ""
+    val port = catStr("port")
+    val link = when {
+        mode == "Direct" && (port.isBlank() || port.startsWith("usb:")) -> CatLink.Usb
+        mode == "Direct" -> CatLink.Bridge
+        rigctld == "none" -> CatLink.None
+        // A phone runs no rigctld of its own: the desktop default means "not set up",
+        // and the app uses a radio on USB when one is plugged in.
+        rigctld in listOf("", "127.0.0.1:4532", "localhost:4532") -> CatLink.Usb
+        else -> CatLink.Rigctld
+    }
+    fun setCat(k: String, v: JsonPrimitive) = station.edit { m ->
+        val c = (m["cat"] as? JsonObject)?.toMutableMap() ?: mutableMapOf()
+        c[k] = v
+        m["cat"] = JsonObject(c)
+    }
+    fun choose(l: CatLink) = station.edit { m ->
+        val c = (m["cat"] as? JsonObject)?.toMutableMap() ?: mutableMapOf()
+        when (l) {
+            CatLink.Usb -> { m["rig_mode"] = JsonPrimitive("Direct"); c["port"] = JsonPrimitive("") }
+            CatLink.Bridge -> { m["rig_mode"] = JsonPrimitive("Direct"); if (port.isBlank() || port.startsWith("usb:")) c["port"] = JsonPrimitive("") }
+            CatLink.Rigctld -> { m["rig_mode"] = JsonPrimitive("External"); if (rigctld == "none" || rigctld.startsWith("127.") || rigctld.startsWith("localhost")) m["rigctld"] = JsonPrimitive("") }
+            CatLink.None -> { m["rig_mode"] = JsonPrimitive("External"); m["rigctld"] = JsonPrimitive("none") }
+        }
+        m["cat"] = JsonObject(c)
+    }
+    // What's on USB now, re-read when the radio's state changes.
+    val onUsb = remember(s.rigOk, s.rigDesc, link) { UsbCat.attached() }
+    WCard("Radio", HelpTopic.radio) {
+        CatLink.entries.forEach { l ->
+            Row(
+                Modifier.fillMaxWidth().clickable { choose(l) }.padding(vertical = 2.dp)
+                    .semantics { contentDescription = l.label; stateDescription = if (l == link) "selected" else "" },
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                RadioButton(l == link, { choose(l) }, colors = RadioButtonDefaults.colors(selectedColor = C.teal))
+                Text(l.label, color = C.text)
+            }
+        }
+        when (link) {
+            CatLink.Usb -> Text(
+                if (onUsb.isEmpty()) "Nothing on USB. Plug the radio into the phone (USB-C, or an OTG adapter)."
+                else "On USB: " + onUsb.joinToString(", ") { it.second },
+                color = C.dim, fontSize = 12.sp, maxLines = 2, overflow = TextOverflow.Ellipsis,
+            )
+            CatLink.Bridge -> Field(port, { setCat("port", JsonPrimitive(it.trim())) }, "Bridge host:port", Modifier.fillMaxWidth(), caps = false)
+            CatLink.Rigctld -> Field(rigctld, { v -> station.edit { it["rigctld"] = JsonPrimitive(v.trim()) } }, "rigctld host:port", Modifier.fillMaxWidth(), caps = false)
+            CatLink.None -> Text("Whistlestop can't read or tune the dial; key the radio with VOX.", color = C.dim, fontSize = 12.sp)
+        }
+        if (link == CatLink.Usb || link == CatLink.Bridge) {
+            var open by remember { mutableStateOf(false) }
+            val fam = catStr("family").ifEmpty { "Auto" }
+            Box {
+                Row(Modifier.fillMaxWidth().clickable { open = true }.padding(vertical = 6.dp)) {
+                    Text("Protocol", color = C.dim, modifier = Modifier.width(80.dp))
+                    Text(families.firstOrNull { it.first == fam }?.second ?: fam, color = C.text, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                }
+                DropdownMenu(open, { open = false }) {
+                    families.forEach { (k, label) ->
+                        DropdownMenuItem({ Text(label) }, { setCat("family", JsonPrimitive(k)); open = false })
+                    }
+                }
+            }
+        }
+        // Fixed two lines, so the card doesn't jump as the radio comes and goes.
+        Text(
+            when {
+                s.demo -> "Demo station: the radio is simulated."
+                s.rigOk -> "Connected: ${s.rigDesc}"
+                else -> "Not connected (see Log)."
+            },
+            color = if (s.rigOk || s.demo) C.teal else C.dim, fontSize = 12.sp,
+            minLines = 2, maxLines = 2, overflow = TextOverflow.Ellipsis,
+        )
+        if (station.modemNeedsReopen()) {
+            Text(
+                "The modem started before this radio setting. Close Whistlestop (swipe it away) and open it again so Mercury keys the radio this way.",
+                color = C.brass, fontSize = 12.sp,
+            )
         }
     }
 }

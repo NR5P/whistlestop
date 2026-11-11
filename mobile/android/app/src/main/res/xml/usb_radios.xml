@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- USB serial chips found in radios and CAT interfaces (UsbCat.kt). -->
+<resources>
+    <usb-device vendor-id="4292" />   <!-- 0x10C4 Silicon Labs CP210x: Icom, Kenwood, Yaesu -->
+    <usb-device vendor-id="1027" />   <!-- 0x0403 FTDI: Elecraft, Flex, cables -->
+    <usb-device vendor-id="6790" />   <!-- 0x1A86 WCH CH340/CH9102: Xiegu, QRP radios -->
+    <usb-device vendor-id="1659" />   <!-- 0x067B Prolific PL2303 -->
+    <usb-device vendor-id="3110" />   <!-- 0x0C26 Icom (IC-705, IC-905) -->
+    <usb-device vendor-id="1155" />   <!-- 0x0483 STMicro CDC: QMX/QDX, truSDX -->
+    <usb-device class="2" />          <!-- any USB CDC serial device -->
+</resources>

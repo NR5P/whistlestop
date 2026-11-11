@@ -23,16 +23,31 @@ unsafe extern "C" {
     fn mercury_ui_set_android_audio_devices(list: *const c_char);
 }
 
-/// The argument strings must outlive the engine (it may keep pointers).
-static RUNNING: Mutex<Option<Vec<CString>>> = Mutex::new(None);
+struct Running {
+    /// The argument strings must outlive the engine (it may keep pointers).
+    _args: Vec<CString>,
+    /// Where it keys the radio (a rigctld), if anywhere.
+    ptt: Option<String>,
+}
+
+static RUNNING: Mutex<Option<Running>> = Mutex::new(None);
 
 /// The sound system Mercury uses on this phone.
 pub const SOUND: &str = if cfg!(target_os = "android") { "aaudio" } else { "coreaudio" };
 
 /// Start Mercury with its TNC on `port` (control; data is port + 1) and
 /// broadcast on `bcast`, its settings and log in `dir`. `input`/`output`
-/// pick sound devices ("" = the phone's default route).
-pub fn start(dir: &Path, port: u16, bcast: u16, input: &str, output: &str) -> anyhow::Result<()> {
+/// pick sound devices ("" = the phone's default route). With `ptt`
+/// (`host:port` of a rigctld, normally Whistlestop's own), Mercury keys the
+/// radio there (Hamlib model 2, NET rigctl); without it, it doesn't key.
+pub fn start(
+    dir: &Path,
+    port: u16,
+    bcast: u16,
+    input: &str,
+    output: &str,
+    ptt: Option<&str>,
+) -> anyhow::Result<()> {
     let mut g = RUNNING.lock().unwrap();
     if g.is_some() {
         return Ok(());
@@ -48,6 +63,9 @@ pub fn start(dir: &Path, port: u16, bcast: u16, input: &str, output: &str) -> an
         // The phone's own UI is Whistlestop; Mercury's spectrum isn't needed.
         "-W".into(),
     ];
+    if let Some(addr) = ptt {
+        args.extend(["-R".into(), "2".into(), "-A".into(), addr.into()]);
+    }
     if !input.is_empty() {
         args.extend(["-i".into(), input.into()]);
     }
@@ -72,12 +90,20 @@ pub fn start(dir: &Path, port: u16, bcast: u16, input: &str, output: &str) -> an
     if rc != 0 {
         anyhow::bail!("Mercury didn't start ({rc}); see mercury.log");
     }
-    *g = Some(c);
+    *g = Some(Running {
+        _args: c,
+        ptt: ptt.map(str::to_owned),
+    });
     Ok(())
 }
 
 pub fn running() -> bool {
     RUNNING.lock().unwrap().is_some()
+}
+
+/// Where the running Mercury keys the radio.
+pub fn ptt() -> Option<String> {
+    RUNNING.lock().unwrap().as_ref().and_then(|r| r.ptt.clone())
 }
 
 pub fn stop() {

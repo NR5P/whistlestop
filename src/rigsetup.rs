@@ -132,10 +132,11 @@ pub struct UsbSerial {
 
 /// USB serial ports, without opening any of them.
 pub fn usb_serial_ports() -> Vec<UsbSerial> {
-    #[cfg(any(target_os = "ios", target_os = "android"))]
-    return vec![];
+    // Radios the platform opens itself (the Android app's USB host).
+    let v = crate::cat::usb_host().map(|h| h.list()).unwrap_or_default();
     #[cfg(not(any(target_os = "ios", target_os = "android")))]
-    usb_serial_ports_desktop()
+    let v = [v, usb_serial_ports_desktop()].concat();
+    v
 }
 
 #[cfg(not(any(target_os = "ios", target_os = "android")))]
@@ -282,6 +283,15 @@ pub fn guess_radios(ports: &[UsbSerial], models: &[HamlibModel]) -> Vec<RadioGue
             }
             // FTDI and CH340/CH9102 bridges: Elecraft, Xiegu, many cables.
             (0x0403, _) | (0x1A86, _) => (
+                "USB serial (choose the model)".into(),
+                None,
+                format!("{} {}", p.manufacturer, p.product)
+                    .trim()
+                    .to_string(),
+            ),
+            // Anything else the phone's USB host found is a serial chip it
+            // can drive; let the protocol probe work out the radio.
+            _ if crate::cat::is_usb_host(&p.path) => (
                 "USB serial (choose the model)".into(),
                 None,
                 format!("{} {}", p.manufacturer, p.product)

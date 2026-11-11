@@ -206,10 +206,40 @@ impl Wire for TcpWire {
     }
 }
 
+// ------------------------------------------------------------ USB host
+
+/// Radios on USB that the platform opens itself rather than as a serial
+/// device. Android apps can't open `/dev/ttyUSB0`; the phone app opens the
+/// radio's USB serial chip through Android's USB host API and hands its
+/// bytes over (see `mobile/core`). Its ports are named `usb:VVVV:PPPP`.
+pub trait UsbHost: Send + Sync {
+    /// The USB serial devices attached now (`path` = `usb:VVVV:PPPP`).
+    fn list(&self) -> Vec<crate::rigsetup::UsbSerial>;
+    /// Open one at `baud`, RTS and DTR held low.
+    fn open(&self, path: &str, baud: u32) -> Result<Box<dyn Wire>>;
+}
+
+static USB_HOST: std::sync::OnceLock<Box<dyn UsbHost>> = std::sync::OnceLock::new();
+
+/// Register the platform's USB host (once; later calls are ignored).
+pub fn set_usb_host(h: Box<dyn UsbHost>) {
+    let _ = USB_HOST.set(h);
+}
+
+pub fn usb_host() -> Option<&'static dyn UsbHost> {
+    USB_HOST.get().map(|b| b.as_ref())
+}
+
+/// A radio opened through the platform's USB host (`usb:VVVV:PPPP`)?
+pub fn is_usb_host(port: &str) -> bool {
+    port.starts_with("usb:")
+}
+
 /// `host:port` (TCP bridge) rather than a serial device?
 pub fn is_tcp(port: &str) -> bool {
     let p = port.strip_prefix("tcp:").unwrap_or(port);
     !port.starts_with('/')
+        && !is_usb_host(port)
         && !port.to_uppercase().starts_with("COM")
         && p.rsplit_once(':')
             .is_some_and(|(_, n)| n.parse::<u16>().is_ok())
@@ -224,10 +254,14 @@ pub fn open_wire(port: &str, baud: u32) -> Result<Box<dyn Wire>> {
         s.set_nodelay(true)?;
         return Ok(Box::new(TcpWire(s)));
     }
+    if is_usb_host(port) {
+        let h = usb_host().ok_or_else(|| anyhow!("{port}: USB radios aren't available here"))?;
+        return h.open(port, baud);
+    }
     #[cfg(any(target_os = "ios", target_os = "android"))]
     {
         let _ = baud;
-        bail!("{port}: phones reach the radio through a TCP bridge (host:port)")
+        bail!("{port}: on a phone, choose the radio on USB or a TCP bridge (host:port)")
     }
     #[cfg(not(any(target_os = "ios", target_os = "android")))]
     open_serial(port, baud)
@@ -616,6 +650,49 @@ mod tests {
         assert!(!is_tcp("/dev/cu.SLAB_USBtoUART"));
         assert!(!is_tcp("COM3"));
         assert!(!is_tcp("/dev/ttyUSB0"));
+        // An IC-705's id would otherwise read as host "usb:0c26", port 36.
+        assert!(!is_tcp("usb:0c26:0036"));
+        assert!(is_usb_host("usb:10c4:ea60"));
+    }
+
+    /// The phone path end to end: a radio found through the platform's USB
+    /// host (the first one, port left empty), recognised by its USB ids,
+    /// then probed and driven over the host's wire.
+    #[test]
+    fn radio_through_a_usb_host() {
+        struct Host;
+        impl UsbHost for Host {
+            fn list(&self) -> Vec<crate::rigsetup::UsbSerial> {
+                vec![crate::rigsetup::UsbSerial {
+                    path: "usb:0c26:0036".into(),
+                    vid: 0x0C26,
+                    pid: 0x0036,
+                    manufacturer: "Icom Inc.".into(),
+                    product: "IC-705".into(),
+                    serial: "IC-705 12001234".into(),
+                }]
+            }
+            fn open(&self, path: &str, _baud: u32) -> Result<Box<dyn Wire>> {
+                assert_eq!(path, "usb:0c26:0036");
+                Ok(Box::new(sim::SimRadio::new(sim::Kind::Icom(0xA4))))
+            }
+        }
+        set_usb_host(Box::new(Host));
+        assert!(
+            crate::rigsetup::usb_serial_ports()
+                .iter()
+                .any(|p| p.path == "usb:0c26:0036")
+        );
+        let mut d = connect(&CatConfig {
+            port: String::new(),
+            ..CatConfig::default()
+        })
+        .unwrap();
+        assert!(d.describe().contains("usb:0c26:0036"), "{}", d.describe());
+        d.set_freq(7_074_000.0).unwrap();
+        assert_eq!(d.freq().unwrap(), 7_074_000.0);
+        d.set_ptt(true).unwrap();
+        assert!(d.ptt().unwrap());
     }
 
     #[test]

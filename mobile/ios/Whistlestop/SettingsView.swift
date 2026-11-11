@@ -101,6 +101,9 @@ struct SettingsView: View {
                 var cat = core.config["cat"] as? [String: Any] ?? [:]
                 cat["port"] = $0
                 core.config["cat"] = cat
+                // A bridge speaks the radio's own CAT: Whistlestop drives it
+                // directly (and shares it with Mercury).
+                core.config["rig_mode"] = $0.trimmingCharacters(in: .whitespaces).isEmpty ? "External" : "Direct"
             })
     }
 

@@ -40,6 +40,12 @@ object Core {
     @JvmStatic external fun mercuryEmbedded(): Int
     /** The phone's sound devices for Mercury: "id\tin|out\tname" per line. */
     @JvmStatic external fun setAudioDevices(list: String)
+    /** The radio's sound card for Mercury ("dev:<id>", "" = the default route). */
+    @JvmStatic external fun setRadioAudio(input: String, output: String)
+    /** UsbCat is ready: the engine finds and opens USB radios through it. */
+    @JvmStatic external fun usbInit()
+    /** 1 when Mercury keys the radio differently from the settings (reopen the app). */
+    @JvmStatic external fun mercuryRestartNeeded(): Int
 }
 
 /**
@@ -77,6 +83,15 @@ class Station(private val scope: CoroutineScope) {
             }
         }
         Core.setAudioDevices(audioDevices(context))
+        val (inDev, outDev) = radioSoundCard(context)
+        Core.setRadioAudio(inDev, outDev)
+        if (!uiTest) {
+            UsbCat.init(context)
+            // Once Android allows the radio's USB, connect to it.
+            UsbCat.onPermission = { granted -> if (granted) scope.launch { saveAndRestart() } }
+            // A radio plugged in while the app runs: connect to it.
+            UsbCat.onAttached = { scope.launch { delay(1000); radioArrived() } }
+        }
         if (Core.start(dir.absolutePath) != 0) {
             startError = "The engine couldn't start."
             return
@@ -162,6 +177,12 @@ class Station(private val scope: CoroutineScope) {
         _config.value = JsonObject(m)
     }
 
+    /** Do the edited settings reach the radio differently from the saved ones? */
+    fun radioChanged(): Boolean {
+        val saved = runCatching { Json.parseToJsonElement(Core.config()) as JsonObject }.getOrNull() ?: return true
+        return listOf("rig_mode", "rigctld", "cat").any { saved[it] != _config.value[it] }
+    }
+
     /** Save and apply; false if the engine refused them. */
     fun saveConfig(): Boolean {
         val ok = Core.setConfig(_config.value.toString()) == 0
@@ -175,6 +196,19 @@ class Station(private val scope: CoroutineScope) {
         send("Start", _config.value)
     }
 
+    /** A radio was plugged in, or USB access allowed: reconnect if the radio isn't up. */
+    fun radioArrived() {
+        if (!_state.value.rigOk && !_state.value.demo) saveAndRestart()
+    }
+
+    private fun saveAndRestart() {
+        // Saving lets the engine adopt a USB radio when none was set up.
+        if (saveConfig()) restart()
+    }
+
+    /** Mercury keys the radio differently from the settings: reopen the app. */
+    fun modemNeedsReopen() = Core.mercuryRestartNeeded() != 0
+
     companion object {
         const val MAX_ROWS = 160
     }
@@ -186,6 +220,22 @@ private fun audioDevices(context: Context): String {
     val ins = am.getDevices(android.media.AudioManager.GET_DEVICES_INPUTS).map { "${it.id}\tin\t${it.productName} (${it.type})" }
     val outs = am.getDevices(android.media.AudioManager.GET_DEVICES_OUTPUTS).map { "${it.id}\tout\t${it.productName} (${it.type})" }
     return (ins + outs).joinToString("\n")
+}
+
+/**
+ * The radio's sound card: a USB audio device (the radio's own USB audio, a
+ * SignaLink, a DigiRig) when one is plugged in, as Mercury's "dev:<id>"; ""
+ * = the phone's default route. A device that both records and plays is
+ * preferred, so input and output are the same card.
+ */
+private fun radioSoundCard(context: Context): Pair<String, String> {
+    val am = context.getSystemService(Context.AUDIO_SERVICE) as android.media.AudioManager
+    val usb = setOf(android.media.AudioDeviceInfo.TYPE_USB_DEVICE, android.media.AudioDeviceInfo.TYPE_USB_HEADSET)
+    val ins = am.getDevices(android.media.AudioManager.GET_DEVICES_INPUTS).filter { it.type in usb }
+    val outs = am.getDevices(android.media.AudioManager.GET_DEVICES_OUTPUTS).filter { it.type in usb }
+    val inDev = ins.firstOrNull { i -> outs.any { it.productName == i.productName } } ?: ins.firstOrNull()
+    val outDev = outs.firstOrNull { it.productName == inDev?.productName } ?: outs.firstOrNull()
+    return (inDev?.let { "dev:${it.id}" } ?: "") to (outDev?.let { "dev:${it.id}" } ?: "")
 }
 
 /** A JSON array of floats, or null. */

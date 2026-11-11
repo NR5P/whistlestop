@@ -407,7 +407,7 @@ Whistlestop also comes as native phone apps: SwiftUI on the iPhone and iPad (iOS
 - **Chat**: keyboard-to-keyboard over the link. The app switches here when a link comes up. A tick (✓) means the other station confirmed the line.
 - **Depot**: Arrivals, Departures, In Transit and Delivered. Tap a message to read it (that clears NEW), reply, connect now, or delete it. The pencil button writes new mail, with an optional **Via** relay.
 - **Log**: what the engine did, newest first, in UTC.
-- **Settings**: Help mode, your station (callsign, name, grid), Demo, the CAT bridge, and the modem's host and port. **Save** applies them; switching Demo on or off restarts the station. Everything else (search timing, QSY rules, the library, the schedule…) keeps the values in the phone's settings file, `whistlestop.toml` in the app's own storage, the same format as the desktop's.
+- **Settings**: Help mode, your station (callsign, name, grid), Demo, the **Radio** (USB cable, serial bridge, rigctld or none on Android; the CAT bridge on the iPhone), and the modem's host and port. **Save** applies them; switching Demo on or off restarts the station. Everything else (search timing, QSY rules, the library, the schedule…) keeps the values in the phone's settings file, `whistlestop.toml` in the app's own storage, the same format as the desktop's.
 
 **Help mode.** A phone has no hover, so Help works by tapping: turn it on with the **?** in the header (or in Settings) and every card shows a brass **?**; tap one for its explanation. Like the desktop, Help mode is off each time the app starts.
 
@@ -415,7 +415,18 @@ Whistlestop also comes as native phone apps: SwiftUI on the iPhone and iPad (iOS
 
 **Connecting a radio.**
 - **Audio**: the radio's sound goes through the phone's audio route, typically a USB audio interface (or the radio's own USB sound card) on a USB-C adapter. Both apps ask for the microphone permission, which covers that audio. On the iPhone, Whistlestop keeps listening with the screen off (background audio).
-- **Rig control (CAT)**: phones have no serial ports for Whistlestop's direct CAT, so set **CAT bridge** to a `host:port` on your network: a `rigctld`, or a serial-to-network adapter. Without CAT, Whistlestop can't read or tune the dial, so search and QSY need it; with VOX keying, calling and answering on the frequency you set by hand still work.
+- **Rig control (CAT) on Android: plug the radio in.** Settings → **Radio** offers four ways to reach it:
+  - **USB cable** (the choice when nothing else is set up): connect the radio's USB port to the phone (USB-C, or an OTG adapter). Whistlestop opens the radio's USB serial chip itself, through Android's USB host API: Silicon Labs CP210x and CP2105 (Icom, Kenwood, Yaesu), FTDI (Elecraft, Flex, many cables), WCH CH340/CH9102 (Xiegu, QRP radios), Prolific PL2303, and USB CDC radios (IC-705, IC-905, QRP Labs QMX/QDX, truSDX, X6100). It then works out the protocol and speed exactly as the desktop's direct CAT does: Icom CI-V (asking the radio its CI-V address), Kenwood, Elecraft and Yaesu (told apart by the radio's `ID;`), and the FT-817/818/857/897, at each family's usual speeds. On a Yaesu with two USB ports (CP2105), CAT is the first. RTS and DTR are held low, because on many radios they key the transmitter.
+  - The first time, Android asks to **allow Whistlestop to use the USB device**; once allowed, the radio connects. Plugging the radio in offers to open Whistlestop (tick "always" and Android stops asking), and plugging it in while the app runs connects it about a second later.
+  - **Protocol** stays on Automatic unless the radio isn't found; then choose its family.
+  - **Serial bridge**: a serial-to-network adapter at `host:port` that passes the radio's own CAT through.
+  - **rigctld**: a Hamlib `rigctld` on your network, at `host:port`.
+  - **None (VOX)**: no CAT. Whistlestop can't read or tune the dial, so search and QSY need CAT; with VOX keying, calling and answering on the frequency you set by hand still work.
+  - With USB or a serial bridge, Whistlestop shares the radio with the phone's Mercury on `127.0.0.1:4532` (the phone itself only, never the network), and Mercury keys the transmitter through it (Hamlib model 2, NET rigctl). Mercury starts once the radio has connected, waiting up to 30 s for it; if no radio connects, it starts without keying.
+  - The line at the bottom of the card shows **Connected:** and the radio, or **Not connected** (the Log says why). Changing the radio connection and tapping **Save** restarts the station.
+  - Mercury can't be restarted inside the app. If you change how the radio is reached after the modem has started, the card asks you to close Whistlestop (swipe it away) and open it again, so Mercury keys the radio the new way.
+- **Rig control on the iPhone**: iPhones can't drive USB serial chips, so set **CAT bridge** to a serial-to-network adapter (`host:port`) that speaks the radio's own CAT.
+- **Sound card**: when a USB audio device is plugged in (the radio's own USB audio, a SignaLink, a DigiRig), the Android app gives it to Mercury for both receive and transmit, preferring one device that does both; otherwise Mercury uses the phone's default audio route. The choice is made when the app starts, so plug the radio in before opening Whistlestop.
 - The RTL-SDR wide search isn't available on phones yet.
 
 **Not yet on the phones** (use the desktop for these for now): Files and the file library, Roundtables, the schedule, the Radio Controls window, the antenna tuner and SWR watch, and operating a desktop station remotely from the phone.

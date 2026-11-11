@@ -84,6 +84,21 @@ for Intel emulators, goes without.
   Help mode. Launched with `WS_UITEST=1` / `--ez ws_uitest true`, the app
   starts a fresh demo station in a scratch folder.
 
+## Android USB radios
+
+Android apps can't open `/dev/ttyUSB0`, so `UsbCat.kt` opens the radio's
+USB serial chip with usb-serial-for-android (MIT; CP210x, FTDI, CH34x,
+PL2303, CDC) and the engine's CAT drivers read and write through it over
+JNI (`mobile/core/src/lib.rs`, module `usb`; `whistlestop::cat::UsbHost`).
+Ports are named `usb:VVVV:PPPP`. Whistlestop serves the radio as rigctld on
+`127.0.0.1:4532`, and the embedded Mercury is started with `-R 2 -A
+127.0.0.1:4532` once that answers, so it keys the radio. A USB audio device,
+when present, is passed to Mercury as `-i/-o dev:<id>`. Mercury's engine
+can't be restarted in-process (`mercury_stop` is never reset), so a change
+of keying needs the app reopened. Tested so far: the protocol probe over a
+simulated USB host (`cargo test radio_through_a_usb_host`) and the emulator
+UI tests; not yet on a real radio.
+
 ## Status
 
 Working on both: search, whistle, Heard/Answer, CQ, connect, chat, QSY
@@ -92,7 +107,6 @@ embedded and serving its TNC to the engine (checked in the iPhone simulator:
 audio open, engine connected, callsign and listen mode set).
 
 Not yet: files and the library, Roundtables, the schedule, radio controls,
-tuner/SWR, the RTL-SDR, remote operation of a desktop station, Android USB
-serial CAT (Mercury's own Hamlib-over-UsbManager path is there to build on),
+tuner/SWR, the RTL-SDR, remote operation of a desktop station,
 choosing the sound device in the app, and a foreground service so Android
 keeps running with the screen off.

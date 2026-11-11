@@ -53,7 +53,7 @@ enum HelpTopic: String, CaseIterable, Identifiable {
         case .modem:
             ("Modem", "Where Mercury's TNC listens. The app runs Mercury itself; change these only to use a Mercury elsewhere on your network.")
         case .radio:
-            ("Radio", "How Whistlestop reaches the radio's CAT. On a phone that's a TCP bridge (host:port), e.g. a rigctld or a serial-to-network adapter on your network.")
+            ("Radio", "How Whistlestop reaches the radio's CAT. On an iPhone that's a serial-to-network adapter at host:port that speaks the radio's own CAT (iPhones can't drive USB serial chips).")
         case .demo:
             ("Demo station", "Try Whistlestop without a radio: a simulated band with a demo station (K7BOT) that whistles, calls CQ and chats back.")
         case .autoAnswer:

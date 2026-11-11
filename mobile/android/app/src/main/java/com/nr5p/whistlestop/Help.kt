@@ -80,7 +80,7 @@ enum class HelpTopic(val title: String, val body: String) {
     ),
     radio(
         "Radio",
-        "How Whistlestop reaches the radio's CAT. On a phone that's a TCP bridge (host:port), e.g. a rigctld or a serial-to-network adapter on your network.",
+        "How Whistlestop reaches the radio's CAT. USB cable: plug the radio into the phone; Whistlestop finds it (Silicon Labs, FTDI, CH340, Prolific or USB CDC, as in Icom, Yaesu, Kenwood, Elecraft, Xiegu and QRP Labs radios), works out the protocol and speed, and Mercury keys the radio through it. Android asks once to allow the USB connection. Serial bridge: a serial-to-network adapter speaking the radio's own CAT at host:port. rigctld: a Hamlib rigctld on your network. None: no CAT; key with VOX. Protocol: leave on Automatic unless the radio isn't found. Plug the radio (and its USB sound card) in before opening the app; the radio's USB audio is used for the modem.",
     ),
     demo(
         "Demo station",

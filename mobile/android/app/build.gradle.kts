@@ -46,6 +46,8 @@ dependencies {
     implementation("androidx.lifecycle:lifecycle-runtime-compose:2.8.7")
     // JsonElement only (no compiler plugin): keeps 64-bit mail ids exact.
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.7.3")
+    // USB serial chips for direct CAT (MIT): CP210x, FTDI, CH34x, PL2303, CDC.
+    implementation("com.github.mik3y:usb-serial-for-android:3.8.1")
     androidTestImplementation("androidx.compose.ui:ui-test-junit4")
     androidTestImplementation("androidx.test.ext:junit:1.2.1")
     androidTestImplementation("androidx.test:runner:1.6.2")

@@ -18,3 +18,4 @@ __pycache__/
 /mobile/android/build
 /mobile/android/local.properties
 /mobile/android/app/src/main/jniLibs
+mobile/android/.kotlin/
