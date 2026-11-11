@@ -58,8 +58,7 @@ fn main() -> anyhow::Result<()> {
                     .with_drag_and_drop(true),
                 ..Default::default()
             };
-            eframe::run_native("Whistlestop", options, Box::new(|cc| Ok(Box::new(gui::App::new(cc)))))
-                .map_err(|e| anyhow::anyhow!("{e}"))
+            eframe::run_native("Whistlestop", options, Box::new(|cc| Ok(Box::new(gui::App::new(cc))))).map_err(|e| anyhow::anyhow!("{e}"))
         }
         Command::WhistleWav { path, seconds, profile: name } => {
             let p: WhistleParams = profile(&name).with_fs(48_000);

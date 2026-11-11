@@ -35,7 +35,15 @@ pub struct FakeOptions {
 
 impl Default for FakeOptions {
     fn default() -> Self {
-        Self { fast: false, bot_call: "K7BOT".into(), bps: 1400.0, rig_freq: None, bot_freq: 14_103_150.0, answer_cq: true, bot_e2e: Policy::Prefer }
+        Self {
+            fast: false,
+            bot_call: "K7BOT".into(),
+            bps: 1400.0,
+            rig_freq: None,
+            bot_freq: 14_103_150.0,
+            answer_cq: true,
+            bot_e2e: Policy::Prefer,
+        }
     }
 }
 
@@ -94,8 +102,12 @@ async fn serve(ctl: TcpListener, data: TcpListener, bc: TcpListener, opts: FakeO
         });
     }
     loop {
-        let Ok((cs, _)) = ctl.accept().await else { return };
-        let Ok((ds, _)) = data.accept().await else { return };
+        let Ok((cs, _)) = ctl.accept().await else {
+            return;
+        };
+        let Ok((ds, _)) = data.accept().await else {
+            return;
+        };
         let (mut cr, mut cw) = cs.into_split();
         let (mut dr, mut dw) = ds.into_split();
         let t1 = in_tx.clone();
@@ -255,7 +267,14 @@ impl Session {
 
     fn on_ctl(&mut self, line: &str) {
         if std::env::var_os("WS_FAKE_DEBUG").is_some() {
-            eprintln!("[fake {:.1}s real {:.1}s] ctl < {line}  (peer {:?}, uplink {}, downlink {})", self.now, self.t0.elapsed().as_secs_f64(), self.peer, self.uplink.len(), self.downlink.len());
+            eprintln!(
+                "[fake {:.1}s real {:.1}s] ctl < {line}  (peer {:?}, uplink {}, downlink {})",
+                self.now,
+                self.t0.elapsed().as_secs_f64(),
+                self.peer,
+                self.uplink.len(),
+                self.downlink.len()
+            );
         }
         let mut w = line.split_whitespace();
         let cmd = w.next().unwrap_or("").to_ascii_uppercase();
@@ -266,8 +285,10 @@ impl Session {
                 let r = format!("REGISTERED {}", self.mycall);
                 self.reply(&r);
             }
-            "LISTEN" | "PUBLIC" | "CHAT" | "COMPRESSION" | "P2P" | "BUSYDETECT" | "CALLINT" | "RETRIES"
-            | "BEACONMODE" | "MONITOR" | "BW500" | "BW2300" | "BW2750" => self.reply("OK"),
+            "LISTEN" | "PUBLIC" | "CHAT" | "COMPRESSION" | "P2P" | "BUSYDETECT" | "CALLINT"
+            | "RETRIES" | "BEACONMODE" | "MONITOR" | "BW500" | "BW2300" | "BW2750" => {
+                self.reply("OK")
+            }
             "MODE" => {
                 if w.next().is_some() {
                     self.reply("OK");
@@ -292,7 +313,11 @@ impl Session {
                 }
             }
             "CONNECT" => {
-                let them = line.split_whitespace().nth(2).unwrap_or("").to_ascii_uppercase();
+                let them = line
+                    .split_whitespace()
+                    .nth(2)
+                    .unwrap_or("")
+                    .to_ascii_uppercase();
                 if them.eq_ignore_ascii_case(&self.o.bot_call) {
                     self.reply("OK");
                     self.after(6.0, Act::Connect);
@@ -374,7 +399,10 @@ impl Session {
             "Hi {}, K7BOT demo station here. Good signal! Type anything, try sending a file, or ask me for a file.",
             self.mycall
         );
-        self.bot_send(Link::Chat { id: self.bot_chat_id, text: hi });
+        self.bot_send(Link::Chat {
+            id: self.bot_chat_id,
+            text: hi,
+        });
         // Greeting goes out with CONNECTED, ahead of it on the wire.
         let early: Vec<u8> = self.downlink.drain(..).collect();
         self.data_out.extend(early);
@@ -391,70 +419,135 @@ impl Session {
                         self.mycall
                     )
                     .repeat(20);
-                    let out = Outgoing::new(500, "welcome-from-k7bot.txt".into(), body.into_bytes(), false, 1);
+                    let out = Outgoing::new(
+                        500,
+                        "welcome-from-k7bot.txt".into(),
+                        body.into_bytes(),
+                        false,
+                        1,
+                    );
                     self.bot_send(out.offer());
                     self.bot_offer = Some(out);
                     "Sure, offering you a file now.".to_string()
                 } else if t.contains("73") || t.contains("bye") {
                     "73! Thanks for the contact.".to_string()
                 } else {
-                    format!("Copy: \"{}\". Signal here is 12 dB, we're running QAM16C2.", text.trim())
+                    format!(
+                        "Copy: \"{}\". Signal here is 12 dB, we're running QAM16C2.",
+                        text.trim()
+                    )
                 };
                 self.after(4.0, Act::BotChat(reply));
             }
             Link::Offer { fid, size, sha, .. } => {
                 self.incoming = Some((fid, size, vec![], sha));
-                self.bot_send(Link::Answer { fid, accept: true, resume_from: 0 });
+                self.bot_send(Link::Answer {
+                    fid,
+                    accept: true,
+                    resume_from: 0,
+                });
             }
             Link::Chunk { fid, offset, data } => {
                 let mut done = None;
                 if let Some((f, size, buf, sha)) = &mut self.incoming
-                    && *f == fid && offset == buf.len() as u64 {
-                        buf.extend_from_slice(&data);
-                        if buf.len() as u64 >= *size {
-                            done = Some((fid, sha256(buf) == *sha));
-                        }
+                    && *f == fid
+                    && offset == buf.len() as u64
+                {
+                    buf.extend_from_slice(&data);
+                    if buf.len() as u64 >= *size {
+                        done = Some((fid, sha256(buf) == *sha));
                     }
+                }
                 if let Some((fid, ok)) = done {
                     self.incoming = None;
                     self.bot_send(Link::Done { fid, ok });
-                    self.after(2.0, Act::BotChat("File received fine, checksum good. Nice!".into()));
+                    self.after(
+                        2.0,
+                        Act::BotChat("File received fine, checksum good. Nice!".into()),
+                    );
                 }
             }
-            Link::Answer { fid, accept, resume_from } => {
+            Link::Answer {
+                fid,
+                accept,
+                resume_from,
+            } => {
                 if let Some(mut out) = self.bot_offer.take()
-                    && out.fid == fid && accept {
-                        out.next = Some(resume_from);
-                        while let Some(c) = out.next_chunk() {
-                            self.bot_send(c);
-                        }
+                    && out.fid == fid
+                    && accept
+                {
+                    out.next = Some(resume_from);
+                    while let Some(c) = out.next_chunk() {
+                        self.bot_send(c);
                     }
+                }
             }
             Link::Mail { id, .. } => self.bot_send(Link::MailAck { id }),
             // K7BOT agrees to any QSY within 20 m, and has a small library.
             Link::Qsy { id, dial_hz, .. } => {
                 let ok = (14_000_000..=14_350_000).contains(&dial_hz);
-                self.bot_send(Link::QsyAnswer { id, accept: ok, reason: if ok { String::new() } else { "K7BOT stays on 20 m".into() } });
+                self.bot_send(Link::QsyAnswer {
+                    id,
+                    accept: ok,
+                    reason: if ok {
+                        String::new()
+                    } else {
+                        "K7BOT stays on 20 m".into()
+                    },
+                });
             }
             Link::ListReq { id, path } => {
                 let entries = if path.is_empty() {
                     vec![
-                        LibEntry { name: "maps".into(), size: 0, dir: true },
-                        LibEntry { name: "k7bot-qsl.txt".into(), size: 1240, dir: false },
+                        LibEntry {
+                            name: "maps".into(),
+                            size: 0,
+                            dir: true,
+                        },
+                        LibEntry {
+                            name: "k7bot-qsl.txt".into(),
+                            size: 1240,
+                            dir: false,
+                        },
                     ]
                 } else {
-                    vec![LibEntry { name: "grid.txt".into(), size: 600, dir: false }]
+                    vec![LibEntry {
+                        name: "grid.txt".into(),
+                        size: 600,
+                        dir: false,
+                    }]
                 };
-                self.bot_send(Link::ListAns { id, path, entries, note: String::new() });
+                self.bot_send(Link::ListAns {
+                    id,
+                    path,
+                    entries,
+                    note: String::new(),
+                });
             }
             Link::Fetch { id, path } => {
                 if path.ends_with("k7bot-qsl.txt") {
-                    self.bot_send(Link::FetchAnswer { id, ok: true, reason: String::new() });
-                    let out = Outgoing::new(id, "k7bot-qsl.txt".into(), "QSL from K7BOT, Whistlestop demo station. 73!\n".repeat(26).into_bytes(), false, 1);
+                    self.bot_send(Link::FetchAnswer {
+                        id,
+                        ok: true,
+                        reason: String::new(),
+                    });
+                    let out = Outgoing::new(
+                        id,
+                        "k7bot-qsl.txt".into(),
+                        "QSL from K7BOT, Whistlestop demo station. 73!\n"
+                            .repeat(26)
+                            .into_bytes(),
+                        false,
+                        1,
+                    );
                     self.bot_send(out.offer());
                     self.bot_offer = Some(out);
                 } else {
-                    self.bot_send(Link::FetchAnswer { id, ok: false, reason: "no such file".into() });
+                    self.bot_send(Link::FetchAnswer {
+                        id,
+                        ok: false,
+                        reason: "no such file".into(),
+                    });
                 }
             }
             Link::Bye { .. } => self.hang_up(),
@@ -463,11 +556,25 @@ impl Session {
     }
 
     fn on_bcast(&mut self, f: &[u8]) {
-        let Some(fr) = TableFrame::decode(f) else { return };
+        let Some(fr) = TableFrame::decode(f) else {
+            return;
+        };
         let bot = self.o.bot_call.clone();
         let reply_text = match fr.body {
-            TableBody::Call { kind: CALL_TABLE, table_name, .. } | TableBody::Join { table_name, .. } => {
-                let j = TableFrame { table: fr.table, from: bot.clone(), body: TableBody::Join { table_name, snr_of_host: 9 } };
+            TableBody::Call {
+                kind: CALL_TABLE,
+                table_name,
+                ..
+            }
+            | TableBody::Join { table_name, .. } => {
+                let j = TableFrame {
+                    table: fr.table,
+                    from: bot.clone(),
+                    body: TableBody::Join {
+                        table_name,
+                        snr_of_host: 9,
+                    },
+                };
                 let b = j.encode();
                 self.after(5.0, Act::BotBcast(b));
                 Some("K7BOT joining the table. Good evening all!".to_string())
@@ -480,7 +587,10 @@ impl Session {
             if let Ok(frames) = table_text_frames(fr.table, &bot, self.table_msg_id, &t, 123) {
                 for (i, f) in frames.into_iter().enumerate() {
                     let at = self.delay(9.0 + i as f64 * 3.2);
-                    self.later.push(Later { at, what: Act::BotBcast(f) });
+                    self.later.push(Later {
+                        at,
+                        what: Act::BotBcast(f),
+                    });
                 }
             }
         }
@@ -542,8 +652,13 @@ impl Session {
                                     }
                                     if let Some(Notice::Secure { sas }) = step.notice {
                                         self.bot_chat_id += 1;
-                                        let t = format!("🔒 Encrypted now. My screen shows the code {sas}; does yours?");
-                                        self.pending.push_back(Link::Chat { id: self.bot_chat_id, text: t });
+                                        let t = format!(
+                                            "🔒 Encrypted now. My screen shows the code {sas}; does yours?"
+                                        );
+                                        self.pending.push_back(Link::Chat {
+                                            id: self.bot_chat_id,
+                                            text: t,
+                                        });
                                     }
                                     step.app.into_iter().for_each(|p| self.on_link(p));
                                 }
@@ -579,7 +694,10 @@ impl Session {
         // when our radio is tuned within its +/-55 Hz capture window.
         if let Some(rf) = &self.o.rig_freq {
             let f = *rf.lock().unwrap();
-            if (f - self.o.bot_freq).abs() <= 55.0 && self.peer.is_none() && self.now >= self.next_cq {
+            if (f - self.o.bot_freq).abs() <= 55.0
+                && self.peer.is_none()
+                && self.now >= self.next_cq
+            {
                 self.next_cq = self.delay(20.0);
                 {
                     let l = format!("CQFRAME {} 2300", self.o.bot_call);
@@ -587,7 +705,12 @@ impl Session {
                     let call = TableFrame {
                         table: 0,
                         from: self.o.bot_call.clone(),
-                        body: TableBody::Call { kind: CALL_CHAT, table_name: String::new(), bw_code: 2, grid: "DN31".into() },
+                        body: TableBody::Call {
+                            kind: CALL_CHAT,
+                            table_name: String::new(),
+                            bw_code: 2,
+                            grid: "DN31".into(),
+                        },
                     };
                     self.bcast_out.push(call.encode());
                 }

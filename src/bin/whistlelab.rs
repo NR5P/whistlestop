@@ -57,14 +57,26 @@ impl Rng {
 #[derive(Clone)]
 enum Shape {
     /// Up then down linear chirps: span Hz, each leg `leg` s.
-    UpDown { span: f64, leg: f64 },
+    UpDown {
+        span: f64,
+        leg: f64,
+    },
     /// Up chirps only (sawtooth): span Hz, `leg` s each.
-    Up { span: f64, leg: f64 },
+    Up {
+        span: f64,
+        leg: f64,
+    },
     Tone,
     /// Costas tone pattern: symbol s, tone spacing Hz.
-    Costas { sym: f64, spacing: f64 },
+    Costas {
+        sym: f64,
+        spacing: f64,
+    },
     /// Tone on for `on` s, off for `off` s.
-    Pulse { on: f64, off: f64 },
+    Pulse {
+        on: f64,
+        off: f64,
+    },
 }
 
 const COSTAS7: [usize; 7] = [3, 1, 4, 0, 6, 5, 2]; // FT8's
@@ -129,16 +141,79 @@ struct Design {
 
 fn designs() -> Vec<Design> {
     vec![
-        Design { key: "A", name: "today: wide chirps 2000 Hz, 0.5 s up/down", shape: Shape::UpDown { span: 2000.0, leg: 0.5 }, frame: 128, per_bin: true, production: false },
-        Design { key: "A*", name: "today, with today's coherent matched filter", shape: Shape::UpDown { span: 2000.0, leg: 0.5 }, frame: 128, per_bin: true, production: true },
-        Design { key: "B", name: "fast wide chirps 2000 Hz, 0.1 s up/down", shape: Shape::UpDown { span: 2000.0, leg: 0.1 }, frame: 64, per_bin: true, production: false },
-        Design { key: "C", name: "fast narrow warble 400 Hz, 0.1 s up/down", shape: Shape::UpDown { span: 400.0, leg: 0.1 }, frame: 128, per_bin: true, production: false },
-        Design { key: "D", name: "slow narrow warble 400 Hz, 0.5 s up/down", shape: Shape::UpDown { span: 400.0, leg: 0.5 }, frame: 320, per_bin: true, production: false },
+        Design {
+            key: "A",
+            name: "today: wide chirps 2000 Hz, 0.5 s up/down",
+            shape: Shape::UpDown { span: 2000.0, leg: 0.5 },
+            frame: 128,
+            per_bin: true,
+            production: false,
+        },
+        Design {
+            key: "A*",
+            name: "today, with today's coherent matched filter",
+            shape: Shape::UpDown { span: 2000.0, leg: 0.5 },
+            frame: 128,
+            per_bin: true,
+            production: true,
+        },
+        Design {
+            key: "B",
+            name: "fast wide chirps 2000 Hz, 0.1 s up/down",
+            shape: Shape::UpDown { span: 2000.0, leg: 0.1 },
+            frame: 64,
+            per_bin: true,
+            production: false,
+        },
+        Design {
+            key: "C",
+            name: "fast narrow warble 400 Hz, 0.1 s up/down",
+            shape: Shape::UpDown { span: 400.0, leg: 0.1 },
+            frame: 128,
+            per_bin: true,
+            production: false,
+        },
+        Design {
+            key: "D",
+            name: "slow narrow warble 400 Hz, 0.5 s up/down",
+            shape: Shape::UpDown { span: 400.0, leg: 0.5 },
+            frame: 320,
+            per_bin: true,
+            production: false,
+        },
         Design { key: "E", name: "steady tone", shape: Shape::Tone, frame: 1024, per_bin: false, production: false },
-        Design { key: "F", name: "Costas 7-tone pulse, 40 ms, 25 Hz (175 Hz wide)", shape: Shape::Costas { sym: 0.04, spacing: 25.0 }, frame: 320, per_bin: true, production: false },
-        Design { key: "G", name: "fast up-sweeps only 2000 Hz, 0.1 s", shape: Shape::Up { span: 2000.0, leg: 0.1 }, frame: 64, per_bin: true, production: false },
-        Design { key: "I", name: "medium chirps 1000 Hz, 0.2 s up/down", shape: Shape::UpDown { span: 1000.0, leg: 0.2 }, frame: 128, per_bin: true, production: false },
-        Design { key: "J", name: "Costas 7-tone pulse, 20 ms, 50 Hz (350 Hz wide)", shape: Shape::Costas { sym: 0.02, spacing: 50.0 }, frame: 160, per_bin: true, production: false },
+        Design {
+            key: "F",
+            name: "Costas 7-tone pulse, 40 ms, 25 Hz (175 Hz wide)",
+            shape: Shape::Costas { sym: 0.04, spacing: 25.0 },
+            frame: 320,
+            per_bin: true,
+            production: false,
+        },
+        Design {
+            key: "G",
+            name: "fast up-sweeps only 2000 Hz, 0.1 s",
+            shape: Shape::Up { span: 2000.0, leg: 0.1 },
+            frame: 64,
+            per_bin: true,
+            production: false,
+        },
+        Design {
+            key: "I",
+            name: "medium chirps 1000 Hz, 0.2 s up/down",
+            shape: Shape::UpDown { span: 1000.0, leg: 0.2 },
+            frame: 128,
+            per_bin: true,
+            production: false,
+        },
+        Design {
+            key: "J",
+            name: "Costas 7-tone pulse, 20 ms, 50 Hz (350 Hz wide)",
+            shape: Shape::Costas { sym: 0.02, spacing: 50.0 },
+            frame: 160,
+            per_bin: true,
+            production: false,
+        },
         Design { key: "H", name: "tone pulses 0.1 s on / 0.1 s off", shape: Shape::Pulse { on: 0.1, off: 0.1 }, frame: 320, per_bin: false, production: false },
     ]
 }
@@ -192,10 +267,12 @@ fn channel(x: &[C], path: Path, rng: &mut Rng) -> Vec<C> {
         Path::Moderate => {
             let (g1, g2) = (Fader::new(0.5, 0.5, rng), Fader::new(0.5, 0.5, rng));
             let d = (0.001 * FS) as usize;
-            (0..x.len()).map(|i| {
-                let t = i as f64 / FS;
-                g1.at(t) * x[i] + if i >= d { g2.at(t) * x[i - d] } else { C::new(0.0, 0.0) }
-            }).collect()
+            (0..x.len())
+                .map(|i| {
+                    let t = i as f64 / FS;
+                    g1.at(t) * x[i] + if i >= d { g2.at(t) * x[i - d] } else { C::new(0.0, 0.0) }
+                })
+                .collect()
         }
     }
 }
@@ -440,7 +517,8 @@ fn par_map<T: Sync, R: Send>(items: &[T], f: impl Fn(&T, &mut FftPlanner<f64>) -
 fn calibrate() {
     use whistlestop::whistle::{TrackDetector, WhistleParams};
     let p = WhistleParams::default();
-    let v2 = Design { key: "V2", name: "whistle v2", shape: Shape::UpDown { span: p.f_hi - p.f_lo, leg: p.chirp_s }, frame: 128, per_bin: true, production: false };
+    let v2 =
+        Design { key: "V2", name: "whistle v2", shape: Shape::UpDown { span: p.f_hi - p.f_lo, leg: p.chirp_s }, frame: 128, per_bin: true, production: false };
     let score = |d: &Design, dwell: f64, snr: f64, off: f64, signal: bool, seed: u64, planner: &mut FftPlanner<f64>| -> f64 {
         let mut rng = Rng(seed.wrapping_mul(0x9E3779B97F4A7C15) | 1);
         let n = (dwell * FS) as usize;
@@ -459,7 +537,14 @@ fn calibrate() {
         let mut h0 = par_map(&seeds, |&i, pl| score(&v2, dwell, -10.0, 0.0, false, 7_000_000 + i, pl));
         h0.sort_by(|a, b| a.partial_cmp(b).unwrap());
         let q = |f: f64| h0[((h0.len() as f64 * f) as usize).min(h0.len() - 1)];
-        println!("dwell {dwell} s, busy band, no whistle: z50 {:.2}  z90 {:.2}  z99 {:.2}  z99.5 {:.2}  z99.9 {:.2}", q(0.5), q(0.9), q(0.99), q(0.995), q(0.999));
+        println!(
+            "dwell {dwell} s, busy band, no whistle: z50 {:.2}  z90 {:.2}  z99 {:.2}  z99.5 {:.2}  z99.9 {:.2}",
+            q(0.5),
+            q(0.9),
+            q(0.99),
+            q(0.995),
+            q(0.999)
+        );
         for snr in [-15.0, -10.0, -5.0] {
             for off in [0.0, 1000.0] {
                 let seeds: Vec<u64> = (0..300).collect();
@@ -467,7 +552,14 @@ fn calibrate() {
                 let at = |t: f64| z.iter().filter(|v| **v > t).count() as f64 / z.len() as f64 * 100.0;
                 println!(
                     "   snr {snr:>5} off ±{off:>4}: z>{:.2}(25% empty) {:5.1} %   z>{:.2}(15%) {:5.1} %   z>{:.2}(10%) {:5.1} %   z>{:.2}(1%) {:5.1} %",
-                    q(0.75), at(q(0.75)), q(0.85), at(q(0.85)), q(0.9), at(q(0.9)), q(0.99), at(q(0.99))
+                    q(0.75),
+                    at(q(0.75)),
+                    q(0.85),
+                    at(q(0.85)),
+                    q(0.9),
+                    at(q(0.9)),
+                    q(0.99),
+                    at(q(0.99))
                 );
             }
         }
@@ -489,7 +581,8 @@ fn main() {
     let mut thr = std::collections::HashMap::new();
     for d in ds.iter() {
         for &dw in &dwells {
-            let trials: Vec<Trial> = (0..n_h0).map(|i| Trial { d, dwell: dw, snr: -15.0, offset: 0.0, signal: false, path: Path::Moderate, seed: 1_000_000 + i as u64 }).collect();
+            let trials: Vec<Trial> =
+                (0..n_h0).map(|i| Trial { d, dwell: dw, snr: -15.0, offset: 0.0, signal: false, path: Path::Moderate, seed: 1_000_000 + i as u64 }).collect();
             let mut v = par_map(&trials, run_trial);
             v.sort_by(|a, b| a.partial_cmp(b).unwrap());
             let th = v[(v.len() as f64 * 0.99) as usize - 1];
@@ -511,7 +604,15 @@ fn main() {
                 for &snr in &snrs {
                     for &off in &offsets {
                         let trials: Vec<Trial> = (0..n_h1)
-                            .map(|i| Trial { d, dwell: dw, snr, offset: if i % 2 == 0 { off } else { -off }, signal: true, path, seed: (i as u64) << 20 ^ (off as u64) << 8 ^ (snr.abs() as u64) })
+                            .map(|i| Trial {
+                                d,
+                                dwell: dw,
+                                snr,
+                                offset: if i % 2 == 0 { off } else { -off },
+                                signal: true,
+                                path,
+                                seed: (i as u64) << 20 ^ (off as u64) << 8 ^ (snr.abs() as u64),
+                            })
                             .collect();
                         let hits = par_map(&trials, run_trial).iter().filter(|z| **z > th).count();
                         let p = hits as f64 / n_h1 as f64;

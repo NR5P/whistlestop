@@ -39,12 +39,24 @@ pub fn model_name(id: &str) -> &'static str {
 impl Kenwood {
     pub fn new(mut w: Box<dyn Wire>, id: &str, elecraft_hint: bool, max_w: f32) -> Result<Kenwood> {
         // Elecraft radios answer OM; (their options); Kenwoods don't.
-        let elecraft = elecraft_hint || (id == "017" && ascii_query(w.as_mut(), "OM;", "OM").is_ok());
+        let elecraft =
+            elecraft_hint || (id == "017" && ascii_query(w.as_mut(), "OM;", "OM").is_ok());
         let (v, name) = if elecraft {
             let k4 = ascii_query(w.as_mut(), "K4;", "K4").is_ok();
-            (Variant::Elecraft, if k4 { "Elecraft K4".to_string() } else { "Elecraft K3/KX".to_string() })
+            (
+                Variant::Elecraft,
+                if k4 {
+                    "Elecraft K4".to_string()
+                } else {
+                    "Elecraft K3/KX".to_string()
+                },
+            )
         } else {
-            let v = if matches!(id, "021" | "023" | "024" | "025") { Variant::Kenwood } else { Variant::Plain };
+            let v = if matches!(id, "021" | "023" | "024" | "025") {
+                Variant::Kenwood
+            } else {
+                Variant::Plain
+            };
             (v, format!("Kenwood {}", model_name(id)))
         };
         let mut k = Kenwood { w, v, name, max_w };
@@ -127,7 +139,12 @@ impl Driver for Kenwood {
                 "NB NR ANF COMP VOX TUNER",
                 "TUNE CPY",
             ),
-            Variant::Elecraft => ("AF RF SQL MICGAIN RFPOWER PREAMP ATT STRENGTH SWR", "AF RF SQL MICGAIN RFPOWER PREAMP ATT", "NB NR VOX", ""),
+            Variant::Elecraft => (
+                "AF RF SQL MICGAIN RFPOWER PREAMP ATT STRENGTH SWR",
+                "AF RF SQL MICGAIN RFPOWER PREAMP ATT",
+                "NB NR VOX",
+                "",
+            ),
             Variant::Plain => ("AF RF SQL RFPOWER STRENGTH", "AF RF SQL RFPOWER", "", ""),
         };
         RigCaps {
@@ -137,8 +154,16 @@ impl Driver for Kenwood {
             get_funcs: words(f),
             set_funcs: words(f),
             vfo_ops: words(ops),
-            preamp_db: if self.v == Variant::Plain { vec![] } else { vec![10] },
-            att_db: if self.v == Variant::Plain { vec![] } else { vec![10] },
+            preamp_db: if self.v == Variant::Plain {
+                vec![]
+            } else {
+                vec![10]
+            },
+            att_db: if self.v == Variant::Plain {
+                vec![]
+            } else {
+                vec![10]
+            },
             modes: words("USB LSB PKTUSB PKTLSB CW CWR AM FM RTTY"),
         }
     }
@@ -157,7 +182,12 @@ impl Driver for Kenwood {
         let c = r.chars().nth(2).unwrap_or('2');
         let (name, pb) = match self.v {
             Variant::Elecraft => {
-                let pb = self.q("BW;", "BW").ok().and_then(|b| num(&b, 2, None).ok()).map(|n| n * 10).unwrap_or(0);
+                let pb = self
+                    .q("BW;", "BW")
+                    .ok()
+                    .and_then(|b| num(&b, 2, None).ok())
+                    .map(|n| n * 10)
+                    .unwrap_or(0);
                 let name = match c {
                     '6' => "PKTUSB",
                     '9' => "PKTLSB",
@@ -166,7 +196,10 @@ impl Driver for Kenwood {
                 (name, pb)
             }
             Variant::Kenwood => {
-                let data = self.q("DA;", "DA").map(|d| d.ends_with('1')).unwrap_or(false);
+                let data = self
+                    .q("DA;", "DA")
+                    .map(|d| d.ends_with('1'))
+                    .unwrap_or(false);
                 (mode_name(c, data), 0)
             }
             Variant::Plain => (mode_name(c, false), 0),
@@ -238,15 +271,33 @@ impl Driver for Kenwood {
             }
             "STRENGTH" => {
                 let (r, t): (String, &[(f32, f32)]) = match self.v {
-                    Variant::Elecraft => (self.q("SM;", "SM")?, &[(0.0, -54.0), (9.0, 0.0), (21.0, 60.0)]),
-                    Variant::Kenwood => (self.q("SM0;", "SM0")?, &[(0.0, -54.0), (15.0, 0.0), (30.0, 60.0)]),
-                    Variant::Plain => (self.q("SM0;", "SM0")?, &[(0.0, -54.0), (9.0, 0.0), (15.0, 60.0)]),
+                    Variant::Elecraft => (
+                        self.q("SM;", "SM")?,
+                        &[(0.0, -54.0), (9.0, 0.0), (21.0, 60.0)],
+                    ),
+                    Variant::Kenwood => (
+                        self.q("SM0;", "SM0")?,
+                        &[(0.0, -54.0), (15.0, 0.0), (30.0, 60.0)],
+                    ),
+                    Variant::Plain => (
+                        self.q("SM0;", "SM0")?,
+                        &[(0.0, -54.0), (9.0, 0.0), (15.0, 60.0)],
+                    ),
                 };
                 let skip = r.len().saturating_sub(4);
                 cal(t, num(&r, skip, None)? as f32)
             }
             "SWR" if e => num(&self.q("SW;", "SW")?, 2, None)? as f32 / 10.0,
-            "SWR" if self.v == Variant::Kenwood => cal(&[(0.0, 1.0), (6.0, 1.5), (10.0, 2.0), (15.0, 3.0), (30.0, 10.0)], self.meter(1)?),
+            "SWR" if self.v == Variant::Kenwood => cal(
+                &[
+                    (0.0, 1.0),
+                    (6.0, 1.5),
+                    (10.0, 2.0),
+                    (15.0, 3.0),
+                    (30.0, 10.0),
+                ],
+                self.meter(1)?,
+            ),
             "ALC" if self.v == Variant::Kenwood => (self.meter(3)? / 30.0).min(1.0),
             "PREAMP" if self.v != Variant::Plain => {
                 if self.q("PA;", "PA")?.chars().nth(2) == Some('1') {
@@ -269,7 +320,10 @@ impl Driver for Kenwood {
             return self.s(&format!("{prefix}{n:0digits$};"));
         }
         match name {
-            "RFPOWER" => self.s(&format!("PC{:03};", (v.clamp(0.0, 1.0) * self.max_w).round() as u32)),
+            "RFPOWER" => self.s(&format!(
+                "PC{:03};",
+                (v.clamp(0.0, 1.0) * self.max_w).round() as u32
+            )),
             "PREAMP" if self.v != Variant::Plain => self.s(&format!("PA{};", (v > 0.0) as u8)),
             "ATT" if self.v != Variant::Plain => self.s(&format!("RA{:02};", (v > 0.0) as u8)),
             _ => Err(unsupported(name)),
@@ -334,7 +388,10 @@ impl Driver for Kenwood {
     }
 
     fn set_split(&mut self, on: bool) -> Result<()> {
-        let rx = self.q("FR;", "FR").map(|r| r.ends_with('1')).unwrap_or(false);
+        let rx = self
+            .q("FR;", "FR")
+            .map(|r| r.ends_with('1'))
+            .unwrap_or(false);
         self.s(&format!("FT{};", (rx != on) as u8))
     }
 
@@ -349,14 +406,26 @@ impl Driver for Kenwood {
 
     fn set_offset(&mut self, xit: bool, hz: i32) -> Result<()> {
         match self.v {
-            Variant::Elecraft => self.s(&format!("RO{}{:04};", if hz < 0 { '-' } else { '+' }, hz.unsigned_abs().min(9999)))?,
+            Variant::Elecraft => self.s(&format!(
+                "RO{}{:04};",
+                if hz < 0 { '-' } else { '+' },
+                hz.unsigned_abs().min(9999)
+            ))?,
             _ => {
                 self.s("RC;")?;
                 if hz != 0 {
-                    self.s(&format!("{}{:05};", if hz > 0 { "RU" } else { "RD" }, hz.unsigned_abs().min(99999)))?;
+                    self.s(&format!(
+                        "{}{:05};",
+                        if hz > 0 { "RU" } else { "RD" },
+                        hz.unsigned_abs().min(99999)
+                    ))?;
                 }
             }
         }
-        self.s(&format!("{}{};", if xit { "XT" } else { "RT" }, (hz != 0) as u8))
+        self.s(&format!(
+            "{}{};",
+            if xit { "XT" } else { "RT" },
+            (hz != 0) as u8
+        ))
     }
 }

@@ -34,7 +34,10 @@ fn meter(ui: &mut Ui, label: &str, value: Option<f32>, frac: Option<f32>, color:
             b.set_width(r.width() * f.clamp(0.0, 1.0));
             ui.painter().rect_filled(b, 4.0, color);
         }
-        ui.add_sized([140.0, 18.0], egui::Label::new(RichText::new(if value.is_some() { text } else { "—".into() }).monospace().color(if value.is_some() { TEXT } else { DIM })));
+        ui.add_sized(
+            [140.0, 18.0],
+            egui::Label::new(RichText::new(if value.is_some() { text } else { "—".into() }).monospace().color(if value.is_some() { TEXT } else { DIM })),
+        );
     })
     .response
 }
@@ -130,15 +133,28 @@ impl RigWindow {
                                 Some(v) if v >= 1.5 => AMBER,
                                 _ => GREEN,
                             };
-                            meter(ui, "SWR", swr, swr.map(|v| (v - 1.0) / 2.0), col, swr.map(|v| format!("{v:.2} : 1")).unwrap_or_default()).help(&help::RC_SWR);
+                            meter(ui, "SWR", swr, swr.map(|v| (v - 1.0) / 2.0), col, swr.map(|v| format!("{v:.2} : 1")).unwrap_or_default())
+                                .help(&help::RC_SWR);
                             let alc = s.rig_ext.alc;
-                            meter(ui, "ALC", alc, alc, if alc.unwrap_or(0.0) > 0.6 { AMBER } else { TEAL }, alc.map(|v| format!("{:.0}%", v * 100.0)).unwrap_or_default()).help(&help::RC_ALC);
+                            meter(
+                                ui,
+                                "ALC",
+                                alc,
+                                alc,
+                                if alc.unwrap_or(0.0) > 0.6 { AMBER } else { TEAL },
+                                alc.map(|v| format!("{:.0}%", v * 100.0)).unwrap_or_default(),
+                            )
+                            .help(&help::RC_ALC);
                             let po = s.rig_ext.power_out;
                             meter(ui, "POWER OUT", po, po, BRASS, po.map(|v| format!("{:.0}%", v * 100.0)).unwrap_or_default()).help(&help::RC_PO);
                         });
                         if let Some(v) = s.rig_ext.swr_last_tx {
                             let bad = v > cfg.swr_limit;
-                            ui.label(RichText::new(format!("Last transmission: SWR {v:.2}{}", if bad { "  ⚠ above your limit" } else { "" })).color(if bad { RED } else { DIM }));
+                            ui.label(RichText::new(format!("Last transmission: SWR {v:.2}{}", if bad { "  ⚠ above your limit" } else { "" })).color(if bad {
+                                RED
+                            } else {
+                                DIM
+                            }));
                         }
                     });
                     ui.add_space(6.0);
@@ -148,7 +164,11 @@ impl RigWindow {
                         ui.horizontal(|ui| {
                             Self::toggle(ui, &caps, s, "TUNER", "ATU", &help::RC_ATU, &mut send);
                             if caps.has_tuner() {
-                                if ui.add(egui::Button::new(RichText::new("⟳  Tune now").strong()).fill(BRASS.linear_multiply(0.45))).help(&help::RC_TUNE_NOW).clicked() {
+                                if ui
+                                    .add(egui::Button::new(RichText::new("⟳  Tune now").strong()).fill(BRASS.linear_multiply(0.45)))
+                                    .help(&help::RC_TUNE_NOW)
+                                    .clicked()
+                                {
                                     send.push(Cmd::TuneAntenna);
                                 }
                             } else {
@@ -162,7 +182,11 @@ impl RigWindow {
                             }
                         });
                         ui.horizontal(|ui| {
-                            if ui.add_enabled(caps.has_tuner(), egui::Checkbox::new(&mut cfg.auto_tune, "Auto-tune when SWR is above")).help(&help::RC_AUTOTUNE).changed() {
+                            if ui
+                                .add_enabled(caps.has_tuner(), egui::Checkbox::new(&mut cfg.auto_tune, "Auto-tune when SWR is above"))
+                                .help(&help::RC_AUTOTUNE)
+                                .changed()
+                            {
                                 cfg_changed = true;
                             }
                             if ui.add(egui::Slider::new(&mut cfg.swr_limit, 1.3..=3.0).fixed_decimals(1).suffix(" : 1")).help(&help::RC_SWR_LIMIT).changed() {

@@ -68,7 +68,9 @@ pub(crate) fn freq_bcd(hz: u64, n: usize) -> Vec<u8> {
 }
 
 pub(crate) fn bcd_freq(b: &[u8]) -> u64 {
-    b.iter().rev().fold(0u64, |acc, &x| acc * 100 + ((x >> 4) as u64) * 10 + (x & 0x0F) as u64)
+    b.iter().rev().fold(0u64, |acc, &x| {
+        acc * 100 + ((x >> 4) as u64) * 10 + (x & 0x0F) as u64
+    })
 }
 
 /// 0..=255 (or 0..=9999) as two BCD bytes, most significant first.
@@ -83,7 +85,13 @@ pub(crate) fn from_bcd2(b: &[u8]) -> u16 {
 }
 
 const SMETER: [(f32, f32); 3] = [(0.0, -54.0), (120.0, 0.0), (241.0, 60.0)];
-const SWR: [(f32, f32); 5] = [(0.0, 1.0), (48.0, 1.5), (80.0, 2.0), (120.0, 3.0), (255.0, 10.0)];
+const SWR: [(f32, f32); 5] = [
+    (0.0, 1.0),
+    (48.0, 1.5),
+    (80.0, 2.0),
+    (120.0, 3.0),
+    (255.0, 10.0),
+];
 
 fn level_cmd(name: &str) -> Option<u8> {
     Some(match name {
@@ -135,7 +143,12 @@ impl Icom {
             }
             found.ok_or_else(|| anyhow!("no Icom CI-V radio answered"))?
         };
-        let mut r = Icom { w, addr, vfo: "VFOA".into(), data_cmd: true };
+        let mut r = Icom {
+            w,
+            addr,
+            vfo: "VFOA".into(),
+            data_cmd: true,
+        };
         r.freq().map_err(|e| anyhow!("Icom at {addr:02X}h: {e}"))?;
         r.data_cmd = r.query(&[0x1A, 0x06]).is_ok();
         Ok(r)
@@ -225,13 +238,19 @@ fn passband(mode: u8, fil: u8) -> i64 {
 
 impl Driver for Icom {
     fn describe(&self) -> String {
-        format!("Icom {} (CI-V {:02X}h, direct CAT)", model_name(self.addr).trim_start_matches("Icom "), self.addr)
+        format!(
+            "Icom {} (CI-V {:02X}h, direct CAT)",
+            model_name(self.addr).trim_start_matches("Icom "),
+            self.addr
+        )
     }
 
     fn caps(&self) -> RigCaps {
         RigCaps {
             model: format!("Icom {}", model_name(self.addr)),
-            get_levels: words("AF RF SQL NR RFPOWER MICGAIN COMP PREAMP ATT STRENGTH SWR ALC RFPOWER_METER"),
+            get_levels: words(
+                "AF RF SQL NR RFPOWER MICGAIN COMP PREAMP ATT STRENGTH SWR ALC RFPOWER_METER",
+            ),
             set_levels: words("AF RF SQL NR RFPOWER MICGAIN COMP PREAMP ATT"),
             get_funcs: words("NB NR ANF COMP VOX MON TUNER"),
             set_funcs: words("NB NR ANF COMP VOX MON TUNER"),
@@ -253,14 +272,28 @@ impl Driver for Icom {
     fn set_freq(&mut self, hz: f64) -> Result<()> {
         let mut b = vec![0x05];
         // The IC-905 (up to 10 GHz) uses six bytes; HF radios five.
-        b.extend(freq_bcd(hz.round() as u64, if hz >= 10e9 || self.addr == 0xAC { 6 } else { 5 }));
+        b.extend(freq_bcd(
+            hz.round() as u64,
+            if hz >= 10e9 || self.addr == 0xAC {
+                6
+            } else {
+                5
+            },
+        ));
         self.set(&b)
     }
 
     fn mode(&mut self) -> Result<(String, i64)> {
         let d = self.query(&[0x04])?;
-        let (m, fil) = (*d.first().ok_or_else(|| anyhow!("short mode reply"))?, *d.get(1).unwrap_or(&1));
-        let data = self.data_cmd && self.query(&[0x1A, 0x06]).map(|x| x.first().copied().unwrap_or(0) != 0).unwrap_or(false);
+        let (m, fil) = (
+            *d.first().ok_or_else(|| anyhow!("short mode reply"))?,
+            *d.get(1).unwrap_or(&1),
+        );
+        let data = self.data_cmd
+            && self
+                .query(&[0x1A, 0x06])
+                .map(|x| x.first().copied().unwrap_or(0) != 0)
+                .unwrap_or(false);
         let name = match (m, data) {
             (0x00, false) => "LSB",
             (0x01, false) => "USB",
@@ -287,7 +320,11 @@ impl Driver for Icom {
             p if p >= passband(code, 2) => 2,
             _ => 3,
         };
-        if fil == 0 { self.set(&[0x06, code])? } else { self.set(&[0x06, code, fil])? }
+        if fil == 0 {
+            self.set(&[0x06, code])?
+        } else {
+            self.set(&[0x06, code, fil])?
+        }
         if self.data_cmd {
             let r = self.set(&[0x1A, 0x06, data as u8, if data { fil.max(1) } else { 0 }]);
             if data {
@@ -319,7 +356,12 @@ impl Driver for Icom {
             "SWR" => cal(&SWR, v(self.query(&[0x15, 0x12])?)?),
             "ALC" => (v(self.query(&[0x15, 0x13])?)? / 120.0).min(1.0),
             "RFPOWER_METER" => (v(self.query(&[0x15, 0x11])?)? / 213.0).min(1.0),
-            "PREAMP" => [0.0, 10.0, 20.0][self.query(&[0x16, 0x02])?.first().copied().unwrap_or(0).min(2) as usize],
+            "PREAMP" => [0.0, 10.0, 20.0][self
+                .query(&[0x16, 0x02])?
+                .first()
+                .copied()
+                .unwrap_or(0)
+                .min(2) as usize],
             "ATT" => {
                 if self.query(&[0x11])?.first().copied().unwrap_or(0) != 0 {
                     20.0
@@ -336,7 +378,17 @@ impl Driver for Icom {
 
     fn set_level(&mut self, name: &str, val: f32) -> Result<()> {
         match name {
-            "PREAMP" => self.set(&[0x16, 0x02, if val >= 15.0 { 2 } else if val > 0.0 { 1 } else { 0 }]),
+            "PREAMP" => self.set(&[
+                0x16,
+                0x02,
+                if val >= 15.0 {
+                    2
+                } else if val > 0.0 {
+                    1
+                } else {
+                    0
+                },
+            ]),
             "ATT" => self.set(&[0x11, if val > 0.0 { 0x20 } else { 0x00 }]),
             _ => {
                 let c = level_cmd(name).ok_or_else(|| unsupported(name))?;
@@ -363,7 +415,11 @@ impl Driver for Icom {
             "CPY" => self.set(&[0x07, 0xA0]),
             "XCHG" => {
                 self.set(&[0x07, 0xB0])?;
-                self.vfo = if self.vfo == "VFOA" { "VFOB".into() } else { "VFOA".into() };
+                self.vfo = if self.vfo == "VFOA" {
+                    "VFOB".into()
+                } else {
+                    "VFOA".into()
+                };
                 Ok(())
             }
             _ => Err(unsupported(op)),
@@ -376,7 +432,11 @@ impl Driver for Icom {
 
     fn set_vfo(&mut self, vfo: &str) -> Result<()> {
         self.set(&[0x07, if vfo == "VFOB" { 0x01 } else { 0x00 }])?;
-        self.vfo = if vfo == "VFOB" { "VFOB".into() } else { "VFOA".into() };
+        self.vfo = if vfo == "VFOB" {
+            "VFOB".into()
+        } else {
+            "VFOA".into()
+        };
         Ok(())
     }
 
@@ -390,7 +450,12 @@ impl Driver for Icom {
 
     /// Icom radios share one offset between RIT and XIT.
     fn offset(&mut self, xit: bool) -> Result<i32> {
-        let on = self.query(&[0x21, if xit { 0x02 } else { 0x01 }])?.first().copied().unwrap_or(0) != 0;
+        let on = self
+            .query(&[0x21, if xit { 0x02 } else { 0x01 }])?
+            .first()
+            .copied()
+            .unwrap_or(0)
+            != 0;
         if !on {
             return Ok(0);
         }

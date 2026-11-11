@@ -37,12 +37,31 @@ pub struct Yaesu {
 }
 
 const SMETER: [(f32, f32); 3] = [(0.0, -54.0), (130.0, 0.0), (255.0, 60.0)];
-const SWR: [(f32, f32); 8] = [(0.0, 1.0), (26.0, 1.2), (52.0, 1.5), (89.0, 2.0), (126.0, 3.0), (173.0, 4.0), (236.0, 5.0), (255.0, 10.0)];
+const SWR: [(f32, f32); 8] = [
+    (0.0, 1.0),
+    (26.0, 1.2),
+    (52.0, 1.5),
+    (89.0, 2.0),
+    (126.0, 3.0),
+    (173.0, 4.0),
+    (236.0, 5.0),
+    (255.0, 10.0),
+];
 
 impl Yaesu {
     pub fn new(w: Box<dyn Wire>, id: &str, max_w: f32) -> Result<Yaesu> {
-        let max_w = if id == "0682" && max_w == 100.0 { 200.0 } else { max_w };
-        let mut y = Yaesu { w, name: format!("Yaesu {}", model_name(id)), fw: 9, max_w, vfo: "VFOA".into() };
+        let max_w = if id == "0682" && max_w == 100.0 {
+            200.0
+        } else {
+            max_w
+        };
+        let mut y = Yaesu {
+            w,
+            name: format!("Yaesu {}", model_name(id)),
+            fw: 9,
+            max_w,
+            vfo: "VFOA".into(),
+        };
         let fa = y.q("FA;", "FA").map_err(|e| anyhow!("{}: {e}", y.name))?;
         y.fw = fa.len().saturating_sub(2).clamp(8, 9);
         Ok(y)
@@ -72,7 +91,9 @@ impl Driver for Yaesu {
     fn caps(&self) -> RigCaps {
         RigCaps {
             model: self.name.clone(),
-            get_levels: words("AF RF SQL MICGAIN RFPOWER PREAMP ATT STRENGTH SWR ALC RFPOWER_METER"),
+            get_levels: words(
+                "AF RF SQL MICGAIN RFPOWER PREAMP ATT STRENGTH SWR ALC RFPOWER_METER",
+            ),
             set_levels: words("AF RF SQL MICGAIN RFPOWER PREAMP ATT"),
             get_funcs: words("NB NR ANF VOX TUNER"),
             set_funcs: words("NB NR ANF VOX TUNER"),
@@ -177,7 +198,16 @@ impl Driver for Yaesu {
             "SQL" => self.s(&format!("SQ0{:03};", n(100.0))),
             "MICGAIN" => self.s(&format!("MG{:03};", n(100.0))),
             "RFPOWER" => self.s(&format!("PC{:03};", n(self.max_w).max(5))),
-            "PREAMP" => self.s(&format!("PA0{};", if v >= 15.0 { 2 } else if v > 0.0 { 1 } else { 0 })),
+            "PREAMP" => self.s(&format!(
+                "PA0{};",
+                if v >= 15.0 {
+                    2
+                } else if v > 0.0 {
+                    1
+                } else {
+                    0
+                }
+            )),
             "ATT" => self.s(&format!("RA0{};", (v > 0.0) as u8)),
             _ => Err(unsupported(name)),
         }
@@ -217,7 +247,11 @@ impl Driver for Yaesu {
             "CPY" => self.s("AB;"),
             "XCHG" => {
                 self.s("SV;")?;
-                self.vfo = if self.vfo == "VFOA" { "VFOB".into() } else { "VFOA".into() };
+                self.vfo = if self.vfo == "VFOA" {
+                    "VFOB".into()
+                } else {
+                    "VFOA".into()
+                };
                 Ok(())
             }
             _ => Err(unsupported(op)),
@@ -230,7 +264,11 @@ impl Driver for Yaesu {
 
     fn set_vfo(&mut self, vfo: &str) -> Result<()> {
         self.s(&format!("VS{};", (vfo == "VFOB") as u8))?;
-        self.vfo = if vfo == "VFOB" { "VFOB".into() } else { "VFOA".into() };
+        self.vfo = if vfo == "VFOB" {
+            "VFOB".into()
+        } else {
+            "VFOA".into()
+        };
         Ok(())
     }
 
@@ -256,9 +294,17 @@ impl Driver for Yaesu {
     fn set_offset(&mut self, xit: bool, hz: i32) -> Result<()> {
         self.s("RC;")?;
         if hz != 0 {
-            self.s(&format!("{}{:04};", if hz > 0 { "RU" } else { "RD" }, hz.unsigned_abs().min(9999)))?;
+            self.s(&format!(
+                "{}{:04};",
+                if hz > 0 { "RU" } else { "RD" },
+                hz.unsigned_abs().min(9999)
+            ))?;
         }
-        self.s(&format!("{}{};", if xit { "XT" } else { "RT" }, (hz != 0) as u8))
+        self.s(&format!(
+            "{}{};",
+            if xit { "XT" } else { "RT" },
+            (hz != 0) as u8
+        ))
     }
 }
 
@@ -321,7 +367,11 @@ impl Ft817 {
     fn read_fm(&mut self) -> Result<(u64, u8)> {
         let r = self.cmd([0, 0, 0, 0, 0x03], 5)?;
         let f = from_bcd_be(&r[..4]).ok_or_else(|| anyhow!("not an FT-817 reply"))? * 10;
-        if !matches!(r[4], 0x00..=0x04 | 0x06 | 0x08 | 0x0A | 0x0C | 0x82 | 0x88 | 0x8A | 0x8C) || f == 0 {
+        if !matches!(
+            r[4],
+            0x00..=0x04 | 0x06 | 0x08 | 0x0A | 0x0C | 0x82 | 0x88 | 0x8A | 0x8C
+        ) || f == 0
+        {
             bail!("not an FT-817 reply");
         }
         Ok((f, r[4]))
@@ -387,7 +437,8 @@ impl Driver for Ft817 {
     }
 
     fn set_ptt(&mut self, on: bool) -> Result<()> {
-        self.cmd([0, 0, 0, 0, if on { 0x08 } else { 0x88 }], 1).or_else(|_| Ok::<_, anyhow::Error>(vec![]))?;
+        self.cmd([0, 0, 0, 0, if on { 0x08 } else { 0x88 }], 1)
+            .or_else(|_| Ok::<_, anyhow::Error>(vec![]))?;
         self.ptt = on;
         Ok(())
     }
@@ -397,7 +448,11 @@ impl Driver for Ft817 {
             return Err(unsupported(name));
         }
         let s = (self.cmd([0, 0, 0, 0, 0xE7], 1)?[0] & 0x0F) as f32;
-        Ok(if s <= 9.0 { (s - 9.0) * 6.0 } else { (s - 9.0) * 10.0 })
+        Ok(if s <= 9.0 {
+            (s - 9.0) * 6.0
+        } else {
+            (s - 9.0) * 10.0
+        })
     }
 }
 

@@ -54,7 +54,10 @@ impl RxBuffer {
     /// The most recent `n` samples.
     pub fn last(&self, n: usize) -> Vec<f64> {
         let n = n.min(self.samples.len());
-        self.samples.range(self.samples.len() - n..).map(|&v| v as f64).collect()
+        self.samples
+            .range(self.samples.len() - n..)
+            .map(|&v| v as f64)
+            .collect()
     }
 }
 
@@ -80,7 +83,11 @@ fn lowpass(taps: usize, cutoff: f64, fs: f64) -> Vec<f32> {
         .map(|i| {
             let n = i as f64 - m;
             let x = 2.0 * cutoff / fs * n;
-            let sinc = if n == 0.0 { 1.0 } else { (PI * x).sin() / (PI * x) };
+            let sinc = if n == 0.0 {
+                1.0
+            } else {
+                (PI * x).sin() / (PI * x)
+            };
             sinc * (0.54 - 0.46 * (2.0 * PI * i as f64 / (taps - 1) as f64).cos())
         })
         .collect();
@@ -100,7 +107,12 @@ struct Downsampler {
 impl Downsampler {
     fn new(in_rate: u32) -> Self {
         let h = lowpass(127, 3400.0, in_rate as f64);
-        Self { hist: vec![0.0; h.len()], h, step: in_rate as f64 / FS as f64, pos: 0.0 }
+        Self {
+            hist: vec![0.0; h.len()],
+            h,
+            step: in_rate as f64 / FS as f64,
+            pos: 0.0,
+        }
     }
 
     fn process(&mut self, x: &[f32], out: &mut Vec<f32>) {
@@ -122,23 +134,51 @@ impl Downsampler {
 pub fn list_devices() -> (Vec<String>, Vec<String>) {
     let host = cpal::default_host();
     let names = |it: Option<Box<dyn Iterator<Item = cpal::Device>>>| -> Vec<String> {
-        it.map(|i| i.filter_map(|d| d.description().ok().map(|n| n.name().to_string())).collect()).unwrap_or_default()
+        it.map(|i| {
+            i.filter_map(|d| d.description().ok().map(|n| n.name().to_string()))
+                .collect()
+        })
+        .unwrap_or_default()
     };
-    let ins = names(host.input_devices().ok().map(|i| Box::new(i) as Box<dyn Iterator<Item = _>>));
-    let outs = names(host.output_devices().ok().map(|i| Box::new(i) as Box<dyn Iterator<Item = _>>));
+    let ins = names(
+        host.input_devices()
+            .ok()
+            .map(|i| Box::new(i) as Box<dyn Iterator<Item = _>>),
+    );
+    let outs = names(
+        host.output_devices()
+            .ok()
+            .map(|i| Box::new(i) as Box<dyn Iterator<Item = _>>),
+    );
     (ins, outs)
 }
 
 fn find_device(name: &str, input: bool) -> Result<cpal::Device> {
     let host = cpal::default_host();
     if name.is_empty() {
-        return if input { host.default_input_device() } else { host.default_output_device() }
-            .ok_or_else(|| anyhow!("no default {} device", if input { "input" } else { "output" }));
+        return if input {
+            host.default_input_device()
+        } else {
+            host.default_output_device()
+        }
+        .ok_or_else(|| {
+            anyhow!(
+                "no default {} device",
+                if input { "input" } else { "output" }
+            )
+        });
     }
-    let mut devs: Box<dyn Iterator<Item = cpal::Device>> =
-        if input { Box::new(host.input_devices()?) } else { Box::new(host.output_devices()?) };
-    devs.find(|d| d.description().map(|n| n.name().to_lowercase().contains(&name.to_lowercase())).unwrap_or(false))
-        .ok_or_else(|| anyhow!("no audio device matching {name:?}"))
+    let mut devs: Box<dyn Iterator<Item = cpal::Device>> = if input {
+        Box::new(host.input_devices()?)
+    } else {
+        Box::new(host.output_devices()?)
+    };
+    devs.find(|d| {
+        d.description()
+            .map(|n| n.name().to_lowercase().contains(&name.to_lowercase()))
+            .unwrap_or(false)
+    })
+    .ok_or_else(|| anyhow!("no audio device matching {name:?}"))
 }
 
 /// Runs a capture stream on its own thread (cpal streams aren't Send on
@@ -188,7 +228,9 @@ impl LiveInput {
                 }
             }
         });
-        ready_rx.recv_timeout(Duration::from_secs(5)).map_err(|_| anyhow!("audio input did not start"))??;
+        ready_rx
+            .recv_timeout(Duration::from_secs(5))
+            .map_err(|_| anyhow!("audio input did not start"))??;
         Ok(Self { stop })
     }
 }
@@ -209,7 +251,10 @@ impl LiveInput {
                 };
                 carry.extend_from_slice(&buf[..n]);
                 let whole = carry.len() / 4 * 4;
-                let x: Vec<f32> = carry[..whole].chunks(4).map(|b| f32::from_le_bytes(b.try_into().unwrap())).collect();
+                let x: Vec<f32> = carry[..whole]
+                    .chunks(4)
+                    .map(|b| f32::from_le_bytes(b.try_into().unwrap()))
+                    .collect();
                 carry.drain(..whole);
                 rx.lock().unwrap().push(&x);
             }
@@ -272,7 +317,9 @@ impl LiveOutput {
                 }
             }
         });
-        let rate = ready_rx.recv_timeout(Duration::from_secs(5)).map_err(|_| anyhow!("audio output did not start"))??;
+        let rate = ready_rx
+            .recv_timeout(Duration::from_secs(5))
+            .map_err(|_| anyhow!("audio output did not start"))??;
         Ok(Self { queue, rate, stop })
     }
 
@@ -305,7 +352,11 @@ impl LiveOutput {
                 }
             }
         });
-        Self { queue, rate: FS, stop }
+        Self {
+            queue,
+            rate: FS,
+            stop,
+        }
     }
 
     pub async fn play(&self, samples: &[f32]) {
@@ -350,7 +401,13 @@ impl Monitor {
         let vol = Arc::new(std::sync::atomic::AtomicU32::new(volume.to_bits()));
         let stop = Arc::new(AtomicBool::new(false));
         let (ready_tx, ready_rx) = std::sync::mpsc::channel::<Result<u32>>();
-        let (r, t, v, st, name) = (rx.clone(), tx.clone(), vol.clone(), stop.clone(), device_name.to_string());
+        let (r, t, v, st, name) = (
+            rx.clone(),
+            tx.clone(),
+            vol.clone(),
+            stop.clone(),
+            device_name.to_string(),
+        );
         std::thread::spawn(move || {
             let build = || -> Result<(cpal::Stream, u32)> {
                 let dev = find_device(&name, false)?;
@@ -363,7 +420,8 @@ impl Monitor {
                         let g = f32::from_bits(v.load(Ordering::Relaxed));
                         let (mut r, mut t) = (r.lock().unwrap(), t.lock().unwrap());
                         for frame in data.chunks_mut(ch) {
-                            let s = (r.pop_front().unwrap_or(0.0) + t.pop_front().unwrap_or(0.0)) * g;
+                            let s =
+                                (r.pop_front().unwrap_or(0.0) + t.pop_front().unwrap_or(0.0)) * g;
                             frame.iter_mut().for_each(|x| *x = s.clamp(-1.0, 1.0));
                         }
                     },
@@ -386,12 +444,23 @@ impl Monitor {
                 }
             }
         });
-        let rate = ready_rx.recv_timeout(Duration::from_secs(5)).map_err(|_| anyhow!("speaker output did not start"))??;
-        Ok(Self { rx, tx, volume: vol, rate, stop, up_pos: 0.0, up_prev: 0.0 })
+        let rate = ready_rx
+            .recv_timeout(Duration::from_secs(5))
+            .map_err(|_| anyhow!("speaker output did not start"))??;
+        Ok(Self {
+            rx,
+            tx,
+            volume: vol,
+            rate,
+            stop,
+            up_pos: 0.0,
+            up_prev: 0.0,
+        })
     }
 
     pub fn set_volume(&self, v: f32) {
-        self.volume.store(v.clamp(0.0, 1.5).to_bits(), Ordering::Relaxed);
+        self.volume
+            .store(v.clamp(0.0, 1.5).to_bits(), Ordering::Relaxed);
     }
 
     /// Band audio at 8 kHz: resampled to the speaker rate, kept live.
@@ -447,10 +516,22 @@ pub fn ofdm_burst(fs: f64, secs: f64, seed: &mut u64) -> Vec<f32> {
     let n_sym = (secs / 0.04) as usize;
     let mut out = Vec::with_capacity(n_sym * ns);
     for k in 0..n_sym {
-        let ph: Vec<f64> = (0..carriers).map(|c| if k < 2 { (c % 2) as f64 * PI } else { (rnd() % 4) as f64 * PI / 2.0 }).collect();
+        let ph: Vec<f64> = (0..carriers)
+            .map(|c| {
+                if k < 2 {
+                    (c % 2) as f64 * PI
+                } else {
+                    (rnd() % 4) as f64 * PI / 2.0
+                }
+            })
+            .collect();
         for i in 0..ns {
             let t = (k * ns + i) as f64 / fs;
-            let v: f64 = ph.iter().enumerate().map(|(c, p)| (2.0 * PI * (1500.0 + (c as f64 - 3.5) * 25.0) * t + p).cos()).sum();
+            let v: f64 = ph
+                .iter()
+                .enumerate()
+                .map(|(c, p)| (2.0 * PI * (1500.0 + (c as f64 - 3.5) * 25.0) * t + p).cos())
+                .sum();
             let edge = (i.min(ns - 1 - i) as f64 / (0.002 * fs)).min(1.0);
             out.push((v / carriers as f64 * 0.9 * (0.6 + 0.4 * edge)) as f32);
         }
@@ -465,7 +546,13 @@ pub fn ofdm_burst(fs: f64, secs: f64, seed: &mut u64) -> Vec<f32> {
 pub enum SimSignal {
     /// A station calling CQ: whistle for `whistle_s` out of every `cycle_s`,
     /// then a Mercury-style data burst (its CQFRAME).
-    Whistler { rf_hz: f64, snr_db: f64, whistle_s: f64, cycle_s: f64, start_s: f64 },
+    Whistler {
+        rf_hz: f64,
+        snr_db: f64,
+        whistle_s: f64,
+        cycle_s: f64,
+        start_s: f64,
+    },
     /// An FT8-like 50 Hz-wide burst every 15 s.
     Ft8 { rf_hz: f64, snr_db: f64 },
     /// A steady carrier (someone tuning up).
@@ -484,7 +571,14 @@ pub struct SimBand {
 
 impl SimBand {
     pub fn new(rig_freq: Arc<Mutex<f64>>, signals: Vec<SimSignal>) -> Self {
-        Self { signals, rig_freq, noise_rms: 0.03, t: 0.0, whistle: whistle(30.0, &WhistleParams::default()), seed: 1 }
+        Self {
+            signals,
+            rig_freq,
+            noise_rms: 0.03,
+            t: 0.0,
+            whistle: whistle(30.0, &WhistleParams::default()),
+            seed: 1,
+        }
     }
 
     fn rand(&mut self) -> f64 {
@@ -512,7 +606,13 @@ impl SimBand {
         let mut y = vec![0.0f64; n];
         for sig in self.signals.clone() {
             match sig {
-                SimSignal::Whistler { rf_hz, snr_db, whistle_s, cycle_s, start_s } => {
+                SimSignal::Whistler {
+                    rf_hz,
+                    snr_db,
+                    whistle_s,
+                    cycle_s,
+                    start_s,
+                } => {
                     let off = rf_hz - dial;
                     if off.abs() > 3500.0 {
                         continue;
@@ -533,7 +633,9 @@ impl SimBand {
                         } else if ph >= whistle_s && ph < whistle_s + 3.1 {
                             // CQFRAME burst: noise-like, 1100-1300 Hz audio.
                             let tt = t;
-                            *s = g * 0.4 * ((2.0 * PI * 1200.0 * tt).sin() * (2.0 * PI * 37.0 * tt).sin());
+                            *s = g
+                                * 0.4
+                                * ((2.0 * PI * 1200.0 * tt).sin() * (2.0 * PI * 37.0 * tt).sin());
                             any = true;
                         }
                     }
@@ -607,17 +709,29 @@ pub struct AudioSpectrum {
 
 impl AudioSpectrum {
     pub fn new(n: usize) -> Self {
-        let window = (0..n).map(|i| (0.5 - 0.5 * (2.0 * PI * i as f64 / n as f64).cos()) as f32).collect();
-        Self { fft: FftPlanner::new().plan_fft_forward(n), window, n }
+        let window = (0..n)
+            .map(|i| (0.5 - 0.5 * (2.0 * PI * i as f64 / n as f64).cos()) as f32)
+            .collect();
+        Self {
+            fft: FftPlanner::new().plan_fft_forward(n),
+            window,
+            n,
+        }
     }
 
     /// dB per bin, `n/2` bins covering 0..4000 Hz.
     pub fn row(&self, x: &[f64]) -> Vec<f32> {
-        let mut buf: Vec<Complex32> =
-            x.iter().zip(&self.window).map(|(&v, &w)| Complex32::new(v as f32 * w, 0.0)).collect();
+        let mut buf: Vec<Complex32> = x
+            .iter()
+            .zip(&self.window)
+            .map(|(&v, &w)| Complex32::new(v as f32 * w, 0.0))
+            .collect();
         buf.resize(self.n, Complex32::new(0.0, 0.0));
         self.fft.process(&mut buf);
-        buf[..self.n / 2].iter().map(|c| 10.0 * (c.norm_sqr() + 1e-12).log10()).collect()
+        buf[..self.n / 2]
+            .iter()
+            .map(|c| 10.0 * (c.norm_sqr() + 1e-12).log10())
+            .collect()
     }
 }
 
@@ -629,11 +743,14 @@ mod tests {
     #[test]
     fn downsampler_keeps_tones_below_3k() {
         let mut ds = Downsampler::new(48000);
-        let x: Vec<f32> = (0..48000).map(|i| (2.0 * PI * 1500.0 * i as f64 / 48000.0).sin() as f32).collect();
+        let x: Vec<f32> = (0..48000)
+            .map(|i| (2.0 * PI * 1500.0 * i as f64 / 48000.0).sin() as f32)
+            .collect();
         let mut out = vec![];
         ds.process(&x, &mut out);
         assert!((out.len() as i64 - 8000).abs() <= 1);
-        let rms = (out[1000..].iter().map(|v| v * v).sum::<f32>() / (out.len() - 1000) as f32).sqrt();
+        let rms =
+            (out[1000..].iter().map(|v| v * v).sum::<f32>() / (out.len() - 1000) as f32).sqrt();
         assert!((rms - 0.707).abs() < 0.02, "rms {rms}");
     }
 
@@ -643,20 +760,49 @@ mod tests {
         let mut band = SimBand::new(
             rf.clone(),
             vec![
-                SimSignal::Whistler { rf_hz: 14_100_000.0 + 340.0, snr_db: 0.0, whistle_s: 25.0, cycle_s: 40.0, start_s: 0.0 },
-                SimSignal::Whistler { rf_hz: 14_100_000.0 - 640.0 + 50_000.0, snr_db: 0.0, whistle_s: 25.0, cycle_s: 40.0, start_s: 0.0 },
-                SimSignal::Carrier { rf_hz: 14_102_400.0, snr_db: 10.0 },
+                SimSignal::Whistler {
+                    rf_hz: 14_100_000.0 + 340.0,
+                    snr_db: 0.0,
+                    whistle_s: 25.0,
+                    cycle_s: 40.0,
+                    start_s: 0.0,
+                },
+                SimSignal::Whistler {
+                    rf_hz: 14_100_000.0 - 640.0 + 50_000.0,
+                    snr_db: 0.0,
+                    whistle_s: 25.0,
+                    cycle_s: 40.0,
+                    start_s: 0.0,
+                },
+                SimSignal::Carrier {
+                    rf_hz: 14_102_400.0,
+                    snr_db: 10.0,
+                },
             ],
         );
         let x: Vec<f64> = band.next(9600).iter().map(|&v| v as f64).collect();
-        let det = Detector::new(WhistleParams::default()).detect(&x).expect("whistle");
+        let det = Detector::new(WhistleParams::default())
+            .detect(&x)
+            .expect("whistle");
         assert!((det.offset_hz - 340.0).abs() < 3.0, "{}", det.offset_hz);
-        let hit = crate::whistle::TrackDetector::new(WhistleParams::default()).scan(&x[..4000]).unwrap();
-        assert!((hit.offset_hz - 340.0).abs() < 70.0 && hit.z > crate::whistle::TrackDetector::found(0.5), "{hit:?}");
+        let hit = crate::whistle::TrackDetector::new(WhistleParams::default())
+            .scan(&x[..4000])
+            .unwrap();
+        assert!(
+            (hit.offset_hz - 340.0).abs() < 70.0
+                && hit.z > crate::whistle::TrackDetector::found(0.5),
+            "{hit:?}"
+        );
         // 640 Hz off: beyond the matched filter's ±500, still found by the scan.
         *rf.lock().unwrap() = 14_150_000.0;
         let x: Vec<f64> = band.next(4000).iter().map(|&v| v as f64).collect();
-        let hit = crate::whistle::TrackDetector::new(WhistleParams::default()).scan(&x).unwrap();
-        assert!((hit.offset_hz + 640.0).abs() < 70.0 && hit.z > crate::whistle::TrackDetector::found(0.5), "{hit:?}");
+        let hit = crate::whistle::TrackDetector::new(WhistleParams::default())
+            .scan(&x)
+            .unwrap();
+        assert!(
+            (hit.offset_hz + 640.0).abs() < 70.0
+                && hit.z > crate::whistle::TrackDetector::found(0.5),
+            "{hit:?}"
+        );
     }
 }

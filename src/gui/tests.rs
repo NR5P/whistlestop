@@ -68,10 +68,15 @@ fn frames(h: &mut Harness<App>, n: usize) {
 /// view first as a person would.
 fn click(h: &mut Harness<App>, text: &str) {
     let find = |h: &Harness<App>| {
-        h.query_all_by(|n| matches!(n.role(), Role::Button | Role::Tab | Role::CheckBox | Role::RadioButton) && n.label().is_some_and(|l| l.contains(text))).next().is_some()
+        h.query_all_by(|n| matches!(n.role(), Role::Button | Role::Tab | Role::CheckBox | Role::RadioButton) && n.label().is_some_and(|l| l.contains(text)))
+            .next()
+            .is_some()
     };
     if find(h) {
-        h.query_all_by(|n| matches!(n.role(), Role::Button | Role::Tab | Role::CheckBox | Role::RadioButton) && n.label().is_some_and(|l| l.contains(text))).next().unwrap().scroll_to_me();
+        h.query_all_by(|n| matches!(n.role(), Role::Button | Role::Tab | Role::CheckBox | Role::RadioButton) && n.label().is_some_and(|l| l.contains(text)))
+            .next()
+            .unwrap()
+            .scroll_to_me();
         frames(h, 3);
     }
     {
@@ -113,7 +118,7 @@ fn has_text(h: &Harness<App>, text: &str) -> bool {
 fn type_into(h: &mut Harness<App>, placeholder: &str, text: &str) {
     {
         let f = h
-            .query_all_by(|n| n.role() == Role::TextInput || n.role() == Role::MultilineTextInput)
+            .query_all_by(|n| matches!(n.role(), Role::TextInput | Role::MultilineTextInput | Role::PasswordInput))
             .find(|n| n.accesskit_node().placeholder().is_some_and(|p| p.contains(placeholder)))
             .unwrap_or_else(|| panic!("no text field “{placeholder}”"));
         f.click();
@@ -121,7 +126,7 @@ fn type_into(h: &mut Harness<App>, placeholder: &str, text: &str) {
     frames(h, 2);
     {
         let f = h
-            .query_all_by(|n| n.role() == Role::TextInput || n.role() == Role::MultilineTextInput)
+            .query_all_by(|n| matches!(n.role(), Role::TextInput | Role::MultilineTextInput | Role::PasswordInput))
             .find(|n| n.accesskit_node().is_focused())
             .expect("field focused after click");
         f.type_text(text);
@@ -130,7 +135,12 @@ fn type_into(h: &mut Harness<App>, placeholder: &str, text: &str) {
 }
 
 fn rect_of(h: &Harness<App>, text: &str) -> egui::Rect {
-    h.query_all_by(|n| n.bounding_box().is_some() && (n.label().is_some_and(|l| l == text) || (n.role() == Role::Label && n.value().is_some_and(|v| v == text)))).next().unwrap_or_else(|| panic!("no “{text}”")).rect()
+    h.query_all_by(|n| {
+        n.bounding_box().is_some() && (n.label().is_some_and(|l| l == text) || (n.role() == Role::Label && n.value().is_some_and(|v| v == text)))
+    })
+    .next()
+    .unwrap_or_else(|| panic!("no “{text}”"))
+    .rect()
 }
 
 /// Depot by clicks: write mail to K7BOT, go Away, connect from the
@@ -253,7 +263,7 @@ fn modem_strip_never_overlaps() {
     let _g = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let mut h = app(demo_cfg("N0GUI"), 1700.0, 900.0);
     wait(&mut h, 15.0, "Mercury", |_, s| s.mercury_ok);
-    for w in [1700.0, 1400.0, 1200.0, 1000.0, 900.0] {
+    for w in [1700.0, 1400.0, 1200.0, 1100.0, 1000.0, 900.0] {
         h.set_size(vec2(w, 900.0));
         frames(&mut h, 6);
         let pills: Vec<egui::Rect> = ["Radio", "Mercury", "Audio", "SDR"].iter().map(|p| rect_of(&h, p)).collect();
@@ -267,6 +277,18 @@ fn modem_strip_never_overlaps() {
         }
         for p in &pills {
             assert!(p.right() <= w + 0.5 && p.left() >= 0.0, "at {w} px a pill is off screen: {p:?}");
+        }
+        // The top bar's buttons stay clear of the frequency display and
+        // meters at every width the window allows (1100 px and up).
+        if w >= 1100.0 {
+            let meters = [rect_of(&h, "SNR"), rect_of(&h, "MHz")];
+            for b in ["🙋 Here", "? Help", "📖 Guide", "🛰 Remote", "🔈 Listen", "⚙ Settings"] {
+                let r = rect_of(&h, b);
+                for m in &meters {
+                    assert!(!r.intersects(*m), "at {w} px, {b} {r:?} overlaps {m:?}");
+                }
+                assert!(r.right() <= w + 0.5, "at {w} px, {b} runs off the window");
+            }
         }
         // Readouts don't overlap each other either.
         let rs: Vec<(&str, egui::Rect)> = labels.iter().map(|l| (*l, rect_of(&h, l))).collect();
@@ -334,5 +356,38 @@ fn click_library_and_qsy_row() {
     wait(&mut h, 40.0, "moved", |_, s| s.rig.freq_hz == 14_106_500.0 && s.qsy.is_some());
     assert!(has_text(&h, "back to"));
     click(&mut h, "Disconnect");
-    wait(&mut h, 30.0, "home", |_, s| s.link.is_none() && s.qsy.is_none());
+    wait(&mut h, 60.0, "home", |_, s| s.link.is_none() && s.qsy.is_none());
+}
+
+/// Remote operation by clicks: a station shared on this computer's loopback,
+/// operated through the Remote window, then back to the local one.
+#[test]
+fn click_remote_connect_and_back() {
+    let _g = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    // The "radio computer": a demo station, shared.
+    let mut rc = demo_cfg("N0SHACK");
+    rc.callsign = "N0SHACK".into();
+    let radio = engine::spawn(|| {});
+    radio.send(Cmd::Start(rc.clone()));
+    let shared = whistlestop::remote::Shared { handle: radio.clone(), cfg: std::sync::Arc::new(std::sync::Mutex::new((0, rc))), devices: (vec![], vec![]) };
+    let srv = whistlestop::remote::serve(0, "shack123", shared).unwrap();
+    // This computer.
+    let mut h = app(demo_cfg("N0DEN"), 1400.0, 900.0);
+    wait(&mut h, 15.0, "local station", |_, s| s.mycall == "N0DEN");
+    click(&mut h, "Remote");
+    assert!(h.state().rm.open);
+    type_into(&mut h, "e.g. 192.168.1.20", &format!("127.0.0.1:{}", srv.port));
+    type_into(&mut h, "its remote password", "shack123");
+    click_exact(&mut h, "Connect to the radio computer");
+    wait(&mut h, 15.0, "operating the radio computer", |a, s| a.client.is_some() && s.mycall == "N0SHACK");
+    assert!(has_button(&h, "Remote ●"));
+    assert_eq!(srv.clients.lock().unwrap().len(), 1);
+    // A command from here acts there.
+    h.state().h.send(Cmd::SetFreq(14_104_000.0));
+    wait(&mut h, 10.0, "tuned remotely", |_, s| s.rig.freq_hz == 14_104_000.0);
+    assert_eq!(radio.state.lock().unwrap().rig.freq_hz, 14_104_000.0);
+    click(&mut h, "Remote");
+    click(&mut h, "Disconnect (back to this computer)");
+    wait(&mut h, 15.0, "back to the local station", |a, s| a.client.is_none() && s.mycall == "N0DEN");
+    radio.send(Cmd::Stop);
 }

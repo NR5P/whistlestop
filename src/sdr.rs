@@ -48,13 +48,22 @@ pub struct SdrConfig {
 
 impl Default for SdrConfig {
     fn default() -> Self {
-        Self { enabled: false, feed: Feed::RxOut, if_hz: 9_000_000, if_inverted: true, ppm: 0, span_hz: 100_000.0, wide_search: true, wide_auto: false }
+        Self {
+            enabled: false,
+            feed: Feed::RxOut,
+            if_hz: 9_000_000,
+            if_inverted: true,
+            ppm: 0,
+            span_hz: 100_000.0,
+            wide_search: true,
+            wide_auto: false,
+        }
     }
 }
 
 /// One waterfall line: `levels[i]` is the dB level at
 /// `start_hz + (i + 0.5) * bin_hz`.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct WideRow {
     pub start_hz: f64,
     pub bin_hz: f64,
@@ -113,7 +122,9 @@ impl WideFront {
                 match m {
                     WideMsg::Configure(w) => watches = w,
                     WideMsg::Samples(i, y) => {
-                        let Some(w) = watches.get_mut(i) else { continue };
+                        let Some(w) = watches.get_mut(i) else {
+                            continue;
+                        };
                         w.push(&y);
                         if !w.due() {
                             continue;
@@ -122,17 +133,31 @@ impl WideFront {
                         let now = std::time::Instant::now();
                         let mut o = out.lock().unwrap();
                         for h in found {
-                            match o.hits.iter_mut().find(|(_, x)| (x.dial_hz - h.dial_hz).abs() < 100.0) {
+                            match o
+                                .hits
+                                .iter_mut()
+                                .find(|(_, x)| (x.dial_hz - h.dial_hz).abs() < 100.0)
+                            {
                                 Some(e) => *e = (now, h),
                                 None => o.hits.push((now, h)),
                             }
                         }
-                        o.hits.retain(|(at, _)| at.elapsed() < Duration::from_secs(60));
+                        o.hits
+                            .retain(|(at, _)| at.elapsed() < Duration::from_secs(60));
                     }
                 }
             }
         });
-        Self { cfg: None, ref_rf: 0.0, decs: vec![], streams: vec![], tx, sim_phase: vec![], sim_t: 0.0, seed: 99 }
+        Self {
+            cfg: None,
+            ref_rf: 0.0,
+            decs: vec![],
+            streams: vec![],
+            tx,
+            sim_phase: vec![],
+            sim_t: 0.0,
+            seed: 99,
+        }
     }
 
     /// Rebuild the watches when the settings or the stream's reference
@@ -148,10 +173,18 @@ impl WideFront {
         self.decs.clear();
         self.streams.clear();
         if let Some(c) = &cfg {
-            for seg in c.segments.iter().filter(|s| (s.lo_hz - ref_rf).abs() < half && (s.hi_hz - ref_rf).abs() < half) {
+            for seg in c
+                .segments
+                .iter()
+                .filter(|s| (s.lo_hz - ref_rf).abs() < half && (s.hi_hz - ref_rf).abs() < half)
+            {
                 let w = WideWatch::new(seg.clone(), c.params, c.step_hz);
                 let decim = (SAMPLE_RATE / w.fs) as usize;
-                self.decs.push(Decimator::new(SAMPLE_RATE as f64, decim, w.center_rf - ref_rf));
+                self.decs.push(Decimator::new(
+                    SAMPLE_RATE as f64,
+                    decim,
+                    w.center_rf - ref_rf,
+                ));
                 self.streams.push((w.center_rf, w.fs));
                 watches.push(w);
             }
@@ -167,7 +200,11 @@ impl WideFront {
         o.wide_note = match (&cfg, watches.len()) {
             (None, _) => String::new(),
             (Some(_), 0) => "no digital segment inside the SDR's view".into(),
-            (Some(_), n) => format!("watching {} ({n} segment{}, {receivers} virtual receivers)", bands.join(", "), if n == 1 { "" } else { "s" }),
+            (Some(_), n) => format!(
+                "watching {} ({n} segment{}, {receivers} virtual receivers)",
+                bands.join(", "),
+                if n == 1 { "" } else { "s" }
+            ),
         };
         o.hits.clear();
         let _ = self.tx.send(WideMsg::Configure(watches));
@@ -209,7 +246,14 @@ impl WideFront {
             let (bot, start, whistle_s, cycle) = (14_103_150.0 + CRYSTAL_ERR_HZ, 4.0, 10.0, 30.0);
             let ph = (t0 - start).rem_euclid(cycle);
             if t0 >= start && ph < whistle_s {
-                let w = crate::widesearch::complex_whistle(fs as f64, n, bot - center, ph, &p, &mut self.sim_phase[i]);
+                let w = crate::widesearch::complex_whistle(
+                    fs as f64,
+                    n,
+                    bot - center,
+                    ph,
+                    &p,
+                    &mut self.sim_phase[i],
+                );
                 y.iter_mut().zip(w).for_each(|(a, b)| *a += b * 0.03);
             }
             let fc = 14_101_900.0 + CRYSTAL_ERR_HZ - center;
@@ -226,10 +270,21 @@ pub type Shared = Arc<Mutex<SdrShared>>;
 
 /// Start the wide receiver thread. `vfo` is the radio's dial (shared),
 /// `span` the picture width (shared, the GUI's zoom).
-pub fn start(cfg: SdrConfig, vfo: Arc<Mutex<f64>>, span: Arc<Mutex<f64>>, sim: bool, out: Shared, stop: Arc<AtomicBool>) {
+pub fn start(
+    cfg: SdrConfig,
+    vfo: Arc<Mutex<f64>>,
+    span: Arc<Mutex<f64>>,
+    sim: bool,
+    out: Shared,
+    stop: Arc<AtomicBool>,
+) {
     std::thread::spawn(move || {
         out.lock().unwrap().running = true;
-        let r = if sim { run_sim(&vfo, &span, &out, &stop) } else { run_dongle(&cfg, &vfo, &span, &out, &stop) };
+        let r = if sim {
+            run_sim(&vfo, &span, &out, &stop)
+        } else {
+            run_dongle(&cfg, &vfo, &span, &out, &stop)
+        };
         let mut o = out.lock().unwrap();
         o.running = false;
         if let Err(e) = r {
@@ -271,15 +326,31 @@ fn to_row(bins_db: &[f32], center_rf: f64, inverted: bool, lo: f64, span: f64) -
             *lv = -120.0;
         }
     }
-    WideRow { start_hz: lo, bin_hz: col_hz, levels }
+    WideRow {
+        start_hz: lo,
+        bin_hz: col_hz,
+        levels,
+    }
 }
 
-fn run_dongle(cfg: &SdrConfig, vfo: &Arc<Mutex<f64>>, span: &Arc<Mutex<f64>>, out: &Shared, stop: &AtomicBool) -> anyhow::Result<()> {
+fn run_dongle(
+    cfg: &SdrConfig,
+    vfo: &Arc<Mutex<f64>>,
+    span: &Arc<Mutex<f64>>,
+    out: &Shared,
+    stop: &AtomicBool,
+) -> anyhow::Result<()> {
     use rtlsdr_nusb::{Device, DirectSampling, MaybeFuture};
     let list = Device::list().wait().map_err(|e| anyhow::anyhow!("{e}"))?;
-    let desc = list.first().ok_or_else(|| anyhow::anyhow!("no RTL-SDR dongle found"))?;
+    let desc = list
+        .first()
+        .ok_or_else(|| anyhow::anyhow!("no RTL-SDR dongle found"))?;
     let v4 = desc.product.as_deref() == Some("Blog V4");
-    let direct = if v4 { DirectSampling::Off } else { DirectSampling::Q };
+    let direct = if v4 {
+        DirectSampling::Off
+    } else {
+        DirectSampling::Q
+    };
     let tune_hz = |vfo_hz: f64| -> u64 {
         match cfg.feed {
             Feed::RxOut => vfo_hz.max(0.0) as u64,
@@ -301,18 +372,26 @@ fn run_dongle(cfg: &SdrConfig, vfo: &Arc<Mutex<f64>>, span: &Arc<Mutex<f64>>, ou
     out.lock().unwrap().status = format!(
         "RTL-SDR {} on {}",
         desc.product.clone().unwrap_or_default(),
-        if cfg.feed == Feed::RxOut { "RX OUT" } else { "IF OUT" }
+        if cfg.feed == Feed::RxOut {
+            "RX OUT"
+        } else {
+            "IF OUT"
+        }
     );
 
     let fft = FftPlanner::<f32>::new().plan_fft_forward(FFT_SIZE);
-    let window: Vec<f32> =
-        (0..FFT_SIZE).map(|i| 0.5 - 0.5 * (2.0 * std::f32::consts::PI * i as f32 / FFT_SIZE as f32).cos()).collect();
+    let window: Vec<f32> = (0..FFT_SIZE)
+        .map(|i| 0.5 - 0.5 * (2.0 * std::f32::consts::PI * i as f32 / FFT_SIZE as f32).cos())
+        .collect();
     let mut buf = vec![Complex32::new(0.0, 0.0); FFT_SIZE];
     let mut wide = WideFront::new(out.clone());
     while !stop.load(Ordering::Relaxed) {
         let mut got = 0;
         while got < FFT_SIZE {
-            got += rx.read(&mut buf[got..], Some(Duration::from_millis(500))).wait().map_err(|e| anyhow::anyhow!("{e}"))?;
+            got += rx
+                .read(&mut buf[got..], Some(Duration::from_millis(500)))
+                .wait()
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
         }
         let vf = *vfo.lock().unwrap();
         let sp = *span.lock().unwrap();
@@ -320,7 +399,9 @@ fn run_dongle(cfg: &SdrConfig, vfo: &Arc<Mutex<f64>>, span: &Arc<Mutex<f64>>, ou
         if cfg.feed == Feed::RxOut && (vf - center).abs() > 0.25 * SAMPLE_RATE as f64 {
             center = vf;
             rx.stop().wait().ok();
-            dev.set_frequency_hz(tune_hz(center)).wait().map_err(|e| anyhow::anyhow!("{e}"))?;
+            dev.set_frequency_hz(tune_hz(center))
+                .wait()
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
             rx.start().wait().map_err(|e| anyhow::anyhow!("{e}"))?;
             continue;
         }
@@ -339,10 +420,16 @@ fn run_dongle(cfg: &SdrConfig, vfo: &Arc<Mutex<f64>>, span: &Arc<Mutex<f64>>, ou
             }
         }
         let mean = buf.iter().sum::<Complex32>() / FFT_SIZE as f32; // remove DC
-        let mut x: Vec<Complex32> = buf.iter().zip(&window).map(|(s, w)| (s - mean) * *w).collect();
+        let mut x: Vec<Complex32> = buf
+            .iter()
+            .zip(&window)
+            .map(|(s, w)| (s - mean) * *w)
+            .collect();
         fft.process(&mut x);
         let n = FFT_SIZE;
-        let db: Vec<f32> = (0..n).map(|i| 10.0 * (x[(i + n / 2) % n].norm_sqr() + 1e-12).log10()).collect();
+        let db: Vec<f32> = (0..n)
+            .map(|i| 10.0 * (x[(i + n / 2) % n].norm_sqr() + 1e-12).log10())
+            .collect();
         let (center_rf, inverted) = match cfg.feed {
             Feed::RxOut => (center, false),
             // IF OUT: the IF's centre is the dial; inverted IFs mirror the band.
@@ -357,7 +444,12 @@ fn run_dongle(cfg: &SdrConfig, vfo: &Arc<Mutex<f64>>, span: &Arc<Mutex<f64>>, ou
 }
 
 /// Demo mode: a believable band picture, drawn in the frequency domain.
-fn run_sim(vfo: &Arc<Mutex<f64>>, span: &Arc<Mutex<f64>>, out: &Shared, stop: &AtomicBool) -> anyhow::Result<()> {
+fn run_sim(
+    vfo: &Arc<Mutex<f64>>,
+    span: &Arc<Mutex<f64>>,
+    out: &Shared,
+    stop: &AtomicBool,
+) -> anyhow::Result<()> {
     out.lock().unwrap().status = "Simulated wide receiver (Demo)".into();
     let mut seed = 7u64;
     let mut rnd = move || {
@@ -368,7 +460,9 @@ fn run_sim(vfo: &Arc<Mutex<f64>>, span: &Arc<Mutex<f64>>, out: &Shared, stop: &A
     };
     let t0 = std::time::Instant::now();
     // (rf, width, level dB, kind) kind: 0 steady, 1 FT8 cycle, 2 whistle, 3 CW keying
-    let ft8: Vec<f64> = (0..28).map(|i| 14_074_300.0 + (i as f64 * 97.0) % 2600.0).collect();
+    let ft8: Vec<f64> = (0..28)
+        .map(|i| 14_074_300.0 + (i as f64 * 97.0) % 2600.0)
+        .collect();
     let mut wide = WideFront::new(out.clone());
     let mut last = 0.0;
     while !stop.load(Ordering::Relaxed) {
@@ -399,13 +493,20 @@ fn run_sim(vfo: &Arc<Mutex<f64>>, span: &Arc<Mutex<f64>>, out: &Shared, stop: &A
         let cyc = t.rem_euclid(45.0);
         if cyc < 25.0 {
             let ph = cyc.rem_euclid(1.0);
-            let af = if ph < 0.5 { 500.0 + 4000.0 * ph } else { 2500.0 - 4000.0 * (ph - 0.5) };
+            let af = if ph < 0.5 {
+                500.0 + 4000.0 * ph
+            } else {
+                2500.0 - 4000.0 * (ph - 0.5)
+            };
             paint(14_103_150.0 + af, 60.0, -74.0, &mut lv);
         } else if cyc < 28.1 {
             paint(14_103_150.0 + 1500.0, 200.0, -80.0, &mut lv);
         }
         // Other activity: CW, a Mercury/VARA-like wide data signal, carriers.
-        for (i, f) in [14_021_000.0, 14_033_500.0, 14_046_200.0].iter().enumerate() {
+        for (i, f) in [14_021_000.0, 14_033_500.0, 14_046_200.0]
+            .iter()
+            .enumerate()
+        {
             if ((t * (5.0 + i as f64)).sin() + (t * 3.1).cos()) > 0.2 {
                 paint(*f, 40.0, -82.0, &mut lv);
             }
@@ -414,7 +515,14 @@ fn run_sim(vfo: &Arc<Mutex<f64>>, span: &Arc<Mutex<f64>>, out: &Shared, stop: &A
             paint(14_108_500.0, 2300.0, -88.0, &mut lv);
         }
         paint(14_100_000.0, 30.0, -76.0, &mut lv); // NCDXF beacon area
-        push_row(out, WideRow { start_hz: lo, bin_hz: col, levels: lv });
+        push_row(
+            out,
+            WideRow {
+                start_hz: lo,
+                bin_hz: col,
+                levels: lv,
+            },
+        );
     }
     Ok(())
 }
@@ -432,11 +540,23 @@ mod tests {
         let mut db = vec![-100.0f32; n];
         db[n / 2 + (10_000.0 / bin_hz) as usize] = 0.0;
         let r = to_row(&db, 14_000_000.0, false, 13_950_000.0, 100_000.0);
-        let peak = r.levels.iter().enumerate().max_by(|a, b| a.1.partial_cmp(b.1).unwrap()).unwrap().0;
+        let peak = r
+            .levels
+            .iter()
+            .enumerate()
+            .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
+            .unwrap()
+            .0;
         let f = r.start_hz + (peak as f64 + 0.5) * r.bin_hz;
         assert!((f - 14_010_000.0).abs() < 200.0, "{f}");
         let r = to_row(&db, 14_000_000.0, true, 13_950_000.0, 100_000.0);
-        let peak = r.levels.iter().enumerate().max_by(|a, b| a.1.partial_cmp(b.1).unwrap()).unwrap().0;
+        let peak = r
+            .levels
+            .iter()
+            .enumerate()
+            .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
+            .unwrap()
+            .0;
         let f = r.start_hz + (peak as f64 + 0.5) * r.bin_hz;
         assert!((f - 13_990_000.0).abs() < 200.0, "{f}");
     }

@@ -47,9 +47,7 @@ impl Waterfall {
     /// Add one row of `cols` dB levels.
     pub fn push(&mut self, ctx: &egui::Context, levels: &[f32]) {
         let (cols, rows) = (self.cols, self.rows);
-        let tex = self
-            .tex
-            .get_or_insert_with(|| ctx.load_texture(self.name, ColorImage::filled([cols, rows], Color32::BLACK), TextureOptions::LINEAR_REPEAT));
+        let tex = self.tex.get_or_insert_with(|| ctx.load_texture(self.name, ColorImage::filled([cols, rows], Color32::BLACK), TextureOptions::LINEAR_REPEAT));
         let mut sorted: Vec<f32> = levels.iter().copied().filter(|v| v.is_finite()).collect();
         if sorted.is_empty() {
             return;

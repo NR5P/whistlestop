@@ -100,7 +100,7 @@ An RTL-SDR dongle connected to your radio's **RX OUT** (receive antenna output) 
 
 From top to bottom:
 
-- **Top bar**: the Whistlestop mark; the **frequency display** (TX/RX lamp, dial frequency, band, radio mode); the **S-meter** and **SNR** meters; **🙋 Here / 🚪 Away** (see "Away"); **DEMO** when in Demo mode; **🔈 Listen** (the radio's audio on your speakers); **📖 Guide** (this manual, in its own window); the **? Help** toggle; and **Settings**.
+- **Top bar**: the Whistlestop mark; the **frequency display** (TX/RX lamp, dial frequency, band, radio mode); the **S-meter** and **SNR** meters; **🙋 Here / 🚪 Away** (see "Away"); **🛰 Remote** (see "Remote operation"); **DEMO** when in Demo mode; **🔈 Listen** (the radio's audio on your speakers); **📖 Guide** (this manual, in its own window); the **? Help** toggle; and **Settings**.
 - **Modem strip**: what Mercury is doing right now (see "The modem strip"), and at its right end the **status pills** (Radio, Mercury, Audio, SDR: green means connected).
 - **Left column** (top to bottom): **Call CQ**, **Search for whistles**, **Heard**, **Bandwidth**, **Radio**.
 - **Centre**: tabs for **Chat**, **Roundtable**, **Files**, **Depot** (mail; see "The Depot") and **Log**.
@@ -194,10 +194,12 @@ Even when you're not searching, Whistlestop listens for whistles on the frequenc
 
 ### Wide search (RTL-SDR)
 
-With an RTL-SDR running, tick **Wide search (SDR)** in the Search card. The SDR's wide view is split into virtual receivers every 900 Hz across the band's digital segment, and the whistle detector runs on all of them every second. A whistle anywhere in the segment is found within about 1.5 s, without moving your radio.
+With an RTL-SDR running, tick **Wide search (SDR)** in the Search card. The SDR's wide view is split into virtual receivers every 1.8 kHz (with the default whistle) across the band's digital segment, and the whistle detector runs on all of them every second. A whistle anywhere in the segment is found within about 1.5 s, without moving your radio.
 
 - Hits appear under **Heard** with an **SDR** tag and a **Lock on** button, and as a 🚂 box on the wide waterfall.
 - **auto-tune**: tune the radio to new hits by itself (when you're not linked, calling or searching).
+- **With a search running, both methods work together**, auto-tune or not. While the stepping search is still going channel to channel (listening, or holding on something whistle-like), a fresh SDR hit pauses it: the radio goes straight to the hit, fine-locks, and waits up to 45 s for the CQ. If the hit isn't confirmed or no CQ comes, the search resumes on the channel it was on ("Back to the … search" in the Log). A search that has already found a whistle itself (measuring it, or waiting for its CQ) is never interrupted. Each SDR frequency is tried at most once every 2 minutes (within 200 Hz), so one caller can't keep pulling the search away.
+- The stepping search still matters with an SDR: it covers any part of the segment the SDR can't see, and it hears through your radio's better front end.
 - **Lock on** (or auto-tune) tunes your radio to the hit and **fine-locks using the radio's own audio**. That matters because RTL-SDR crystals are often 15–50 ppm off (a few hundred Hz on HF), too far for Mercury. In the demo the SDR is deliberately 240 Hz off and the fine-lock removes it.
 - The SDR must be able to see the segment: with RX OUT it follows your radio (±800 kHz); with IF OUT it sees what your radio's IF passes.
 
@@ -372,6 +374,27 @@ Settings → Schedule (**off by default**):
 - The first slot in the list that is on wins. Between slots the radio stays where it is.
 - Whistlestop checks every 20 seconds, and moves only when you're not linked, calling or searching. Each move is noted in the Log (🗓).
 - Station ID follows the same segment rule as all automatic transmissions.
+
+## Remote operation
+
+Run Whistlestop on the computer wired to the radio (the **radio computer**), and operate it from another Whistlestop anywhere on your home network: the den, a laptop on the couch.
+
+**On the radio computer:** press **🛰 Remote**, then under **Let other computers operate this one**:
+- tick **Share this station on my LAN** (off by default);
+- set a **Password** of at least 4 characters;
+- the **Port** defaults to 7373.
+
+The window then shows the address to connect to, for example `192.168.1.20:7373`, and who is connected. The button reads **🛰 Shared**, and turns amber while someone is operating.
+
+**On the other computer:** press **🛰 Remote**, type the radio computer's address (its LAN address, or a name such as `shack.local`; add `:port` if it isn't 7373) and the password, and press **Connect to the radio computer**. The button turns teal (**🛰 Remote ●**), and from then on everything happens on the radio computer:
+- search, CQ, chat, Roundtables, the Depot, QSY, the library, Radio Controls and the waterfalls;
+- **Settings**: you edit the radio computer's own settings, and it saves them. Its remote-sharing settings can only be changed on the radio computer itself.
+- **🔊 Listen**: plays the radio's received audio on this computer's speakers (Settings → Audio → Listen on and Listen volume are this computer's). It's 8 kHz audio, about 16 KB/s, nothing for a home network.
+- **Files**: files you send are picked here and uploaded. Files you receive are saved on the radio computer and also copied to this computer's Download folder.
+
+**Disconnect** (in the Remote window) goes back to this computer's own station; the radio computer carries on as it was. If the connection drops, this computer goes back to its own station and says so.
+
+**Security.** Only computers with private (home network) addresses can connect: 192.168.x.x, 10.x.x.x, 172.16–31.x.x, link-local and IPv6 unique-local. The password is never sent: the radio computer sends a fresh challenge and the other computer answers with an HMAC-SHA256 of it. A wrong password is refused, slowly. The stream itself isn't encrypted, so **don't forward the port to the internet**; use a VPN to reach home from outside. Anyone who knows the password can transmit with your station, under your callsign: choose it accordingly. On macOS, allow incoming connections for Whistlestop when the firewall asks.
 
 ## Bandwidth and speed
 
@@ -607,6 +630,7 @@ Settings are saved to `~/Library/Application Support/Whistlestop/whistlestop.tom
 | Accept QSY requests (and its rules) | Let a linked station move the link (see "QSY (moving a link)") | off |
 | Share a file library / Folder / Only while away / Largest file | See "File library" | off / — / off / 5 MB |
 | Follow the schedule / Only while away / time slots | See "Schedule" | off / on / none |
+| Share this station on my LAN / Password / Port (Remote window) | Let another Whistlestop on your LAN operate this one | off / — / 7373 |
 | Automatic only in the segments | Automatic transmissions only inside the automatic-control segments | on |
 | depot_file (settings file only) | Where Depot mail is kept | depot.json beside the settings |
 

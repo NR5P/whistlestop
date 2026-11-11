@@ -116,18 +116,38 @@ impl Session {
         let mut lo_hi: Key = Zeroizing::new([0; 32]);
         let mut hi_lo: Key = Zeroizing::new([0; 32]);
         let mut sas = Zeroizing::new([0u8; 4]);
-        hk.expand(b"WSP1 E2E lo->hi", &mut lo_hi[..]).expect("32 bytes");
-        hk.expand(b"WSP1 E2E hi->lo", &mut hi_lo[..]).expect("32 bytes");
+        hk.expand(b"WSP1 E2E lo->hi", &mut lo_hi[..])
+            .expect("32 bytes");
+        hk.expand(b"WSP1 E2E hi->lo", &mut hi_lo[..])
+            .expect("32 bytes");
         hk.expand(b"WSP1 E2E SAS", &mut sas[..]).expect("4 bytes");
         let code = u32::from_be_bytes(*sas) % 1_000_000;
-        let (tx_key, rx_key) = if i_am_lo { (lo_hi, hi_lo) } else { (hi_lo, lo_hi) };
-        Session { tx_key, rx_key, tx_n: 0, rx_n: 0, sas: format!("{:03} {:03}", code / 1000, code % 1000) }
+        let (tx_key, rx_key) = if i_am_lo {
+            (lo_hi, hi_lo)
+        } else {
+            (hi_lo, lo_hi)
+        };
+        Session {
+            tx_key,
+            rx_key,
+            tx_n: 0,
+            rx_n: 0,
+            sas: format!("{:03} {:03}", code / 1000, code % 1000),
+        }
     }
 
     /// Encrypt one inner packet body; returns the SEALED payload.
     pub fn seal(&mut self, inner_body: &[u8]) -> Vec<u8> {
         let c = ChaCha20Poly1305::new_from_slice(&self.tx_key[..]).expect("32-byte key");
-        let ct = c.encrypt(&nonce(self.tx_n), Payload { msg: inner_body, aad: &[T_SEALED] }).expect("in range");
+        let ct = c
+            .encrypt(
+                &nonce(self.tx_n),
+                Payload {
+                    msg: inner_body,
+                    aad: &[T_SEALED],
+                },
+            )
+            .expect("in range");
         self.tx_n += 1;
         ct
     }
@@ -188,9 +208,25 @@ impl Channel {
     /// KEYC when encryption is on.
     pub fn open(policy: Policy, hello: Link, now: Instant) -> (Channel, Vec<Vec<u8>>) {
         let hello = match hello {
-            Link::Hello { version, caps, name, grid, app } => {
-                let caps = if policy == Policy::Off { caps & !CAP_E2E } else { caps | CAP_E2E };
-                Link::Hello { version, caps, name, grid, app }
+            Link::Hello {
+                version,
+                caps,
+                name,
+                grid,
+                app,
+            } => {
+                let caps = if policy == Policy::Off {
+                    caps & !CAP_E2E
+                } else {
+                    caps | CAP_E2E
+                };
+                Link::Hello {
+                    version,
+                    caps,
+                    name,
+                    grid,
+                    app,
+                }
             }
             other => other,
         };
@@ -200,7 +236,13 @@ impl Channel {
         } else {
             let s = EphemeralSecret::random();
             let p = PublicKey::from(&s).to_bytes();
-            out.push(Link::KeyCommit { suite: SUITE, commit: commitment(&p) }.encode());
+            out.push(
+                Link::KeyCommit {
+                    suite: SUITE,
+                    commit: commitment(&p),
+                }
+                .encode(),
+            );
             (Some(s), p)
         };
         let ch = Channel {
@@ -236,7 +278,12 @@ impl Channel {
     pub fn wrap(&mut self, p: &Link) -> Option<Vec<u8>> {
         if let Some(s) = self.session.as_mut() {
             let body = Zeroizing::new(p.body());
-            Some(Link::Sealed { data: s.seal(&body) }.encode())
+            Some(
+                Link::Sealed {
+                    data: s.seal(&body),
+                }
+                .encode(),
+            )
         } else if self.plain {
             Some(p.encode())
         } else {
@@ -264,10 +311,14 @@ impl Channel {
                     self.peer_hello = Some(body.to_vec());
                     if !self.plain && caps & CAP_E2E == 0 {
                         if self.policy == Policy::Require {
-                            bail!("the other station does not have encryption on, and this station requires it");
+                            bail!(
+                                "the other station does not have encryption on, and this station requires it"
+                            );
                         }
                         self.go_plain();
-                        step.notice = Some(Notice::Plain { why: "the other station has encryption off".into() });
+                        step.notice = Some(Notice::Plain {
+                            why: "the other station has encryption off".into(),
+                        });
                     }
                 }
                 step.app.push(p);
@@ -277,7 +328,9 @@ impl Channel {
                     return Ok(step);
                 }
                 if suite != SUITE {
-                    bail!("the other station offered encryption suite {suite}, which this version doesn't know");
+                    bail!(
+                        "the other station offered encryption suite {suite}, which this version doesn't know"
+                    );
                 }
                 if self.peer_hello.is_none() {
                     bail!("key commitment before HELLO");
@@ -290,23 +343,36 @@ impl Channel {
                 }
                 self.peer_commit = Some(commit);
                 // Only now, with their commitment in hand, reveal our key.
-                step.send.push(Link::KeyX { suite: SUITE, pubkey: self.my_pub }.encode());
+                step.send.push(
+                    Link::KeyX {
+                        suite: SUITE,
+                        pubkey: self.my_pub,
+                    }
+                    .encode(),
+                );
             }
             Link::KeyX { suite, pubkey } => {
                 if self.plain {
                     return Ok(step);
                 }
-                let Some(commit) = self.peer_commit else { bail!("public key before its commitment") };
+                let Some(commit) = self.peer_commit else {
+                    bail!("public key before its commitment")
+                };
                 if suite != SUITE || self.session.is_some() {
                     bail!("unexpected key exchange packet");
                 }
                 if commitment(&pubkey) != commit {
-                    bail!("the other station's key does not match its commitment: someone may be tampering with the link");
+                    bail!(
+                        "the other station's key does not match its commitment: someone may be tampering with the link"
+                    );
                 }
                 if pubkey == self.my_pub {
                     bail!("our own public key came back (reflected)");
                 }
-                let secret = self.secret.take().ok_or_else(|| anyhow!("no key pair for this link"))?;
+                let secret = self
+                    .secret
+                    .take()
+                    .ok_or_else(|| anyhow!("no key pair for this link"))?;
                 let shared = secret.diffie_hellman(&PublicKey::from(pubkey));
                 if !shared.was_contributory() {
                     bail!("the other station sent a weak public key");
@@ -314,16 +380,29 @@ impl Channel {
                 let peer_hello = self.peer_hello.as_deref().unwrap_or_default();
                 let (mine, theirs) = ((&self.my_hello[..], &self.my_pub), (peer_hello, &pubkey));
                 let i_am_lo = self.my_pub < pubkey;
-                let salt = if i_am_lo { transcript(mine, theirs) } else { transcript(theirs, mine) };
+                let salt = if i_am_lo {
+                    transcript(mine, theirs)
+                } else {
+                    transcript(theirs, mine)
+                };
                 let s = Session::derive(shared.as_bytes(), &salt, i_am_lo);
                 step.notice = Some(Notice::Secure { sas: s.sas.clone() });
                 self.session = Some(s);
             }
             Link::Sealed { data } => {
-                let s = self.session.as_mut().ok_or_else(|| anyhow!("encrypted packet, but no keys were agreed"))?;
+                let s = self
+                    .session
+                    .as_mut()
+                    .ok_or_else(|| anyhow!("encrypted packet, but no keys were agreed"))?;
                 let inner = Zeroizing::new(s.open(&data)?);
                 let q = Link::decode(&inner)?;
-                if matches!(q, Link::Hello { .. } | Link::KeyCommit { .. } | Link::KeyX { .. } | Link::Sealed { .. }) {
+                if matches!(
+                    q,
+                    Link::Hello { .. }
+                        | Link::KeyCommit { .. }
+                        | Link::KeyX { .. }
+                        | Link::Sealed { .. }
+                ) {
                     bail!("handshake packet inside an encrypted one");
                 }
                 step.app.push(q);
@@ -333,10 +412,19 @@ impl Channel {
                 if !self.plain && self.peer_hello.is_none() && self.policy == Policy::Prefer {
                     // Not Whistlestop, or something older that skips HELLO.
                     self.go_plain();
-                    step.notice = Some(Notice::Plain { why: "the other station sent plain text".into() });
+                    step.notice = Some(Notice::Plain {
+                        why: "the other station sent plain text".into(),
+                    });
                 }
                 if !self.plain {
-                    bail!("unencrypted packet on a link that is {}", if self.encrypted() { "encrypted" } else { "setting up encryption" });
+                    bail!(
+                        "unencrypted packet on a link that is {}",
+                        if self.encrypted() {
+                            "encrypted"
+                        } else {
+                            "setting up encryption"
+                        }
+                    );
                 }
                 step.app.push(other);
             }
@@ -351,11 +439,16 @@ impl Channel {
         }
         match (self.policy, self.peer_hello.is_some()) {
             (Policy::Require, _) => {
-                bail!("no key exchange within {} s, and this station requires encryption", TIMEOUT.as_secs())
+                bail!(
+                    "no key exchange within {} s, and this station requires encryption",
+                    TIMEOUT.as_secs()
+                )
             }
             (_, false) => {
                 self.go_plain();
-                Ok(Some(Notice::Plain { why: "the other station never sent HELLO (not Whistlestop?)".into() }))
+                Ok(Some(Notice::Plain {
+                    why: "the other station never sent HELLO (not Whistlestop?)".into(),
+                }))
             }
             (_, true) => bail!("the encryption handshake stalled"),
         }
@@ -367,7 +460,13 @@ mod tests {
     use super::*;
 
     fn hello(name: &str) -> Link {
-        Link::Hello { version: VERSION, caps: CAP_RESUME | CAP_ZIP, name: name.into(), grid: "EM12".into(), app: "test".into() }
+        Link::Hello {
+            version: VERSION,
+            caps: CAP_RESUME | CAP_ZIP,
+            name: name.into(),
+            grid: "EM12".into(),
+            app: "test".into(),
+        }
     }
 
     /// Two stations joined by an in-order byte pipe.
@@ -438,11 +537,16 @@ mod tests {
         assert_ne!(*sa.tx_key, *sa.rx_key, "one key per direction");
         assert_eq!(p.a.sas(), p.b.sas());
         let sas = p.a.sas().unwrap();
-        assert!(sas.len() == 7 && sas.chars().filter(|c| c.is_ascii_digit()).count() == 6, "{sas}");
+        assert!(
+            sas.len() == 7 && sas.chars().filter(|c| c.is_ascii_digit()).count() == 6,
+            "{sas}"
+        );
         assert_eq!(p.a_notes, vec![Notice::Secure { sas: sas.into() }]);
         assert_eq!(p.b_notes, p.a_notes);
         // Both HELLOs reached the engine.
-        assert!(matches!(p.a_app[..], [Link::Hello { ref name, caps, .. }] if name == "B" && caps & CAP_E2E != 0));
+        assert!(
+            matches!(p.a_app[..], [Link::Hello { ref name, caps, .. }] if name == "B" && caps & CAP_E2E != 0)
+        );
         // A fresh link gets fresh keys.
         assert_ne!(secure_pair().a.sas(), Some(sas)); // (1 in a million to flake)
     }
@@ -450,29 +554,61 @@ mod tests {
     #[test]
     fn roundtrip_and_overhead() {
         let mut p = secure_pair();
-        let msgs =
-            [Link::Chat { id: 1, text: "73".into() }, Link::Chunk { fid: 1, offset: 0, data: vec![0xAB; CHUNK] }, Link::Received { id: 9 }];
+        let msgs = [
+            Link::Chat {
+                id: 1,
+                text: "73".into(),
+            },
+            Link::Chunk {
+                fid: 1,
+                offset: 0,
+                data: vec![0xAB; CHUNK],
+            },
+            Link::Received { id: 9 },
+        ];
         for m in &msgs {
             let w = p.a.wrap(m).unwrap();
             let extra = w.len() - m.encode().len();
-            assert!(extra == SEALED_OVERHEAD || extra == SEALED_OVERHEAD + 1, "{extra}");
+            assert!(
+                extra == SEALED_OVERHEAD || extra == SEALED_OVERHEAD + 1,
+                "{extra}"
+            );
             p.to_b.extend(w);
             p.to_a.extend(p.b.wrap(m).unwrap());
         }
         // "73" is 6 bytes in the clear and 6 + 17 = 23 sealed.
-        assert_eq!(Link::Chat { id: 5, text: "73".into() }.encode().len() + SEALED_OVERHEAD, 23);
+        assert_eq!(
+            Link::Chat {
+                id: 5,
+                text: "73".into()
+            }
+            .encode()
+            .len()
+                + SEALED_OVERHEAD,
+            23
+        );
         p.run().unwrap();
         assert_eq!(p.b_app[1..], msgs);
         assert_eq!(p.a_app[1..], msgs);
         // The text is not on the air in the clear.
-        let w = p.a.wrap(&Link::Chat { id: 2, text: "secret meeting place".into() }).unwrap();
+        let w =
+            p.a.wrap(&Link::Chat {
+                id: 2,
+                text: "secret meeting place".into(),
+            })
+            .unwrap();
         assert!(!w.windows(6).any(|x| x == b"secret"));
     }
 
     #[test]
     fn tamper_is_detected() {
         let mut p = secure_pair();
-        let mut w = p.a.wrap(&Link::Chat { id: 1, text: "hello".into() }).unwrap();
+        let mut w =
+            p.a.wrap(&Link::Chat {
+                id: 1,
+                text: "hello".into(),
+            })
+            .unwrap();
         let n = w.len();
         w[n - 20] ^= 0x01; // a ciphertext bit
         p.to_b.extend(w);
@@ -482,15 +618,30 @@ mod tests {
     #[test]
     fn replay_and_reorder_are_rejected() {
         let mut p = secure_pair();
-        let w1 = p.a.wrap(&Link::Chat { id: 1, text: "one".into() }).unwrap();
+        let w1 =
+            p.a.wrap(&Link::Chat {
+                id: 1,
+                text: "one".into(),
+            })
+            .unwrap();
         p.to_b.extend(&w1);
         p.run().unwrap();
         p.to_b.extend(&w1); // replay
         assert!(p.run().is_err());
 
         let mut p = secure_pair();
-        let w1 = p.a.wrap(&Link::Chat { id: 1, text: "one".into() }).unwrap();
-        let w2 = p.a.wrap(&Link::Chat { id: 2, text: "two".into() }).unwrap();
+        let w1 =
+            p.a.wrap(&Link::Chat {
+                id: 1,
+                text: "one".into(),
+            })
+            .unwrap();
+        let w2 =
+            p.a.wrap(&Link::Chat {
+                id: 2,
+                text: "two".into(),
+            })
+            .unwrap();
         p.to_b.extend(&w2); // reordered
         p.to_b.extend(&w1);
         assert!(p.run().is_err());
@@ -499,7 +650,13 @@ mod tests {
     #[test]
     fn plaintext_injection_is_rejected() {
         let mut p = secure_pair();
-        p.to_b.extend(Link::Chat { id: 7, text: "forged".into() }.encode());
+        p.to_b.extend(
+            Link::Chat {
+                id: 7,
+                text: "forged".into(),
+            }
+            .encode(),
+        );
         assert!(p.run().unwrap_err().to_string().contains("unencrypted"));
     }
 
@@ -508,9 +665,18 @@ mod tests {
         let now = Instant::now();
         let (mut a, _) = Channel::open(Policy::Prefer, hello("A"), now);
         assert!(!a.ready());
-        assert!(a.wrap(&Link::Chat { id: 1, text: "wait".into() }).is_none());
+        assert!(
+            a.wrap(&Link::Chat {
+                id: 1,
+                text: "wait".into()
+            })
+            .is_none()
+        );
         let (mut off, _) = Channel::open(Policy::Off, hello("O"), now);
-        assert_eq!(off.wrap(&Link::Received { id: 1 }), Some(Link::Received { id: 1 }.encode()));
+        assert_eq!(
+            off.wrap(&Link::Received { id: 1 }),
+            Some(Link::Received { id: 1 }.encode())
+        );
     }
 
     #[test]
@@ -564,8 +730,17 @@ mod tests {
         }
         // Mallory substitutes a key of her own for B's.
         let m = EphemeralSecret::random();
-        let forged = Link::KeyX { suite: SUITE, pubkey: PublicKey::from(&m).to_bytes() }.body();
-        assert!(a.on_body(&forged).unwrap_err().to_string().contains("commitment"));
+        let forged = Link::KeyX {
+            suite: SUITE,
+            pubkey: PublicKey::from(&m).to_bytes(),
+        }
+        .body();
+        assert!(
+            a.on_body(&forged)
+                .unwrap_err()
+                .to_string()
+                .contains("commitment")
+        );
     }
 
     #[test]
@@ -586,6 +761,9 @@ mod tests {
         struct W {
             p: Policy,
         }
-        assert_eq!(toml::to_string(&W { p: Policy::Require }).unwrap().trim(), "p = \"require\"");
+        assert_eq!(
+            toml::to_string(&W { p: Policy::Require }).unwrap().trim(),
+            "p = \"require\""
+        );
     }
 }

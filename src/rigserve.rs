@@ -25,7 +25,9 @@ impl Drop for RigServer {
 }
 
 pub async fn serve(radio: CatHandle, port: u16) -> Result<RigServer> {
-    let l = TcpListener::bind(("127.0.0.1", port)).await.map_err(|e| anyhow::anyhow!("can't share the radio on port {port}: {e}"))?;
+    let l = TcpListener::bind(("127.0.0.1", port))
+        .await
+        .map_err(|e| anyhow::anyhow!("can't share the radio on port {port}: {e}"))?;
     let addr = l.local_addr()?.to_string();
     let task = tokio::spawn(async move {
         // A JoinSet aborts every client when the server stops, so their
@@ -48,7 +50,9 @@ async fn client(s: TcpStream, radio: CatHandle) {
         if line.is_empty() {
             continue;
         }
-        let Some(reply) = answer(&radio, line).await else { break };
+        let Some(reply) = answer(&radio, line).await else {
+            break;
+        };
         if w.write_all(reply.as_bytes()).await.is_err() {
             break;
         }
@@ -68,7 +72,13 @@ async fn answer(radio: &CatHandle, line: &str) -> Option<String> {
     let cmd = it.next().unwrap_or("");
     let args: Vec<String> = it.map(String::from).collect();
     let arg = |i: usize| args.get(i).cloned().unwrap_or_default();
-    let done = |r: Result<()>| Some(if r.is_ok() { OK.to_string() } else { EIO.to_string() });
+    let done = |r: Result<()>| {
+        Some(if r.is_ok() {
+            OK.to_string()
+        } else {
+            EIO.to_string()
+        })
+    };
     match cmd {
         "q" | "Q" | "\\quit" => None,
         "\\chk_vfo" | "chk_vfo" => Some("0\n".into()),
@@ -79,7 +89,9 @@ async fn answer(radio: &CatHandle, line: &str) -> Option<String> {
             Err(_) => EIO.into(),
         }),
         "F" | "\\set_freq" => {
-            let Ok(hz) = arg(0).parse::<f64>() else { return Some("RPRT -1\n".into()) };
+            let Ok(hz) = arg(0).parse::<f64>() else {
+                return Some("RPRT -1\n".into());
+            };
             done(radio.call(move |d| d.set_freq(hz)).await)
         }
         "m" | "\\get_mode" => Some(match radio.call(|d| d.mode()).await {
@@ -101,7 +113,10 @@ async fn answer(radio: &CatHandle, line: &str) -> Option<String> {
             let on = arg(0) != "0";
             done(radio.call(move |d| d.set_ptt(on)).await)
         }
-        "v" | "\\get_vfo" => Some(format!("{}\n", radio.call(|d| d.vfo()).await.unwrap_or("VFOA".into()))),
+        "v" | "\\get_vfo" => Some(format!(
+            "{}\n",
+            radio.call(|d| d.vfo()).await.unwrap_or("VFOA".into())
+        )),
         "V" | "\\set_vfo" => {
             let v = arg(0);
             if v == "?" {
@@ -114,7 +129,10 @@ async fn answer(radio: &CatHandle, line: &str) -> Option<String> {
             }
             done(radio.call(move |d| d.set_vfo(&v)).await)
         }
-        "s" | "\\get_split_vfo" => Some(format!("{}\nVFOB\n", radio.call(|d| d.split()).await.unwrap_or(false) as u8)),
+        "s" | "\\get_split_vfo" => Some(format!(
+            "{}\nVFOB\n",
+            radio.call(|d| d.split()).await.unwrap_or(false) as u8
+        )),
         "S" | "\\set_split_vfo" => {
             let on = arg(0) == "1";
             done(radio.call(move |d| d.set_split(on)).await)
@@ -163,8 +181,14 @@ async fn answer(radio: &CatHandle, line: &str) -> Option<String> {
                 Err(_) => ENIMPL.into(),
             })
         }
-        "j" | "\\get_rit" => Some(format!("{}\n", radio.call(|d| d.offset(false)).await.unwrap_or(0))),
-        "z" | "\\get_xit" => Some(format!("{}\n", radio.call(|d| d.offset(true)).await.unwrap_or(0))),
+        "j" | "\\get_rit" => Some(format!(
+            "{}\n",
+            radio.call(|d| d.offset(false)).await.unwrap_or(0)
+        )),
+        "z" | "\\get_xit" => Some(format!(
+            "{}\n",
+            radio.call(|d| d.offset(true)).await.unwrap_or(0)
+        )),
         "J" | "\\set_rit" | "Z" | "\\set_xit" => {
             let xit = cmd == "Z" || cmd == "\\set_xit";
             let hz = arg(0).parse::<i32>().unwrap_or(0);
@@ -187,13 +211,20 @@ fn dump_state(radio: &CatHandle) -> String {
     s += "0xc 2400\n0xc 1800\n0xc 3000\n0x800 3000\n0x400 3000\n0x2 500\n0x1 6000\n0x20 12000\n0 0\n";
     s += "9999\n9999\n0\n0\n";
     let list = |v: &[i32]| v.iter().map(|x| format!("{x} ")).collect::<String>();
-    s += &format!("{}\n{}\n", list(&radio.caps.preamp_db), list(&radio.caps.att_db));
+    s += &format!(
+        "{}\n{}\n",
+        list(&radio.caps.preamp_db),
+        list(&radio.caps.att_db)
+    );
     // Functions and levels aren't advertised: clients ask, and get
     // "not implemented" for what this radio can't do.
     s += "0x0\n0x0\n0x0\n0x0\n0x0\n0x0\n";
     s += "vfo_ops=0x0\nptt_type=0x1\ntargetable_vfo=0x0\nhas_set_vfo=1\nhas_get_vfo=1\nhas_set_freq=1\nhas_get_freq=1\n";
     s += "has_set_conf=0\nhas_get_conf=0\nhas_power2mW=0\nhas_mW2power=0\ntimeout=0\nrig_model=2\n";
-    s += &format!("rigctld_version=Whistlestop {} direct CAT\n", env!("CARGO_PKG_VERSION"));
+    s += &format!(
+        "rigctld_version=Whistlestop {} direct CAT\n",
+        env!("CARGO_PKG_VERSION")
+    );
     s += "done\n";
     s
 }
@@ -204,7 +235,10 @@ mod tests {
     use crate::cat::sim::{Kind, SimRadio};
 
     async fn ask(s: &mut BufReader<TcpStream>, cmd: &str, lines: usize) -> Vec<String> {
-        s.get_mut().write_all(format!("{cmd}\n").as_bytes()).await.unwrap();
+        s.get_mut()
+            .write_all(format!("{cmd}\n").as_bytes())
+            .await
+            .unwrap();
         let mut out = vec![];
         for _ in 0..lines {
             let mut l = String::new();
@@ -216,7 +250,13 @@ mod tests {
 
     #[tokio::test]
     async fn speaks_rigctld() {
-        let d = crate::cat::kenwood::Kenwood::new(Box::new(SimRadio::new(Kind::Kenwood("023"))), "023", false, 100.0).unwrap();
+        let d = crate::cat::kenwood::Kenwood::new(
+            Box::new(SimRadio::new(Kind::Kenwood("023"))),
+            "023",
+            false,
+            100.0,
+        )
+        .unwrap();
         let srv = serve(CatHandle::start(Box::new(d)), 0).await.unwrap();
         let mut s = BufReader::new(TcpStream::connect(&srv.addr).await.unwrap());
         assert_eq!(ask(&mut s, "f", 1).await, ["14074000"]);
@@ -239,12 +279,20 @@ mod tests {
             eprintln!("Hamlib not installed; skipping");
             return;
         };
-        let d = crate::cat::icom::Icom::probe(Box::new(SimRadio::new(Kind::Icom(0x94))), 0).unwrap();
+        let d =
+            crate::cat::icom::Icom::probe(Box::new(SimRadio::new(Kind::Icom(0x94))), 0).unwrap();
         let srv = serve(CatHandle::start(Box::new(d)), 0).await.unwrap();
         let addr = srv.addr.clone();
-        let out = tokio::task::spawn_blocking(move || std::process::Command::new(rigctl).args(["-m", "2", "-r", &addr, "f", "F", "14100000", "f", "T", "1", "t", "T", "0", "m"]).output().unwrap())
-            .await
-            .unwrap();
+        let out = tokio::task::spawn_blocking(move || {
+            std::process::Command::new(rigctl)
+                .args([
+                    "-m", "2", "-r", &addr, "f", "F", "14100000", "f", "T", "1", "t", "T", "0", "m",
+                ])
+                .output()
+                .unwrap()
+        })
+        .await
+        .unwrap();
         let text = String::from_utf8_lossy(&out.stdout).to_string();
         let err = String::from_utf8_lossy(&out.stderr).to_string();
         assert!(out.status.success(), "rigctl failed: {text}\n{err}");

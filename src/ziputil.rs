@@ -14,7 +14,11 @@ pub struct Zipped {
 
 impl Zipped {
     pub fn ratio(&self) -> f64 {
-        if self.original_bytes == 0 { 1.0 } else { self.data.len() as f64 / self.original_bytes as f64 }
+        if self.original_bytes == 0 {
+            1.0
+        } else {
+            self.data.len() as f64 / self.original_bytes as f64
+        }
     }
 }
 
@@ -35,7 +39,8 @@ pub fn zip_paths(paths: &[PathBuf], name_hint: Option<&str>) -> Result<Zipped> {
             }
             let rel = entry.path().strip_prefix(base).unwrap_or(entry.path());
             let rel = rel.to_string_lossy().replace('\\', "/");
-            let bytes = std::fs::read(entry.path()).with_context(|| format!("reading {}", entry.path().display()))?;
+            let bytes = std::fs::read(entry.path())
+                .with_context(|| format!("reading {}", entry.path().display()))?;
             original += bytes.len() as u64;
             files += 1;
             w.start_file(rel, opts)?;
@@ -47,11 +52,19 @@ pub fn zip_paths(paths: &[PathBuf], name_hint: Option<&str>) -> Result<Zipped> {
         Some(n) => n.to_string(),
         None if paths.len() == 1 => format!(
             "{}.zip",
-            paths[0].file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "files".into())
+            paths[0]
+                .file_name()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "files".into())
         ),
         None => "files.zip".into(),
     };
-    Ok(Zipped { name, data, original_bytes: original, files })
+    Ok(Zipped {
+        name,
+        data,
+        original_bytes: original,
+        files,
+    })
 }
 
 #[cfg(test)]

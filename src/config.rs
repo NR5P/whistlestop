@@ -128,6 +128,14 @@ pub struct Config {
     /// Follow it only while you're away.
     pub schedule_only_away: bool,
     pub schedule: Vec<crate::schedule::Slot>,
+
+    /// Remote operation: let another Whistlestop on the LAN operate this
+    /// one (off by default; needs a password).
+    pub remote_serve: bool,
+    pub remote_port: u16,
+    pub remote_password: String,
+    /// The radio computer this one last operated ("192.168.1.20").
+    pub remote_addr: String,
 }
 
 impl Default for Config {
@@ -191,6 +199,10 @@ impl Default for Config {
             schedule_on: false,
             schedule_only_away: true,
             schedule: vec![],
+            remote_serve: false,
+            remote_port: crate::remote::DEFAULT_PORT,
+            remote_password: String::new(),
+            remote_addr: String::new(),
         }
     }
 }
@@ -200,12 +212,18 @@ pub fn path() -> PathBuf {
     if let Some(p) = std::env::var_os("WHISTLESTOP_CONFIG") {
         return PathBuf::from(p);
     }
-    dirs::config_dir().unwrap_or_else(std::env::temp_dir).join("Whistlestop").join("whistlestop.toml")
+    dirs::config_dir()
+        .unwrap_or_else(std::env::temp_dir)
+        .join("Whistlestop")
+        .join("whistlestop.toml")
 }
 
 impl Config {
     pub fn load() -> Self {
-        let mut c: Config = std::fs::read_to_string(path()).ok().and_then(|s| toml::from_str(&s).ok()).unwrap_or_default();
+        let mut c: Config = std::fs::read_to_string(path())
+            .ok()
+            .and_then(|s| toml::from_str(&s).ok())
+            .unwrap_or_default();
         c.upgrade();
         c
     }
@@ -261,9 +279,16 @@ fn whistle_v1() -> u32 {
 mod upgrade_tests {
     #[test]
     fn old_scan_defaults_move_to_whistle_v2() {
-        let mut c: super::Config = toml::from_str("callsign = \"N0OLD\"\ndwell_s = 2.2\nstep_hz = 1800.0\nwhistle_s = 30.0\n").unwrap();
+        let mut c: super::Config = toml::from_str(
+            "callsign = \"N0OLD\"\ndwell_s = 2.2\nstep_hz = 1800.0\nwhistle_s = 30.0\n",
+        )
+        .unwrap();
         assert_eq!(c.whistle_version, 1);
         c.upgrade();
-        assert_eq!((c.dwell_s, c.step_hz, c.whistle_s, c.whistle_version), (0.5, 2000.0, 30.0, 2), "custom whistle length kept");
+        assert_eq!(
+            (c.dwell_s, c.step_hz, c.whistle_s, c.whistle_version),
+            (0.5, 2000.0, 30.0, 2),
+            "custom whistle length kept"
+        );
     }
 }

@@ -45,7 +45,14 @@ pub enum Family {
 }
 
 impl Family {
-    pub const ALL: [Family; 6] = [Family::Auto, Family::Icom, Family::Kenwood, Family::Elecraft, Family::Yaesu, Family::Yaesu817];
+    pub const ALL: [Family; 6] = [
+        Family::Auto,
+        Family::Icom,
+        Family::Kenwood,
+        Family::Elecraft,
+        Family::Yaesu,
+        Family::Yaesu817,
+    ];
 
     pub fn label(&self) -> &'static str {
         match self {
@@ -75,7 +82,11 @@ impl Family {
         let w = what.to_uppercase();
         if w.starts_with("ICOM") || w.contains("XIEGU") {
             Family::Icom
-        } else if w.contains("FT-817") || w.contains("FT-818") || w.contains("FT-857") || w.contains("FT-897") {
+        } else if w.contains("FT-817")
+            || w.contains("FT-818")
+            || w.contains("FT-857")
+            || w.contains("FT-897")
+        {
             Family::Yaesu817
         } else if w.starts_with("YAESU") {
             Family::Yaesu
@@ -108,7 +119,14 @@ pub struct CatConfig {
 
 impl Default for CatConfig {
     fn default() -> Self {
-        Self { family: Family::Auto, port: String::new(), baud: 0, civ_addr: 0, max_power_w: 100.0, share_port: 4532 }
+        Self {
+            family: Family::Auto,
+            port: String::new(),
+            baud: 0,
+            civ_addr: 0,
+            max_power_w: 100.0,
+            share_port: 4532,
+        }
     }
 }
 
@@ -135,7 +153,14 @@ impl Wire for SerialWire {
         use std::io::Read;
         match self.0.read(buf) {
             Ok(n) => Ok(n),
-            Err(e) if matches!(e.kind(), std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock) => Ok(0),
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
+                ) =>
+            {
+                Ok(0)
+            }
             Err(e) => Err(e),
         }
     }
@@ -154,9 +179,19 @@ impl Wire for TcpWire {
     fn read_some(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
         use std::io::Read;
         match self.0.read(buf) {
-            Ok(0) => Err(std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "radio bridge closed the connection")),
+            Ok(0) => Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "radio bridge closed the connection",
+            )),
             Ok(n) => Ok(n),
-            Err(e) if matches!(e.kind(), std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock) => Ok(0),
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
+                ) =>
+            {
+                Ok(0)
+            }
             Err(e) => Err(e),
         }
     }
@@ -172,13 +207,17 @@ impl Wire for TcpWire {
 /// `host:port` (TCP bridge) rather than a serial device?
 pub fn is_tcp(port: &str) -> bool {
     let p = port.strip_prefix("tcp:").unwrap_or(port);
-    !port.starts_with('/') && !port.to_uppercase().starts_with("COM") && p.rsplit_once(':').is_some_and(|(_, n)| n.parse::<u16>().is_ok())
+    !port.starts_with('/')
+        && !port.to_uppercase().starts_with("COM")
+        && p.rsplit_once(':')
+            .is_some_and(|(_, n)| n.parse::<u16>().is_ok())
 }
 
 pub fn open_wire(port: &str, baud: u32) -> Result<Box<dyn Wire>> {
     if is_tcp(port) {
         let addr = port.strip_prefix("tcp:").unwrap_or(port);
-        let s = std::net::TcpStream::connect(addr).map_err(|e| anyhow!("can't reach the radio at {addr}: {e}"))?;
+        let s = std::net::TcpStream::connect(addr)
+            .map_err(|e| anyhow!("can't reach the radio at {addr}: {e}"))?;
         s.set_read_timeout(Some(Duration::from_millis(40)))?;
         s.set_nodelay(true)?;
         return Ok(Box::new(TcpWire(s)));
@@ -210,7 +249,9 @@ pub(crate) fn ascii_query(w: &mut dyn Wire, cmd: &str, prefix: &str) -> Result<S
         acc.extend_from_slice(&b[..n]);
         while let Some(i) = acc.iter().position(|&c| c == b';') {
             let reply: Vec<u8> = acc.drain(..=i).collect();
-            let text = String::from_utf8_lossy(&reply[..reply.len() - 1]).trim().to_string();
+            let text = String::from_utf8_lossy(&reply[..reply.len() - 1])
+                .trim()
+                .to_string();
             if text.starts_with(prefix) {
                 return Ok(text);
             }
@@ -237,7 +278,10 @@ pub(crate) fn num(reply: &str, skip: usize, len: Option<usize>) -> Result<i64> {
         Some(l) => s.get(..l).unwrap_or(s),
         None => s,
     };
-    s.trim().trim_start_matches('+').parse::<i64>().map_err(|_| anyhow!("odd reply from the radio: {reply}"))
+    s.trim()
+        .trim_start_matches('+')
+        .parse::<i64>()
+        .map_err(|_| anyhow!("odd reply from the radio: {reply}"))
 }
 
 /// Piecewise-linear calibration (raw meter value → real units).
@@ -315,9 +359,24 @@ pub fn poll(d: &mut dyn Driver) -> Result<RigStatus> {
     let (mode, passband_hz) = d.mode().unwrap_or_default();
     let ptt = d.ptt().unwrap_or(false);
     let caps = d.caps();
-    let strength_db = if caps.can_get_level("STRENGTH") { d.get_level("STRENGTH").ok().map(|v| v.round() as i32) } else { None };
-    let rf_power = if caps.can_get_level("RFPOWER") { d.get_level("RFPOWER").ok() } else { None };
-    Ok(RigStatus { freq_hz, mode, passband_hz, ptt, strength_db, rf_power })
+    let strength_db = if caps.can_get_level("STRENGTH") {
+        d.get_level("STRENGTH").ok().map(|v| v.round() as i32)
+    } else {
+        None
+    };
+    let rf_power = if caps.can_get_level("RFPOWER") {
+        d.get_level("RFPOWER").ok()
+    } else {
+        None
+    };
+    Ok(RigStatus {
+        freq_hz,
+        mode,
+        passband_hz,
+        ptt,
+        strength_db,
+        rf_power,
+    })
 }
 
 // ------------------------------------------------------------------ handle
@@ -351,14 +410,18 @@ impl CatHandle {
     }
 
     /// Run `f` on the radio's thread and wait for its answer.
-    pub async fn call<T: Send + 'static>(&self, f: impl FnOnce(&mut dyn Driver) -> Result<T> + Send + 'static) -> Result<T> {
+    pub async fn call<T: Send + 'static>(
+        &self,
+        f: impl FnOnce(&mut dyn Driver) -> Result<T> + Send + 'static,
+    ) -> Result<T> {
         let (otx, orx) = tokio::sync::oneshot::channel();
         self.tx
             .send(Box::new(move |d| {
                 let _ = otx.send(f(d));
             }))
             .map_err(|_| anyhow!("the radio connection has closed"))?;
-        orx.await.map_err(|_| anyhow!("the radio connection has closed"))?
+        orx.await
+            .map_err(|_| anyhow!("the radio connection has closed"))?
     }
 }
 
@@ -371,15 +434,30 @@ pub fn connect(cfg: &CatConfig) -> Result<Box<dyn Driver>> {
     let (port, mut family) = if cfg.port.trim().is_empty() {
         let found = crate::rigsetup::detect();
         let g = found.first().ok_or_else(|| anyhow!("no radio found on USB: plug it in, or choose the port in Settings → Radio connection"))?;
-        (g.port.clone(), if cfg.family == Family::Auto { Family::from_description(&g.what) } else { cfg.family })
+        (
+            g.port.clone(),
+            if cfg.family == Family::Auto {
+                Family::from_description(&g.what)
+            } else {
+                cfg.family
+            },
+        )
     } else {
         (cfg.port.trim().to_string(), cfg.family)
     };
     if family == Family::Auto && cfg.civ_addr != 0 {
         family = Family::Icom;
     }
-    let bauds: Vec<u32> = if cfg.baud > 0 || is_tcp(&port) { vec![cfg.baud.max(1)] } else { family.bauds().to_vec() };
-    let families: Vec<Family> = if family == Family::Auto { vec![Family::Icom, Family::Kenwood, Family::Yaesu817] } else { vec![family] };
+    let bauds: Vec<u32> = if cfg.baud > 0 || is_tcp(&port) {
+        vec![cfg.baud.max(1)]
+    } else {
+        family.bauds().to_vec()
+    };
+    let families: Vec<Family> = if family == Family::Auto {
+        vec![Family::Icom, Family::Kenwood, Family::Yaesu817]
+    } else {
+        vec![family]
+    };
     let mut last = anyhow!("the radio on {port} didn't answer");
     for &baud in &bauds {
         for &f in &families {
@@ -394,22 +472,38 @@ pub fn connect(cfg: &CatConfig) -> Result<Box<dyn Driver>> {
             }
             let w = w?;
             let tried = match f {
-                Family::Icom => icom::Icom::probe(w, cfg.civ_addr).map(|d| Box::new(d) as Box<dyn Driver>),
+                Family::Icom => {
+                    icom::Icom::probe(w, cfg.civ_addr).map(|d| Box::new(d) as Box<dyn Driver>)
+                }
                 // "ID;" tells Kenwood, Elecraft and Yaesu apart.
-                Family::Kenwood | Family::Elecraft | Family::Yaesu => probe_ascii(w, f, cfg.max_power_w),
+                Family::Kenwood | Family::Elecraft | Family::Yaesu => {
+                    probe_ascii(w, f, cfg.max_power_w)
+                }
                 Family::Yaesu817 => yaesu::Ft817::probe(w).map(|d| Box::new(d) as Box<dyn Driver>),
                 Family::Auto => unreachable!(),
             };
             match tried {
                 Ok(d) => {
-                    let at = if is_tcp(&port) { port.clone() } else { format!("{port} at {baud} baud") };
+                    let at = if is_tcp(&port) {
+                        port.clone()
+                    } else {
+                        format!("{port} at {baud} baud")
+                    };
                     return Ok(Box::new(Described { inner: d, at }));
                 }
                 Err(e) => last = e,
             }
         }
     }
-    Err(last.context(format!("no radio answered on {port} (tried {} at {:?} baud)", families.iter().map(|f| f.label()).collect::<Vec<_>>().join(", "), bauds)))
+    Err(last.context(format!(
+        "no radio answered on {port} (tried {} at {:?} baud)",
+        families
+            .iter()
+            .map(|f| f.label())
+            .collect::<Vec<_>>()
+            .join(", "),
+        bauds
+    )))
 }
 
 /// Ask `ID;` and build the matching ASCII driver.
@@ -419,7 +513,12 @@ fn probe_ascii(mut w: Box<dyn Wire>, hint: Family, max_w: f32) -> Result<Box<dyn
     if digits.len() >= 4 {
         Ok(Box::new(yaesu::Yaesu::new(w, &digits, max_w)?))
     } else {
-        Ok(Box::new(kenwood::Kenwood::new(w, &digits, hint == Family::Elecraft, max_w)?))
+        Ok(Box::new(kenwood::Kenwood::new(
+            w,
+            &digits,
+            hint == Family::Elecraft,
+            max_w,
+        )?))
     }
 }
 
@@ -511,8 +610,14 @@ mod tests {
         assert_eq!(Family::from_description("Icom IC-7300"), Family::Icom);
         assert_eq!(Family::from_description("Yaesu FT-991A"), Family::Yaesu);
         assert_eq!(Family::from_description("Yaesu FT-817"), Family::Yaesu817);
-        assert_eq!(Family::from_description("QRP Labs QMX/QDX"), Family::Kenwood);
-        assert_eq!(Family::from_description("USB serial (choose the model)"), Family::Auto);
+        assert_eq!(
+            Family::from_description("QRP Labs QMX/QDX"),
+            Family::Kenwood
+        );
+        assert_eq!(
+            Family::from_description("USB serial (choose the model)"),
+            Family::Auto
+        );
     }
 
     #[test]

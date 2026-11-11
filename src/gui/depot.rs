@@ -82,8 +82,13 @@ impl DepotTab {
                 ui.label("Via");
                 ui.add(egui::TextEdit::singleline(&mut self.via).hint_text("optional relay").desired_width(110.0)).help(&help::D_VIA);
             });
-            ui.add(egui::TextEdit::multiline(&mut self.text).hint_text("Your message. It waits in Departures and goes across the next time you're linked with them (or the relay).").desired_rows(2).desired_width(f32::INFINITY))
-                .help(&help::D_TEXT);
+            ui.add(
+                egui::TextEdit::multiline(&mut self.text)
+                    .hint_text("Your message. It waits in Departures and goes across the next time you're linked with them (or the relay).")
+                    .desired_rows(2)
+                    .desired_width(f32::INFINITY),
+            )
+            .help(&help::D_TEXT);
             ui.horizontal(|ui| {
                 let ok = !self.to.trim().is_empty() && !self.text.trim().is_empty();
                 if ui.add_enabled(ok, egui::Button::new(RichText::new("📮  Post").strong()).fill(BRASS.linear_multiply(0.5))).help(&help::D_POST).clicked() {
@@ -98,7 +103,12 @@ impl DepotTab {
         // Boxes.
         ui.horizontal(|ui| {
             let unread = d.unread();
-            self.tab_button(ui, Box_::Arrivals, if unread > 0 { format!("📬 Arrivals ({unread} new)") } else { format!("📬 Arrivals ({})", d.arrivals.len()) }, &help::D_ARRIVALS);
+            self.tab_button(
+                ui,
+                Box_::Arrivals,
+                if unread > 0 { format!("📬 Arrivals ({unread} new)") } else { format!("📬 Arrivals ({})", d.arrivals.len()) },
+                &help::D_ARRIVALS,
+            );
             self.tab_button(ui, Box_::Departures, format!("📮 Departures ({})", d.departures.len()), &help::D_DEPARTURES);
             self.tab_button(ui, Box_::Transit, format!("🚚 In Transit ({})", d.transit.len()), &help::D_TRANSIT);
             self.tab_button(ui, Box_::Delivered, format!("✓ Delivered ({})", d.delivered.len()), &help::D_DELIVERED);
@@ -151,7 +161,12 @@ impl DepotTab {
                     ui.label(RichText::new("Carrying mail for other stations is off (Settings → Automation).").color(AMBER));
                 }
                 if d.transit.is_empty() {
-                    ui.label(RichText::new("You're not carrying anyone's mail. With relaying on, stations can hand you mail for others; it goes on when you reach them.").color(DIM));
+                    ui.label(
+                        RichText::new(
+                            "You're not carrying anyone's mail. With relaying on, stations can hand you mail for others; it goes on when you reach them.",
+                        )
+                        .color(DIM),
+                    );
                 }
                 for m in d.transit.iter().rev() {
                     let head = format!("{} → {}{}", m.from, m.to, m.handed.as_ref().map(|h| format!("  (handed over by {h})")).unwrap_or_default());

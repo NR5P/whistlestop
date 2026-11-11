@@ -24,7 +24,11 @@ use std::time::Duration;
 /// places for this system, or anywhere on PATH.
 pub fn find_mercury(configured: &str) -> Option<PathBuf> {
     let home = dirs::home_dir().unwrap_or_default();
-    let exe = if cfg!(windows) { "mercury.exe" } else { "mercury" };
+    let exe = if cfg!(windows) {
+        "mercury.exe"
+    } else {
+        "mercury"
+    };
     let mut c: Vec<PathBuf> = vec![];
     if !configured.is_empty() {
         c.push(PathBuf::from(configured));
@@ -41,10 +45,19 @@ pub fn find_mercury(configured: &str) -> Option<PathBuf> {
         c.push(PathBuf::from("/opt/homebrew/bin/mercury"));
         c.push(PathBuf::from("/usr/local/bin/mercury"));
         c.push(PathBuf::from("/usr/bin/mercury"));
-        c.push(PathBuf::from("/Applications/Mercury.app/Contents/MacOS/mercury"));
+        c.push(PathBuf::from(
+            "/Applications/Mercury.app/Contents/MacOS/mercury",
+        ));
     }
-    c.push(home.join("Desktop").join("mercury").join("source").join(exe));
-    c.into_iter().find(|p| p.is_file()).or_else(|| crate::rigsetup::on_path("mercury"))
+    c.push(
+        home.join("Desktop")
+            .join("mercury")
+            .join("source")
+            .join(exe),
+    );
+    c.into_iter()
+        .find(|p| p.is_file())
+        .or_else(|| crate::rigsetup::on_path("mercury"))
 }
 
 pub const YOUR_DIAL: f64 = 14_096_000.0;
@@ -83,8 +96,15 @@ fn pick_ports() -> Result<(u16, u16, u16, u16)> {
         for _ in 0..200 {
             let l = std::net::TcpListener::bind("127.0.0.1:0")?;
             let p = l.local_addr()?.port();
-            let span: Vec<u16> = if pair { vec![p, p.saturating_add(1)] } else { vec![p] };
-            if p < 65534 && span.iter().all(|q| !taken.contains(q)) && (!pair || std::net::TcpListener::bind(("127.0.0.1", p + 1)).is_ok()) {
+            let span: Vec<u16> = if pair {
+                vec![p, p.saturating_add(1)]
+            } else {
+                vec![p]
+            };
+            if p < 65534
+                && span.iter().all(|q| !taken.contains(q))
+                && (!pair || std::net::TcpListener::bind(("127.0.0.1", p + 1)).is_ok())
+            {
                 taken.extend(span);
                 return Ok(p);
             }
@@ -98,7 +118,10 @@ fn pick_ports() -> Result<(u16, u16, u16, u16)> {
 async fn wait_port(port: u16, secs: u64) -> bool {
     let t = std::time::Instant::now();
     while t.elapsed() < Duration::from_secs(secs) {
-        if tokio::net::TcpStream::connect(("127.0.0.1", port)).await.is_ok() {
+        if tokio::net::TcpStream::connect(("127.0.0.1", port))
+            .await
+            .is_ok()
+        {
             return true;
         }
         tokio::time::sleep(Duration::from_millis(150)).await;
@@ -110,16 +133,38 @@ async fn wait_port(port: u16, secs: u64) -> bool {
 pub async fn start(mercury: &std::path::Path) -> Result<RealDemo> {
     // Unix socket paths must stay under ~104 bytes; some temp folders are long.
     let base = std::env::temp_dir();
-    let base = if base.as_os_str().len() > 60 { PathBuf::from("/tmp") } else { base };
+    let base = if base.as_os_str().len() > 60 {
+        PathBuf::from("/tmp")
+    } else {
+        base
+    };
     let dir = base.join(format!("whistlestop-demo-{}", std::process::id()));
     std::fs::create_dir_all(&dir)?;
     let (sa, sb) = (dir.join("you.sock"), dir.join("k7bot.sock"));
     let ether = Ether::start(
         vec![
-            StationCfg { name: "you".into(), sock_path: sa.clone(), rig_port: 0, audio_port: 0, dial_hz: YOUR_DIAL, hear_own_tx: true },
-            StationCfg { name: demo_bot::CALL.into(), sock_path: sb.clone(), rig_port: 0, audio_port: 0, dial_hz: BOT_DIAL, hear_own_tx: false },
+            StationCfg {
+                name: "you".into(),
+                sock_path: sa.clone(),
+                rig_port: 0,
+                audio_port: 0,
+                dial_hz: YOUR_DIAL,
+                hear_own_tx: true,
+            },
+            StationCfg {
+                name: demo_bot::CALL.into(),
+                sock_path: sb.clone(),
+                rig_port: 0,
+                audio_port: 0,
+                dial_hz: BOT_DIAL,
+                hear_own_tx: false,
+            },
         ],
-        Channel { noise_dbfs: -42.0, path_loss_db: 0.0, fading: 0.15 },
+        Channel {
+            noise_dbfs: -42.0,
+            path_loss_db: 0.0,
+            fading: 0.15,
+        },
     )?;
     let (pa, pb, ba, bb) = pick_ports()?;
     let stop = Arc::new(AtomicBool::new(false));
@@ -133,11 +178,21 @@ pub async fn start(mercury: &std::path::Path) -> Result<RealDemo> {
         stop: stop.clone(),
         dir: dir.clone(),
     };
-    for (sock, port, bport, log) in [(&sa, pa, ba, "mercury-you.log"), (&sb, pb, bb, "mercury-k7bot.log")] {
+    for (sock, port, bport, log) in [
+        (&sa, pa, ba, "mercury-you.log"),
+        (&sb, pb, bb, "mercury-k7bot.log"),
+    ] {
         let out = std::fs::File::create(dir.join(log))?;
         demo.mercs.push(
             Command::new(mercury)
-                .args(["-x", "sock", "-p", &port.to_string(), "-b", &bport.to_string()])
+                .args([
+                    "-x",
+                    "sock",
+                    "-p",
+                    &port.to_string(),
+                    "-b",
+                    &bport.to_string(),
+                ])
                 .env("MERCURY_AUDIO_SOCK", sock)
                 .current_dir(&dir)
                 .stdout(Stdio::from(out.try_clone()?))
@@ -148,10 +203,18 @@ pub async fn start(mercury: &std::path::Path) -> Result<RealDemo> {
     }
     for p in [pa, pb, ba, bb] {
         if !wait_port(p, 20).await {
-            return Err(anyhow!("Mercury didn't open port {p} (logs in {})", dir.display()));
+            return Err(anyhow!(
+                "Mercury didn't open port {p} (logs in {})",
+                dir.display()
+            ));
         }
     }
-    let ports = BotPorts { mercury: pb, bcast: bb, rig: demo.ether.ports[1].0, audio: demo.ether.ports[1].1 };
+    let ports = BotPorts {
+        mercury: pb,
+        bcast: bb,
+        rig: demo.ether.ports[1].0,
+        audio: demo.ether.ports[1].1,
+    };
     tokio::spawn(async move {
         if let Err(e) = demo_bot::run(ports, stop).await {
             eprintln!("K7BOT: {e}");

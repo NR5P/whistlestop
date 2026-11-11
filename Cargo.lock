@@ -4777,6 +4777,7 @@ dependencies = [
  "dirs",
  "eframe",
  "egui_kittest",
+ "getrandom 0.3.4",
  "hex",
  "hkdf",
  "hound",

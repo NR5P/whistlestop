@@ -61,73 +61,74 @@ impl Guide {
         ui.allocate_ui_with_layout(vec2(w, h), Layout::left_to_right(Align::Min), |ui| {
             // Contents and search.
             ui.allocate_ui_with_layout(vec2(240.0, h), Layout::top_down(Align::Min), |ui| {
-            Frame::NONE.fill(CARD).stroke(Stroke::new(1.0, BORDER)).corner_radius(10.0).inner_margin(Margin::same(10)).show(ui, |ui| {
-                ui.set_width(218.0);
-                ui.set_min_height(h - 22.0);
-                ui.label(RichText::new("CONTENTS").size(11.0).color(DIM).strong());
-                let r = ui.add(egui::TextEdit::singleline(&mut self.query).hint_text("🔍 Search the guide").desired_width(f32::INFINITY));
-                if r.changed() {
-                    if let Some(i) = (0..self.sections.len()).find(|&i| self.matches(i))
-                        && !self.matches(self.selected) {
+                Frame::NONE.fill(CARD).stroke(Stroke::new(1.0, BORDER)).corner_radius(10.0).inner_margin(Margin::same(10)).show(ui, |ui| {
+                    ui.set_width(218.0);
+                    ui.set_min_height(h - 22.0);
+                    ui.label(RichText::new("CONTENTS").size(11.0).color(DIM).strong());
+                    let r = ui.add(egui::TextEdit::singleline(&mut self.query).hint_text("🔍 Search the guide").desired_width(f32::INFINITY));
+                    if r.changed() {
+                        if let Some(i) = (0..self.sections.len()).find(|&i| self.matches(i))
+                            && !self.matches(self.selected)
+                        {
                             self.selected = i;
                         }
-                    self.to_top = true;
-                }
-                ui.add_space(4.0);
-                egui::ScrollArea::vertical().id_salt("guide-toc").auto_shrink([false, false]).show(ui, |ui| {
-                    for i in 0..self.sections.len() {
-                        if !self.matches(i) {
-                            continue;
-                        }
-                        let on = i == self.selected;
-                        let b = egui::Button::new(RichText::new(&self.sections[i].title).color(if on { Color32::from_rgb(20, 16, 10) } else { TEXT }))
-                            .fill(if on { BRASS } else { Color32::TRANSPARENT })
-                            .min_size(egui::vec2(ui.available_width(), 24.0));
-                        if ui.add(b).clicked() {
-                            self.selected = i;
-                            self.to_top = true;
-                        }
+                        self.to_top = true;
                     }
-                    if !(0..self.sections.len()).any(|i| self.matches(i)) {
-                        ui.label(RichText::new("Nothing found.").color(DIM));
-                    }
-                });
-            });
-            });
-            // The section.
-            let bw = ui.available_width();
-            ui.allocate_ui_with_layout(vec2(bw, h), Layout::top_down(Align::Min), |ui| {
-            Frame::NONE.fill(CARD).stroke(Stroke::new(1.0, BORDER)).corner_radius(10.0).inner_margin(Margin::symmetric(22, 14)).show(ui, |ui| {
-                ui.set_width(bw - 46.0);
-                ui.set_min_height(h - 30.0);
-                let mut sa = egui::ScrollArea::vertical().id_salt("guide-body").auto_shrink([false, false]);
-                if self.to_top {
-                    sa = sa.vertical_scroll_offset(0.0);
-                    self.to_top = false;
-                }
-                let sel = self.selected.min(self.sections.len().saturating_sub(1));
-                let q = self.query.trim().to_lowercase();
-                let text_w = (bw - 80.0).clamp(300.0, 900.0);
-                sa.show(ui, |ui| {
-                    ui.set_max_width(text_w);
-                    let s = &self.sections[sel];
-                    ui.label(RichText::new(&s.title).size(24.0).strong().color(BRASS));
-                    ui.add_space(6.0);
-                    render(ui, &s.body, &q);
-                    ui.add_space(20.0);
-                    // Next / previous.
-                    ui.horizontal(|ui| {
-                        if sel > 0 && ui.button(format!("← {}", self.sections[sel - 1].title)).clicked() {
-                            self.selected = sel - 1;
-                            self.to_top = true;
+                    ui.add_space(4.0);
+                    egui::ScrollArea::vertical().id_salt("guide-toc").auto_shrink([false, false]).show(ui, |ui| {
+                        for i in 0..self.sections.len() {
+                            if !self.matches(i) {
+                                continue;
+                            }
+                            let on = i == self.selected;
+                            let b = egui::Button::new(RichText::new(&self.sections[i].title).color(if on { Color32::from_rgb(20, 16, 10) } else { TEXT }))
+                                .fill(if on { BRASS } else { Color32::TRANSPARENT })
+                                .min_size(egui::vec2(ui.available_width(), 24.0));
+                            if ui.add(b).clicked() {
+                                self.selected = i;
+                                self.to_top = true;
+                            }
                         }
-                        if sel + 1 < self.sections.len() && ui.button(format!("{} →", self.sections[sel + 1].title)).clicked() {
-                            self.selected = sel + 1;
-                            self.to_top = true;
+                        if !(0..self.sections.len()).any(|i| self.matches(i)) {
+                            ui.label(RichText::new("Nothing found.").color(DIM));
                         }
                     });
                 });
             });
+            // The section.
+            let bw = ui.available_width();
+            ui.allocate_ui_with_layout(vec2(bw, h), Layout::top_down(Align::Min), |ui| {
+                Frame::NONE.fill(CARD).stroke(Stroke::new(1.0, BORDER)).corner_radius(10.0).inner_margin(Margin::symmetric(22, 14)).show(ui, |ui| {
+                    ui.set_width(bw - 46.0);
+                    ui.set_min_height(h - 30.0);
+                    let mut sa = egui::ScrollArea::vertical().id_salt("guide-body").auto_shrink([false, false]);
+                    if self.to_top {
+                        sa = sa.vertical_scroll_offset(0.0);
+                        self.to_top = false;
+                    }
+                    let sel = self.selected.min(self.sections.len().saturating_sub(1));
+                    let q = self.query.trim().to_lowercase();
+                    let text_w = (bw - 80.0).clamp(300.0, 900.0);
+                    sa.show(ui, |ui| {
+                        ui.set_max_width(text_w);
+                        let s = &self.sections[sel];
+                        ui.label(RichText::new(&s.title).size(24.0).strong().color(BRASS));
+                        ui.add_space(6.0);
+                        render(ui, &s.body, &q);
+                        ui.add_space(20.0);
+                        // Next / previous.
+                        ui.horizontal(|ui| {
+                            if sel > 0 && ui.button(format!("← {}", self.sections[sel - 1].title)).clicked() {
+                                self.selected = sel - 1;
+                                self.to_top = true;
+                            }
+                            if sel + 1 < self.sections.len() && ui.button(format!("{} →", self.sections[sel + 1].title)).clicked() {
+                                self.selected = sel + 1;
+                                self.to_top = true;
+                            }
+                        });
+                    });
+                });
             });
         });
     }
@@ -251,12 +252,21 @@ fn render(ui: &mut Ui, lines: &[String], q: &str) {
             continue;
         } else if let Some(n) = t.strip_prefix("> ") {
             flush(ui, &mut paragraph);
-            Frame::NONE.fill(BRASS.linear_multiply(0.12)).stroke(Stroke::new(1.0, BRASS.linear_multiply(0.5))).corner_radius(8.0).inner_margin(Margin::same(10)).show(ui, |ui| {
-                ui.set_width(ui.available_width());
-                para(ui, n, q);
-            });
+            Frame::NONE
+                .fill(BRASS.linear_multiply(0.12))
+                .stroke(Stroke::new(1.0, BRASS.linear_multiply(0.5)))
+                .corner_radius(8.0)
+                .inner_margin(Margin::same(10))
+                .show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    para(ui, n, q);
+                });
             ui.add_space(6.0);
-        } else if t.starts_with("- ") || t.chars().next().is_some_and(|c| c.is_ascii_digit()) && t.contains(". ") && t.split(". ").next().is_some_and(|n| n.chars().all(|c| c.is_ascii_digit())) {
+        } else if t.starts_with("- ")
+            || t.chars().next().is_some_and(|c| c.is_ascii_digit())
+                && t.contains(". ")
+                && t.split(". ").next().is_some_and(|n| n.chars().all(|c| c.is_ascii_digit()))
+        {
             flush(ui, &mut paragraph);
             let indent = l.len() - l.trim_start().len();
             let (marker, text) = if let Some(x) = t.strip_prefix("- ") {
@@ -284,7 +294,8 @@ mod tests {
     fn guide_has_its_sections() {
         let g = super::Guide::default();
         let titles: Vec<&str> = g.sections.iter().map(|s| s.title.as_str()).collect();
-        for want in ["Welcome", "The whistle", "Calling CQ", "Finding stations", "Files", "Roundtables", "Encryption (optional)", "Troubleshooting", "Glossary"] {
+        for want in ["Welcome", "The whistle", "Calling CQ", "Finding stations", "Files", "Roundtables", "Encryption (optional)", "Troubleshooting", "Glossary"]
+        {
             assert!(titles.contains(&want), "missing {want}: {titles:?}");
         }
     }

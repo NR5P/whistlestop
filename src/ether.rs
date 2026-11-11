@@ -51,7 +51,11 @@ pub struct Channel {
 
 impl Default for Channel {
     fn default() -> Self {
-        Self { noise_dbfs: -45.0, path_loss_db: 0.0, fading: 0.0 }
+        Self {
+            noise_dbfs: -45.0,
+            path_loss_db: 0.0,
+            fading: 0.0,
+        }
     }
 }
 
@@ -86,7 +90,10 @@ pub struct Ether {
 
 impl Ether {
     pub fn stats(&self) -> Vec<StationStats> {
-        self.stations.iter().map(|s| s.lock().unwrap().stats.clone()).collect()
+        self.stations
+            .iter()
+            .map(|s| s.lock().unwrap().stats.clone())
+            .collect()
     }
 
     pub fn stop(&self) {
@@ -100,7 +107,10 @@ impl Ether {
                 .map(|c| {
                     Mutex::new(Station {
                         _cfg: c.clone(),
-                        stats: StationStats { dial_hz: c.dial_hz, ..Default::default() },
+                        stats: StationStats {
+                            dial_hz: c.dial_hz,
+                            ..Default::default()
+                        },
                         app_tx: VecDeque::new(),
                         app_out: None,
                     })
@@ -123,9 +133,16 @@ impl Ether {
         }
         {
             let (stations, channel, stop) = (stations.clone(), channel.clone(), stop.clone());
-            std::thread::Builder::new().name("ether".into()).spawn(move || run(stations, channel, mercury_listeners, stop))?;
+            std::thread::Builder::new()
+                .name("ether".into())
+                .spawn(move || run(stations, channel, mercury_listeners, stop))?;
         }
-        Ok(Ether { channel, ports, stations, stop })
+        Ok(Ether {
+            channel,
+            ports,
+            stations,
+            stop,
+        })
     }
 }
 
@@ -206,7 +223,10 @@ fn spawn_app_audio(l: TcpListener, st: Arc<Vec<Mutex<Station>>>, i: usize, stop:
                     };
                     carry.extend_from_slice(&buf[..n]);
                     let whole = carry.len() / 4 * 4;
-                    let samples: Vec<f32> = carry[..whole].chunks(4).map(|b| f32::from_le_bytes(b.try_into().unwrap())).collect();
+                    let samples: Vec<f32> = carry[..whole]
+                        .chunks(4)
+                        .map(|b| f32::from_le_bytes(b.try_into().unwrap()))
+                        .collect();
                     carry.drain(..whole);
                     st[i].lock().unwrap().app_tx.extend(samples);
                 }
@@ -227,7 +247,11 @@ fn hilbert_taps(n: usize) -> Vec<f64> {
             // ~70 dB down, as in a real receiver.
             let x = 2.0 * PI * i as f64 / (n - 1) as f64;
             let w = 0.42 - 0.5 * x.cos() + 0.08 * (2.0 * x).cos();
-            if k % 2 == 0 { 0.0 } else { 2.0 / (PI * k as f64) * w }
+            if k % 2 == 0 {
+                0.0
+            } else {
+                2.0 / (PI * k as f64) * w
+            }
         })
         .collect()
 }
@@ -237,7 +261,13 @@ fn bandpass_taps(n: usize, lo: f64, hi: f64) -> Vec<f64> {
     (0..n)
         .map(|i| {
             let x = i as f64 - m;
-            let lp = |fc: f64| if x == 0.0 { 2.0 * fc / FS } else { (2.0 * PI * fc / FS * x).sin() / (PI * x) };
+            let lp = |fc: f64| {
+                if x == 0.0 {
+                    2.0 * fc / FS
+                } else {
+                    (2.0 * PI * fc / FS * x).sin() / (PI * x)
+                }
+            };
             let w = 0.54 - 0.46 * (2.0 * PI * i as f64 / (n - 1) as f64).cos();
             (lp(hi) - lp(lo)) * w
         })
@@ -253,12 +283,19 @@ struct Fir {
 impl Fir {
     fn new(taps: Vec<f64>) -> Self {
         let n = taps.len();
-        Self { taps, hist: VecDeque::from(vec![0.0; n]) }
+        Self {
+            taps,
+            hist: VecDeque::from(vec![0.0; n]),
+        }
     }
     fn step(&mut self, x: f64) -> f64 {
         self.hist.pop_front();
         self.hist.push_back(x);
-        self.hist.iter().zip(self.taps.iter().rev()).map(|(a, b)| a * b).sum()
+        self.hist
+            .iter()
+            .zip(self.taps.iter().rev())
+            .map(|(a, b)| a * b)
+            .sum()
     }
 }
 
@@ -276,17 +313,29 @@ impl CFir {
     fn usb_passband() -> Self {
         let lp = bandpass_taps(127, 0.0, 1200.0);
         let m = (lp.len() - 1) as f64 / 2.0;
-        let (re, im) = lp.iter().enumerate().map(|(i, h)| {
-            let ph = 2.0 * PI * 1500.0 * (i as f64 - m) / FS;
-            (h * ph.cos(), h * ph.sin())
-        }).unzip();
-        Self { re, im, hist: VecDeque::from(vec![(0.0, 0.0); 127]) }
+        let (re, im) = lp
+            .iter()
+            .enumerate()
+            .map(|(i, h)| {
+                let ph = 2.0 * PI * 1500.0 * (i as f64 - m) / FS;
+                (h * ph.cos(), h * ph.sin())
+            })
+            .unzip();
+        Self {
+            re,
+            im,
+            hist: VecDeque::from(vec![(0.0, 0.0); 127]),
+        }
     }
     fn step(&mut self, x: (f64, f64)) -> (f64, f64) {
         self.hist.pop_front();
         self.hist.push_back(x);
         let (mut a, mut b) = (0.0, 0.0);
-        for ((xr, xi), (hr, hi)) in self.hist.iter().zip(self.re.iter().rev().zip(self.im.iter().rev())) {
+        for ((xr, xi), (hr, hi)) in self
+            .hist
+            .iter()
+            .zip(self.re.iter().rev().zip(self.im.iter().rev()))
+        {
             a += xr * hr - xi * hi;
             b += xr * hi + xi * hr;
         }
@@ -307,7 +356,13 @@ const HILBERT_N: usize = 511;
 
 impl Path {
     fn new(seed: f64) -> Self {
-        Self { hilbert: Fir::new(hilbert_taps(HILBERT_N)), delay: VecDeque::from(vec![0.0; HILBERT_N / 2]), phase: 0.0, fade_phase: seed, rx: CFir::usb_passband() }
+        Self {
+            hilbert: Fir::new(hilbert_taps(HILBERT_N)),
+            delay: VecDeque::from(vec![0.0; HILBERT_N / 2]),
+            phase: 0.0,
+            fade_phase: seed,
+            rx: CFir::usb_passband(),
+        }
     }
     fn process(&mut self, x: &[f64], delta_hz: f64, gain: f64, fading: f64, out: &mut [f64]) {
         let dphi = 2.0 * PI * delta_hz / FS;
@@ -321,7 +376,8 @@ impl Path {
             let s = self.rx.step((i * c - q * sn, i * sn + q * c)).0;
             self.phase = (self.phase + dphi) % (2.0 * PI);
             self.fade_phase += 2.0 * PI * 0.11 / FS;
-            let fade = 1.0 - fading * 0.5 * (1.0 + (self.fade_phase.sin() * (0.37 * self.fade_phase).cos()));
+            let fade = 1.0
+                - fading * 0.5 * (1.0 + (self.fade_phase.sin() * (0.37 * self.fade_phase).cos()));
             *o += s * gain * fade.max(0.02);
         }
     }
@@ -347,12 +403,21 @@ fn read_exact_timeout(s: &mut UnixStream, buf: &mut [u8]) -> std::io::Result<()>
     s.read_exact(buf)
 }
 
-fn run(stations: Arc<Vec<Mutex<Station>>>, channel: Arc<Mutex<Channel>>, listeners: Vec<UnixListener>, stop: Arc<AtomicBool>) {
+fn run(
+    stations: Arc<Vec<Mutex<Station>>>,
+    channel: Arc<Mutex<Channel>>,
+    listeners: Vec<UnixListener>,
+    stop: Arc<AtomicBool>,
+) {
     let n = stations.len();
     let mut merc: Vec<Option<UnixStream>> = (0..n).map(|_| None).collect();
     let mut tx_prev: Vec<Vec<f64>> = vec![vec![0.0; BLOCK]; n];
-    let mut paths: Vec<Vec<Path>> = (0..n).map(|r| (0..n).map(|t| Path::new((r * 7 + t * 3) as f64)).collect()).collect();
-    let mut bpf: Vec<Fir> = (0..n).map(|_| Fir::new(bandpass_taps(127, 300.0, 2700.0))).collect();
+    let mut paths: Vec<Vec<Path>> = (0..n)
+        .map(|r| (0..n).map(|t| Path::new((r * 7 + t * 3) as f64)).collect())
+        .collect();
+    let mut bpf: Vec<Fir> = (0..n)
+        .map(|_| Fir::new(bandpass_taps(127, 300.0, 2700.0)))
+        .collect();
     let mut rng = Rng(0x9e3779b97f4a7c15);
     let start = Instant::now();
     let mut seq = 0u64;
@@ -361,12 +426,13 @@ fn run(stations: Arc<Vec<Mutex<Station>>>, channel: Arc<Mutex<Channel>>, listene
         // Accept Mercury connections as they arrive.
         for (i, l) in listeners.iter().enumerate() {
             if merc[i].is_none()
-                && let Ok((s, _)) = l.accept() {
-                    s.set_nonblocking(false).ok();
-                    s.set_read_timeout(Some(Duration::from_secs(2))).ok();
-                    merc[i] = Some(s);
-                    stations[i].lock().unwrap().stats.mercury_connected = true;
-                }
+                && let Ok((s, _)) = l.accept()
+            {
+                s.set_nonblocking(false).ok();
+                s.set_read_timeout(Some(Duration::from_secs(2))).ok();
+                merc[i] = Some(s);
+                stations[i].lock().unwrap().stats.mercury_connected = true;
+            }
         }
         let ch = channel.lock().unwrap().clone();
         let noise_rms = 10f64.powf(ch.noise_dbfs / 20.0) * (FS / 2.0 / 2500.0).sqrt();
@@ -428,7 +494,9 @@ fn run(stations: Arc<Vec<Mutex<Station>>>, channel: Arc<Mutex<Channel>>, listene
                 let ok = s.write_all(&f).is_ok() && {
                     let mut len = [0u8; 4];
                     let mut hdr = [0u8; 11];
-                    if read_exact_timeout(s, &mut len).is_ok() && read_exact_timeout(s, &mut hdr).is_ok() {
+                    if read_exact_timeout(s, &mut len).is_ok()
+                        && read_exact_timeout(s, &mut hdr).is_ok()
+                    {
                         let ptt = hdr[8] == 1;
                         let cnt = u16::from_le_bytes([hdr[9], hdr[10]]) as usize;
                         let mut pay = vec![0u8; cnt * 2];
@@ -455,7 +523,10 @@ fn run(stations: Arc<Vec<Mutex<Station>>>, channel: Arc<Mutex<Channel>>, listene
             // while the virtual radio is keyed.
             let mut g = stations[i].lock().unwrap();
             if let Some(o) = g.app_out.as_mut() {
-                let bytes: Vec<u8> = app_rx[i].iter().flat_map(|v| (*v as f32).to_le_bytes()).collect();
+                let bytes: Vec<u8> = app_rx[i]
+                    .iter()
+                    .flat_map(|v| (*v as f32).to_le_bytes())
+                    .collect();
                 if o.write_all(&bytes).is_err() {
                     g.app_out = None;
                 }
@@ -494,7 +565,9 @@ mod tests {
     fn path_shifts_frequency() {
         // A 1000 Hz tone heard 400 Hz up comes out at 1400 Hz.
         let mut p = Path::new(0.0);
-        let x: Vec<f64> = (0..8000).map(|i| (2.0 * PI * 1000.0 * i as f64 / FS).sin()).collect();
+        let x: Vec<f64> = (0..8000)
+            .map(|i| (2.0 * PI * 1000.0 * i as f64 / FS).sin())
+            .collect();
         let mut y = vec![0.0; 8000];
         p.process(&x, 400.0, 1.0, 0.0, &mut y);
         let y = &y[1000..];
@@ -519,7 +592,9 @@ mod tests {
         // Like a real USB receiver: a station 2600 Hz below the dial (in the
         // opposite sideband) and one 3450 Hz above (past the top of the
         // audio band) are not heard; one 400 Hz above is.
-        let x: Vec<f64> = (0..8000).map(|i| (2.0 * PI * 1500.0 * i as f64 / FS).sin()).collect();
+        let x: Vec<f64> = (0..8000)
+            .map(|i| (2.0 * PI * 1500.0 * i as f64 / FS).sin())
+            .collect();
         let rms = |delta: f64| {
             let mut p = Path::new(0.0);
             let mut y = vec![0.0; 8000];
@@ -528,15 +603,25 @@ mod tests {
         };
         let heard = rms(400.0);
         assert!(heard > 0.5, "{heard}");
-        assert!(rms(-2600.0) < 0.02 * heard, "opposite sideband leaked: {}", rms(-2600.0));
-        assert!(rms(3450.0) < 0.02 * heard, "fold-over leaked: {}", rms(3450.0));
+        assert!(
+            rms(-2600.0) < 0.02 * heard,
+            "opposite sideband leaked: {}",
+            rms(-2600.0)
+        );
+        assert!(
+            rms(3450.0) < 0.02 * heard,
+            "fold-over leaked: {}",
+            rms(3450.0)
+        );
     }
 
     #[test]
     fn mirror_image_is_far_down() {
         // A strong 1500 Hz tone shifted 3450 Hz up must not leave a mirror
         // image at 3450 − 1500 = 1950 Hz (a receiver's image rejection).
-        let x: Vec<f64> = (0..16000).map(|i| (2.0 * PI * 1500.0 * i as f64 / FS).sin()).collect();
+        let x: Vec<f64> = (0..16000)
+            .map(|i| (2.0 * PI * 1500.0 * i as f64 / FS).sin())
+            .collect();
         let level = |delta: f64, f: f64| {
             let mut p = Path::new(0.0);
             let mut y = vec![0.0; x.len()];

@@ -16,7 +16,11 @@ pub struct Segment {
 }
 
 pub fn default_segments() -> Vec<Segment> {
-    let s = |band: &str, lo: f64, hi: f64| Segment { band: band.into(), lo_hz: lo * 1e3, hi_hz: hi * 1e3 };
+    let s = |band: &str, lo: f64, hi: f64| Segment {
+        band: band.into(),
+        lo_hz: lo * 1e3,
+        hi_hz: hi * 1e3,
+    };
     vec![
         s("80m", 3585.0, 3600.0),
         s("40m", 7100.0, 7105.0),
@@ -45,7 +49,10 @@ pub fn band_of(hz: f64) -> Option<&'static str> {
         ("12m", 24890.0, 24990.0),
         ("10m", 28000.0, 29700.0),
     ];
-    bands.iter().find(|(_, lo, hi)| k >= *lo && k <= *hi).map(|b| b.0)
+    bands
+        .iter()
+        .find(|(_, lo, hi)| k >= *lo && k <= *hi)
+        .map(|b| b.0)
 }
 
 /// USB dial frequencies that cover `seg` with receive passbands
@@ -60,11 +67,13 @@ pub fn channels(seg: &Segment, step_hz: f64, audio_lo: f64, audio_hi: f64) -> Ve
         return vec![(0.5 * (seg.lo_hz + seg.hi_hz) - mid_audio).round()];
     }
     let n = ((last - first) / step_hz).ceil() as usize;
-    (0..=n).map(|i| (first + (last - first) * i as f64 / n.max(1) as f64).round()).collect()
+    (0..=n)
+        .map(|i| (first + (last - first) * i as f64 / n.max(1) as f64).round())
+        .collect()
 }
 
 /// What a search covers.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum SearchScope {
     /// The segment(s) of the band the radio is on now.
     CurrentBand,
@@ -77,7 +86,11 @@ pub enum SearchScope {
 pub fn segments_for(scope: &SearchScope, all: &[Segment], dial_hz: f64) -> Vec<Segment> {
     match scope {
         SearchScope::AllBands => all.to_vec(),
-        SearchScope::Band(b) => all.iter().filter(|s| s.band.eq_ignore_ascii_case(b)).cloned().collect(),
+        SearchScope::Band(b) => all
+            .iter()
+            .filter(|s| s.band.eq_ignore_ascii_case(b))
+            .cloned()
+            .collect(),
         SearchScope::CurrentBand => match band_of(dial_hz) {
             Some(b) => all.iter().filter(|s| s.band == b).cloned().collect(),
             None => vec![],
@@ -91,7 +104,11 @@ mod tests {
 
     #[test]
     fn channels_cover_the_segment() {
-        let seg = Segment { band: "20m".into(), lo_hz: 14_100_500.0, hi_hz: 14_112_000.0 };
+        let seg = Segment {
+            band: "20m".into(),
+            lo_hz: 14_100_500.0,
+            hi_hz: 14_112_000.0,
+        };
         let ch = channels(&seg, 1800.0, 300.0, 2700.0);
         assert_eq!(*ch.first().unwrap(), 14_100_200.0);
         assert_eq!(*ch.last().unwrap(), 14_109_300.0);
@@ -100,7 +117,11 @@ mod tests {
 
     #[test]
     fn narrow_segment_gets_one_channel() {
-        let seg = Segment { band: "40m".into(), lo_hz: 7_100_000.0, hi_hz: 7_102_000.0 };
+        let seg = Segment {
+            band: "40m".into(),
+            lo_hz: 7_100_000.0,
+            hi_hz: 7_102_000.0,
+        };
         assert_eq!(channels(&seg, 1800.0, 300.0, 2700.0), vec![7_099_500.0]);
     }
 

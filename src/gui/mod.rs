@@ -2,24 +2,23 @@
 
 mod depot;
 mod guide;
-pub mod icon;
-mod rigwin;
 mod help;
+pub mod icon;
+mod remote;
+mod rigwin;
 mod waterfall;
 
 use help::Help;
 
+use eframe::egui::{self, Align, Align2, Color32, CornerRadius, FontId, Frame, Layout, Margin, Pos2, Rect, RichText, Sense, Stroke, StrokeKind, Ui, vec2};
+use std::time::{Duration, Instant};
+use waterfall::Waterfall;
 use whistlestop::bandplan::{self, SearchScope};
 use whistlestop::config::Config;
 use whistlestop::e2e::{self, Policy};
 use whistlestop::engine::{self, Cmd, Dir, E2eView, Handle, State, Who, XferState};
 use whistlestop::modes::{self, Bandwidth};
 use whistlestop::protocol;
-use eframe::egui::{
-    self, Align, Align2, Color32, CornerRadius, FontId, Frame, Layout, Margin, Pos2, Rect, RichText, Sense, Stroke, StrokeKind, Ui, vec2,
-};
-use std::time::{Duration, Instant};
-use waterfall::Waterfall;
 
 // ------------------------------------------------------------------ theme
 
@@ -151,6 +150,19 @@ enum Tab {
 
 pub struct App {
     h: Handle,
+    /// Waterfall rows already shown (engine row counter).
+    audio_seen: u64,
+    rm: remote::RemoteWin,
+    /// Operating a radio computer from here.
+    client: Option<whistlestop::remote::Client>,
+    /// This computer's own engine and settings, kept while operating
+    /// another.
+    local_h: Option<Handle>,
+    local_cfg: Option<Config>,
+    /// Sharing this station on the LAN.
+    server: Option<whistlestop::remote::Server>,
+    shared_cfg: std::sync::Arc<std::sync::Mutex<(u64, Config)>>,
+    cfg_ver: u64,
     cfg: Config,
     tab: Tab,
     chat_input: String,
@@ -208,7 +220,15 @@ impl App {
         let cfg = Config::load();
         h.send(Cmd::Start(cfg.clone()));
         let first_run = !whistlestop::config::path().exists();
-        Self {
+        let mut app = Self {
+            audio_seen: 0,
+            rm: remote::RemoteWin { addr: cfg.remote_addr.clone(), ..Default::default() },
+            client: None,
+            local_h: None,
+            local_cfg: None,
+            server: None,
+            shared_cfg: std::sync::Arc::new(std::sync::Mutex::new((0, cfg.clone()))),
+            cfg_ver: 0,
             h,
             tab: Tab::Chat,
             chat_input: String::new(),
@@ -244,13 +264,72 @@ impl App {
             hover_sent: None,
             hover_at: None,
             e2e_confirm: None,
-            tour: std::env::var_os("WHISTLESTOP_SHOTS").map(|d| Tour {
-                dir: d.into(),
-                step: 0,
-                at: Instant::now(),
-                started: Instant::now(),
-            }),
+            tour: std::env::var_os("WHISTLESTOP_SHOTS").map(|d| Tour { dir: d.into(), step: 0, at: Instant::now(), started: Instant::now() }),
+        };
+        app.start_server();
+        app
+    }
+
+    /// Share this station on the LAN (or stop), by the settings.
+    fn start_server(&mut self) {
+        self.server = None;
+        let c = self.local_cfg.as_ref().unwrap_or(&self.cfg).clone();
+        if !c.remote_serve || c.remote_password.trim().len() < 4 {
+            return;
         }
+        let handle = self.local_h.clone().unwrap_or_else(|| self.h.clone());
+        let shared = whistlestop::remote::Shared { handle, cfg: self.shared_cfg.clone(), devices: self.devices.clone() };
+        match whistlestop::remote::serve(c.remote_port, &c.remote_password, shared) {
+            Ok(srv) => self.server = Some(srv),
+            Err(e) => self.toast(format!("Remote sharing: {e}")),
+        }
+    }
+
+    /// Let the remote server see (and serve) the settings in force.
+    fn publish_cfg(&mut self) {
+        let mut g = self.shared_cfg.lock().unwrap();
+        g.0 += 1;
+        g.1 = self.cfg.clone();
+        self.cfg_ver = g.0;
+    }
+
+    fn connect_remote(&mut self, ctx: &egui::Context, addr: String, password: String) {
+        let repaint = {
+            let ctx = ctx.clone();
+            std::sync::Arc::new(move || ctx.request_repaint()) as std::sync::Arc<dyn Fn() + Send + Sync>
+        };
+        match whistlestop::remote::connect(&addr, &password, self.cfg.download_dir.clone(), self.cfg.monitor_device.clone(), repaint) {
+            Ok(c) => {
+                self.cfg.remote_addr = addr;
+                let _ = self.cfg.save();
+                // This computer's engine rests while you operate the other.
+                self.h.send(Cmd::Stop);
+                self.local_h = Some(std::mem::replace(&mut self.h, c.handle.clone()));
+                self.local_cfg = Some(std::mem::replace(&mut self.cfg, c.cfg.clone()));
+                self.devices = c.devices.clone();
+                self.audio_seen = 0;
+                self.toast(format!("Operating {}", c.desc));
+                self.rm.error = None;
+                self.rm.open = false;
+                self.client = Some(c);
+            }
+            Err(e) => self.rm.error = Some(format!("{e:#}")),
+        }
+    }
+
+    fn disconnect_remote(&mut self, why: &str) {
+        let Some(c) = self.client.take() else { return };
+        drop(c);
+        if let Some(h) = self.local_h.take() {
+            self.h = h;
+        }
+        if let Some(cfg) = self.local_cfg.take() {
+            self.cfg = cfg;
+        }
+        self.devices = whistlestop::audio::list_devices();
+        self.audio_seen = 0;
+        self.h.send(Cmd::Start(self.cfg.clone()));
+        self.toast(why.to_string());
     }
 
     fn send(&self, c: Cmd) {
@@ -286,9 +365,7 @@ impl App {
                         ui.add_space(6.0);
                         ui.vertical(|ui| {
                             ui.set_width(58.0);
-                            ui.label(
-                                RichText::new(bandplan::band_of(s.rig.freq_hz).unwrap_or("—")).strong().color(TEXT),
-                            );
+                            ui.label(RichText::new(bandplan::band_of(s.rig.freq_hz).unwrap_or("—")).strong().color(TEXT));
                             ui.label(RichText::new(if s.rig.mode.is_empty() { "—" } else { &s.rig.mode }).small().color(DIM));
                         });
                     });
@@ -303,9 +380,14 @@ impl App {
                     ui.add_sized(
                         [58.0, 16.0],
                         egui::Label::new(
-                            RichText::new(s.rig.strength_db.map(|d| if d >= 0 { format!("S9+{d}") } else { format!("S{}", ((d + 54) / 6).clamp(0, 9)) }).unwrap_or("—".into()))
-                                .monospace()
-                                .color(DIM),
+                            RichText::new(
+                                s.rig
+                                    .strength_db
+                                    .map(|d| if d >= 0 { format!("S9+{d}") } else { format!("S{}", ((d + 54) / 6).clamp(0, 9)) })
+                                    .unwrap_or("—".into()),
+                            )
+                            .monospace()
+                            .color(DIM),
                         ),
                     );
                 })
@@ -314,30 +396,57 @@ impl App {
                 ui.horizontal(|ui| {
                     let snr = s.snr_db.map(|v| ((v + 15.0) / 40.0).clamp(0.0, 1.0) as f32);
                     self.meter(ui, "SNR", snr, BRASS);
-                    ui.add_sized([58.0, 16.0], egui::Label::new(RichText::new(s.snr_db.map(|v| format!("{v:+.0} dB")).unwrap_or("—".into())).monospace().color(DIM)));
+                    ui.add_sized(
+                        [58.0, 16.0],
+                        egui::Label::new(RichText::new(s.snr_db.map(|v| format!("{v:+.0} dB")).unwrap_or("—".into())).monospace().color(DIM)),
+                    );
                 })
                 .response
                 .help(&help::SNR_METER);
             });
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if ui.add(egui::Button::new(RichText::new("⚙ Settings").size(14.0))).help(&help::SETTINGS).clicked() {
+                // Narrow window: the same buttons, a little smaller.
+                let bs = if ui.ctx().content_rect().width() < 1300.0 { 12.5 } else { 14.0 };
+                if bs < 14.0 {
+                    ui.spacing_mut().item_spacing.x = 4.0;
+                    ui.spacing_mut().button_padding.x = 5.0;
+                }
+                if ui.add(egui::Button::new(RichText::new("⚙ Settings").size(bs))).help(&help::SETTINGS).clicked() {
                     self.settings_open = true;
                 }
                 let lon = s.monitor_on;
-                let lb = egui::Button::new(RichText::new(if lon { "🔊 Listen" } else { "🔈 Listen" }).size(14.0).strong().color(if lon { BG } else { TEXT }))
+                let lb = egui::Button::new(RichText::new(if lon { "🔊 Listen" } else { "🔈 Listen" }).size(bs).strong().color(if lon { BG } else { TEXT }))
                     .fill(if lon { GREEN } else { CARD_HI });
                 if ui.add(lb).help(&help::LISTEN).clicked() {
-                    self.cfg.monitor = !lon;
-                    let _ = self.cfg.save();
+                    if self.client.is_none() {
+                        self.cfg.monitor = !lon;
+                        let _ = self.cfg.save();
+                    }
                     self.send(Cmd::Monitor(!lon));
                 }
-                let gb = egui::Button::new(RichText::new("📖 Guide").size(14.0).strong().color(if self.guide_open { BG } else { TEXT }))
+                // Remote operation.
+                let (rl, fill, fg) = match (&self.client, &self.server) {
+                    (Some(_), _) => ("🛰 Remote ●", TEAL, BG),
+                    (None, Some(srv)) if !srv.clients.lock().unwrap().is_empty() => ("🛰 Shared ●", AMBER, BG),
+                    (None, Some(_)) => ("🛰 Shared", CARD_HI, GREEN),
+                    _ => ("🛰 Remote", CARD_HI, TEXT),
+                };
+                let rb = egui::Button::new(RichText::new(rl).size(bs).strong().color(fg)).fill(fill);
+                let tip = match (&self.client, &self.server) {
+                    (Some(c), _) => format!("Operating {}", c.desc),
+                    (None, Some(srv)) => format!("Sharing this station on the LAN (port {}); {} connected", srv.port, srv.clients.lock().unwrap().len()),
+                    _ => "Operate a radio computer from here, or share this one on your LAN".into(),
+                };
+                if ui.add(rb).on_hover_text(tip).help(&help::REMOTE_BTN).clicked() {
+                    self.rm.open = !self.rm.open;
+                }
+                let gb = egui::Button::new(RichText::new("📖 Guide").size(bs).strong().color(if self.guide_open { BG } else { TEXT }))
                     .fill(if self.guide_open { TEAL } else { CARD_HI });
                 if ui.add(gb).help(&help::GUIDE_BTN).clicked() {
                     self.guide_open = !self.guide_open;
                 }
                 let on = help::on();
-                let hb = egui::Button::new(RichText::new("? Help").size(14.0).strong().color(if on { BG } else { TEXT })).fill(if on { BRASS } else { CARD_HI });
+                let hb = egui::Button::new(RichText::new("? Help").size(bs).strong().color(if on { BG } else { TEXT })).fill(if on { BRASS } else { CARD_HI });
                 if ui.add(hb).help(&help::HELP_TOGGLE).clicked() {
                     help::set(!on);
                 }
@@ -345,7 +454,7 @@ impl App {
                     ui.label(RichText::new(" DEMO ").strong().size(12.0).color(BG).background_color(BRASS)).help(&help::DEMO);
                 }
                 let away = s.away;
-                let ab = egui::Button::new(RichText::new(if away { "🚪 Away" } else { "🙋 Here" }).size(14.0).strong().color(if away { BG } else { TEXT }))
+                let ab = egui::Button::new(RichText::new(if away { "🚪 Away" } else { "🙋 Here" }).size(bs).strong().color(if away { BG } else { TEXT }))
                     .fill(if away { AMBER } else { CARD_HI });
                 if ui.add(ab).help(&help::AWAY).clicked() {
                     self.send(Cmd::SetAway(!away));
@@ -559,9 +668,10 @@ impl App {
             ui.horizontal(|ui| {
                 ui.label(RichText::new("Power").color(DIM));
                 if let Some(p) = s.rig.rf_power
-                    && !ui.ctx().egui_is_using_pointer() {
-                        self.power = p;
-                    }
+                    && !ui.ctx().egui_is_using_pointer()
+                {
+                    self.power = p;
+                }
                 let r = ui.add(egui::Slider::new(&mut self.power, 0.0..=1.0).show_value(false)).help(&help::R_POWER);
                 ui.label(RichText::new(format!("{:.0}%", self.power * 100.0)).monospace());
                 if r.drag_stopped() || (r.changed() && !r.dragged()) {
@@ -572,14 +682,16 @@ impl App {
                 ui.label(RichText::new(format!("🗓 Schedule: {n}")).color(TEAL)).help(&help::ST_SCHED_ON);
             }
             ui.horizontal(|ui| {
-                let b = egui::Button::new(RichText::new("🎛  Radio controls").strong().color(if self.rigwin.open { BG } else { TEXT })).fill(if self.rigwin.open { TEAL } else { CARD_HI });
+                let b = egui::Button::new(RichText::new("🎛  Radio controls").strong().color(if self.rigwin.open { BG } else { TEXT }))
+                    .fill(if self.rigwin.open { TEAL } else { CARD_HI });
                 if ui.add(b).help(&help::RC_OPEN).clicked() {
                     self.rigwin.open = !self.rigwin.open;
                     self.send(Cmd::RigWatch(self.rigwin.open));
                 }
                 if let Some(v) = s.rig_ext.swr.or(s.rig_ext.swr_last_tx) {
                     let bad = v > self.cfg.swr_limit;
-                    ui.add_sized([86.0, 20.0], egui::Label::new(RichText::new(format!("SWR {v:.1}")).monospace().color(if bad { RED } else { DIM }))).help(&help::RC_SWR);
+                    ui.add_sized([86.0, 20.0], egui::Label::new(RichText::new(format!("SWR {v:.1}")).monospace().color(if bad { RED } else { DIM })))
+                        .help(&help::RC_SWR);
                 }
             });
             ui.horizontal(|ui| {
@@ -605,7 +717,12 @@ impl App {
                     let btn = egui::Button::new(RichText::new(txt).monospace().size(12.5).color(if on { BG } else { TEXT }))
                         .fill(if on { TEAL } else { CARD_HI })
                         .min_size(vec2(w, 28.0));
-                    if ui.add(btn).on_hover_text(format!("{b}: Roundtable up to {}", b.modes().last().map(|m| m.name).unwrap_or("-"))).help(&help::BW_BUTTONS).clicked() {
+                    if ui
+                        .add(btn)
+                        .on_hover_text(format!("{b}: Roundtable up to {}", b.modes().last().map(|m| m.name).unwrap_or("-")))
+                        .help(&help::BW_BUTTONS)
+                        .clicked()
+                    {
                         self.cfg.bandwidth = b;
                         let _ = self.cfg.save();
                         self.send(Cmd::SetBandwidth(b));
@@ -649,7 +766,8 @@ impl App {
                 ui.selectable_value(&mut self.cq_table, true, "Roundtable").help(&help::CQ_KIND);
             });
             if self.cq_table {
-                ui.add(egui::TextEdit::singleline(&mut self.cq_table_name).hint_text("Roundtable name").desired_width(f32::INFINITY)).help(&help::CQ_TABLE_NAME);
+                ui.add(egui::TextEdit::singleline(&mut self.cq_table_name).hint_text("Roundtable name").desired_width(f32::INFINITY))
+                    .help(&help::CQ_TABLE_NAME);
             }
             ui.horizontal(|ui| {
                 ui.label(RichText::new("Whistle").color(DIM));
@@ -657,11 +775,7 @@ impl App {
                     let _ = self.cfg.save();
                 }
             });
-            ui.label(
-                RichText::new("Whistle ≥ searchers' scan cycle. Then Mercury sends your CQFRAME (ID) and listens.")
-                    .small()
-                    .color(DIM),
-            );
+            ui.label(RichText::new("Whistle ≥ searchers' scan cycle. Then Mercury sends your CQFRAME (ID) and listens.").small().color(DIM));
             let dis = s.link.is_some() || !s.mercury_ok;
             ui.add_enabled_ui(!dis, |ui| {
                 let call = big_button(ui, "🚂  Call CQ", BRASS).help(&help::CQ_CALL);
@@ -706,15 +820,18 @@ impl App {
                 }
             });
             ui.horizontal(|ui| {
-                egui::ComboBox::from_id_salt("searchband").width(80.0).selected_text(&self.search_band).show_ui(ui, |ui| {
-                    let mut bands: Vec<String> = self.cfg.segments.iter().map(|s| s.band.clone()).collect();
-                    bands.dedup();
-                    for b in bands {
-                        ui.selectable_value(&mut self.search_band, b.clone(), b);
-                    }
-                })
-                .response
-                .help(&help::S_BAND);
+                egui::ComboBox::from_id_salt("searchband")
+                    .width(80.0)
+                    .selected_text(&self.search_band)
+                    .show_ui(ui, |ui| {
+                        let mut bands: Vec<String> = self.cfg.segments.iter().map(|s| s.band.clone()).collect();
+                        bands.dedup();
+                        for b in bands {
+                            ui.selectable_value(&mut self.search_band, b.clone(), b);
+                        }
+                    })
+                    .response
+                    .help(&help::S_BAND);
                 if ui.button("Search band").help(&help::S_BAND).clicked() {
                     self.send(Cmd::StartSearch(SearchScope::Band(self.search_band.clone())));
                 }
@@ -724,13 +841,23 @@ impl App {
             ui.add_enabled_ui(sdr_on, |ui| {
                 ui.horizontal(|ui| {
                     let mut on = s.wide.on;
-                    if ui.checkbox(&mut on, RichText::new("Wide search (SDR)").strong()).on_hover_text("Watch the whole digital segment on the RTL-SDR at once").help(&help::S_WIDE).changed() {
+                    if ui
+                        .checkbox(&mut on, RichText::new("Wide search (SDR)").strong())
+                        .on_hover_text("Watch the whole digital segment on the RTL-SDR at once")
+                        .help(&help::S_WIDE)
+                        .changed()
+                    {
                         self.cfg.sdr.wide_search = on;
                         let _ = self.cfg.save();
                         self.send(Cmd::WideSearch { on, auto: s.wide.auto });
                     }
                     let mut auto = s.wide.auto;
-                    if ui.add_enabled(s.wide.on, egui::Checkbox::new(&mut auto, "auto-tune")).on_hover_text("Tune the radio to whistles the SDR finds").help(&help::S_AUTOTUNE).changed() {
+                    if ui
+                        .add_enabled(s.wide.on, egui::Checkbox::new(&mut auto, "auto-tune"))
+                        .on_hover_text("Tune the radio to whistles the SDR finds")
+                        .help(&help::S_AUTOTUNE)
+                        .changed()
+                    {
                         self.cfg.sdr.wide_auto = auto;
                         let _ = self.cfg.save();
                         self.send(Cmd::WideSearch { on: s.wide.on, auto });
@@ -752,38 +879,47 @@ impl App {
     fn heard_card(&mut self, ui: &mut Ui, s: &State) {
         card(ui, "Heard", |ui| {
             for a in s.mail_alerts.iter().filter(|a| a.at.elapsed() < Duration::from_secs(1800)) {
-                Frame::NONE.fill(if a.ours { BRASS.linear_multiply(0.15) } else { TEAL.linear_multiply(0.15) }).corner_radius(8.0).inner_margin(Margin::same(8)).show(ui, |ui| {
-                    ui.horizontal(|ui| {
-                        if a.ours {
-                            ui.label(RichText::new(format!("📮 {} message(s) for {}", a.count, a.call)).strong().color(BRASS)).help(&help::ALERT_OURS);
-                        } else {
-                            ui.label(RichText::new(format!("📬 {} has mail for you", a.call)).strong().color(TEAL)).help(&help::ALERT_THEIRS);
-                        }
-                        if s.link.is_none() {
-                            let label = if a.ours { "Deliver now" } else { "Collect" };
-                            if ui.small_button(label).help(if a.ours { &help::ALERT_OURS } else { &help::ALERT_THEIRS }).clicked() {
-                                self.send(Cmd::DepotConnect(a.call.clone()));
+                Frame::NONE
+                    .fill(if a.ours { BRASS.linear_multiply(0.15) } else { TEAL.linear_multiply(0.15) })
+                    .corner_radius(8.0)
+                    .inner_margin(Margin::same(8))
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            if a.ours {
+                                ui.label(RichText::new(format!("📮 {} message(s) for {}", a.count, a.call)).strong().color(BRASS)).help(&help::ALERT_OURS);
+                            } else {
+                                ui.label(RichText::new(format!("📬 {} has mail for you", a.call)).strong().color(TEAL)).help(&help::ALERT_THEIRS);
                             }
-                        }
+                            if s.link.is_none() {
+                                let label = if a.ours { "Deliver now" } else { "Collect" };
+                                if ui.small_button(label).help(if a.ours { &help::ALERT_OURS } else { &help::ALERT_THEIRS }).clicked() {
+                                    self.send(Cmd::DepotConnect(a.call.clone()));
+                                }
+                            }
+                        });
                     });
-                });
             }
             if let Some(w) = &s.whistle
-                && w.at.elapsed() < Duration::from_secs(30) && !s.search.active {
-                    Frame::NONE.fill(BRASS.linear_multiply(0.15)).corner_radius(8.0).inner_margin(Margin::same(8)).show(ui, |ui| {
-                        ui.label(RichText::new(format!("🚂 Whistle {:+.0} Hz from here", w.offset_hz)).strong().color(BRASS));
-                        if ui.button("Tune to it").help(&help::H_TUNE_TO).clicked() {
-                            self.send(Cmd::Nudge(w.offset_hz));
-                        }
-                    });
-                }
+                && w.at.elapsed() < Duration::from_secs(30)
+                && !s.search.active
+            {
+                Frame::NONE.fill(BRASS.linear_multiply(0.15)).corner_radius(8.0).inner_margin(Margin::same(8)).show(ui, |ui| {
+                    ui.label(RichText::new(format!("🚂 Whistle {:+.0} Hz from here", w.offset_hz)).strong().color(BRASS));
+                    if ui.button("Tune to it").help(&help::H_TUNE_TO).clicked() {
+                        self.send(Cmd::Nudge(w.offset_hz));
+                    }
+                });
+            }
             for (dial, score, age) in s.wide.hits.iter().filter(|h| h.2 < 30.0) {
                 ui.horizontal(|ui| {
                     ui.label(RichText::new("SDR").monospace().small().color(BG).background_color(TEAL));
                     ui.label(RichText::new(format!("🚂 {} kHz", fmt_freq(*dial))).strong().color(BRASS));
                     ui.label(RichText::new(format!("{score:.2} · {age:.0}s")).small().color(DIM));
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        if s.link.is_none() && !s.cq.active && ui.small_button("Lock on").on_hover_text("Tune the radio there and fine-lock on its audio").help(&help::H_LOCK).clicked() {
+                        if s.link.is_none()
+                            && !s.cq.active
+                            && ui.small_button("Lock on").on_hover_text("Tune the radio there and fine-lock on its audio").help(&help::H_LOCK).clicked()
+                        {
                             self.send(Cmd::LockOn(*dial));
                         }
                     });
@@ -817,7 +953,9 @@ impl App {
 
     fn centre(&mut self, ui: &mut Ui, s: &State) {
         ui.horizontal(|ui| {
-            for (t, label) in [(Tab::Chat, "💬  Chat"), (Tab::Roundtable, "◎  Roundtable"), (Tab::Files, "📁  Files"), (Tab::Depot, "🏤  Depot"), (Tab::Log, "≡  Log")] {
+            for (t, label) in
+                [(Tab::Chat, "💬  Chat"), (Tab::Roundtable, "◎  Roundtable"), (Tab::Files, "📁  Files"), (Tab::Depot, "🏤  Depot"), (Tab::Log, "≡  Log")]
+            {
                 let on = self.tab == t;
                 let badge = match t {
                     Tab::Files => s.transfers.iter().filter(|x| x.state == XferState::WaitingForYou).count(),
@@ -869,17 +1007,22 @@ impl App {
                                 .on_hover_text("Exchanging keys. Chat and files wait until this is done.");
                         }
                         E2eView::Encrypted { sas } => {
-                            Frame::NONE.fill(GREEN.linear_multiply(0.25)).stroke(Stroke::new(1.0, GREEN)).corner_radius(6.0).inner_margin(Margin::symmetric(8, 2)).show(ui, |ui| {
-                                ui.label(RichText::new("🔒 encrypted").strong().color(GREEN));
-                                ui.label(RichText::new(format!("code {sas}")).size(18.0).monospace().strong().color(TEXT));
-                            })
-                            .response
-                            .on_hover_text(format!(
-                                "Chat and files on this link are encrypted with keys made for this link only, and forgotten when it ends.\n\n\
+                            Frame::NONE
+                                .fill(GREEN.linear_multiply(0.25))
+                                .stroke(Stroke::new(1.0, GREEN))
+                                .corner_radius(6.0)
+                                .inner_margin(Margin::symmetric(8, 2))
+                                .show(ui, |ui| {
+                                    ui.label(RichText::new("🔒 encrypted").strong().color(GREEN));
+                                    ui.label(RichText::new(format!("code {sas}")).size(18.0).monospace().strong().color(TEXT));
+                                })
+                                .response
+                                .on_hover_text(format!(
+                                    "Chat and files on this link are encrypted with keys made for this link only, and forgotten when it ends.\n\n\
                                  Read the code {sas} to {} by voice (or any channel no one else controls). \
                                  If their screen shows the same code, no one is in the middle. If it differs, disconnect.",
-                                l.peer
-                            ));
+                                    l.peer
+                                ));
                         }
                         E2eView::Plain { why } => {
                             ui.label(RichText::new("🔓 not encrypted").color(DIM)).on_hover_text(why.as_str());
@@ -920,7 +1063,8 @@ impl App {
                 ui.horizontal(|ui| {
                     ui.label(RichText::new("↔ Move this link to").color(DIM)).help(&help::L_QSY);
                     let r = ui.add(egui::TextEdit::singleline(&mut self.qsy_khz).hint_text("kHz, e.g. 14106.5").desired_width(120.0)).help(&help::L_QSY);
-                    let ask = ui.add_enabled(s.qsy_note.is_none(), egui::Button::new("Ask")).help(&help::L_QSY).clicked() || (r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)));
+                    let ask = ui.add_enabled(s.qsy_note.is_none(), egui::Button::new("Ask")).help(&help::L_QSY).clicked()
+                        || (r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)));
                     if ask && !self.qsy_khz.trim().is_empty() {
                         if let Ok(k) = self.qsy_khz.trim().replace(',', ".").parse::<f64>() {
                             let hz = if k > 100_000.0 { k } else { k * 1000.0 };
@@ -931,7 +1075,11 @@ impl App {
                         }
                     }
                     if let Some(q) = &s.qsy {
-                        ui.label(RichText::new(format!("on {:.3} kHz with {} · back to {:.3} when the link ends", q.at_hz / 1e3, l.peer, q.home_hz / 1e3)).color(TEAL)).help(&help::L_QSY);
+                        ui.label(
+                            RichText::new(format!("on {:.3} kHz with {} · back to {:.3} when the link ends", q.at_hz / 1e3, l.peer, q.home_hz / 1e3))
+                                .color(TEAL),
+                        )
+                        .help(&help::L_QSY);
                     } else if let Some(n) = &s.qsy_note {
                         ui.label(RichText::new(n).color(BRASS));
                     }
@@ -1027,7 +1175,10 @@ impl App {
         let Some(t) = &s.table else {
             card(ui, "Roundtable", |ui| {
                 ui.label("A Roundtable is a group conversation on one frequency. No fixed channel: it's wherever its host calls it.");
-                ui.label(RichText::new("The host sets the speed: it ramps up to the fastest mode every member can copy, and drops back if someone fades.").color(DIM));
+                ui.label(
+                    RichText::new("The host sets the speed: it ramps up to the fastest mode every member can copy, and drops back if someone fades.")
+                        .color(DIM),
+                );
                 ui.add_space(6.0);
                 ui.horizontal(|ui| {
                     ui.add(egui::TextEdit::singleline(&mut self.join_name).hint_text("Roundtable name").desired_width(220.0));
@@ -1061,7 +1212,12 @@ impl App {
                 members.sort_by_key(|m| m.0.clone());
                 for (call, m) in members {
                     let snr = m.snr_of_host.map(|v| format!(" {v:+}dB")).unwrap_or_default();
-                    if ui.add(egui::Button::new(RichText::new(format!("{call}{snr}")).color(TEXT)).small()).on_hover_text("Pass the floor").help(&help::T_MEMBER).clicked() {
+                    if ui
+                        .add(egui::Button::new(RichText::new(format!("{call}{snr}")).color(TEXT)).small())
+                        .on_hover_text("Pass the floor")
+                        .help(&help::T_MEMBER)
+                        .clicked()
+                    {
                         self.send(Cmd::PassFloor(call.clone()));
                     }
                 }
@@ -1124,7 +1280,9 @@ impl App {
                         self.send(Cmd::LibList(String::new()));
                     }
                     if let Some(v) = &s.library {
-                        ui.label(RichText::new(if v.path.is_empty() { "/".to_string() } else { format!("/{}", v.path.trim_matches('/')) }).monospace().color(DIM));
+                        ui.label(
+                            RichText::new(if v.path.is_empty() { "/".to_string() } else { format!("/{}", v.path.trim_matches('/')) }).monospace().color(DIM),
+                        );
                         if !v.path.trim_matches('/').is_empty() && ui.small_button("⬆ Up").help(&help::F_LIB_BROWSE).clicked() {
                             let p = v.path.trim_matches('/');
                             self.send(Cmd::LibList(p.rsplit_once('/').map(|x| x.0.to_string()).unwrap_or_default()));
@@ -1166,21 +1324,30 @@ impl App {
         card(ui, "Send files", |ui| {
             ui.horizontal(|ui| {
                 if ui.add(egui::Button::new("+  Files…").fill(BRASS.linear_multiply(0.4))).help(&help::F_FILES).clicked()
-                    && let Some(p) = rfd::FileDialog::new().pick_files() {
-                        self.send(Cmd::SendFiles { paths: p, zip: self.zip });
-                    }
+                    && let Some(p) = rfd::FileDialog::new().pick_files()
+                {
+                    self.send(Cmd::SendFiles { paths: p, zip: self.zip });
+                }
                 if ui.add(egui::Button::new("+  Folder…").fill(BRASS.linear_multiply(0.4))).help(&help::F_FOLDER).clicked()
-                    && let Some(p) = rfd::FileDialog::new().pick_folder() {
-                        self.send(Cmd::SendFiles { paths: vec![p], zip: true });
-                    }
+                    && let Some(p) = rfd::FileDialog::new().pick_folder()
+                {
+                    self.send(Cmd::SendFiles { paths: vec![p], zip: true });
+                }
                 ui.checkbox(&mut self.zip, "Zip before sending").help(&help::F_ZIP);
                 if ui.button("Estimate…").on_hover_text("How long would a file take?").help(&help::F_ESTIMATE).clicked()
-                    && let Some(p) = rfd::FileDialog::new().pick_file() {
-                        let size = std::fs::metadata(&p).map(|m| m.len()).unwrap_or(0);
-                        self.plan_bytes = Some((p.file_name().unwrap_or_default().to_string_lossy().into_owned(), size));
-                    }
+                    && let Some(p) = rfd::FileDialog::new().pick_file()
+                {
+                    let size = std::fs::metadata(&p).map(|m| m.len()).unwrap_or(0);
+                    self.plan_bytes = Some((p.file_name().unwrap_or_default().to_string_lossy().into_owned(), size));
+                }
             });
-            ui.label(RichText::new("Or drop files on the window. Folders are always zipped. Files are offered first; the other station sees the size and time and accepts.").small().color(DIM));
+            ui.label(
+                RichText::new(
+                    "Or drop files on the window. Folders are always zipped. Files are offered first; the other station sees the size and time and accepts.",
+                )
+                .small()
+                .color(DIM),
+            );
             if let Some((name, size)) = &self.plan_bytes {
                 ui.add_space(4.0);
                 ui.label(RichText::new(format!("Estimate for {name} ({})", modes::human_bytes(*size as usize))).strong());
@@ -1197,7 +1364,9 @@ impl App {
                         for v in [-5.0, 0.0, 5.0, 10.0, 20.0] {
                             ui.label(RichText::new(modes::human_duration(modes::predict_arq_s(protocol::file_wire_size(name, *size), b, v))).monospace());
                         }
-                        ui.label(RichText::new(modes::human_duration(modes::predict_arq_s(protocol::file_wire_size(name, *size), b, snr))).monospace().color(BRASS));
+                        ui.label(
+                            RichText::new(modes::human_duration(modes::predict_arq_s(protocol::file_wire_size(name, *size), b, snr))).monospace().color(BRASS),
+                        );
                         ui.end_row();
                     }
                 });
@@ -1219,7 +1388,16 @@ impl App {
                         ui.label(RichText::new(&t.name).strong().size(15.0));
                         ui.label(RichText::new(modes::human_bytes(t.size as usize)).color(DIM));
                         if t.zipped && t.original > t.size {
-                            ui.label(RichText::new(format!("zip of {} file(s), {:.0}% of {}", t.files, 100.0 * t.size as f64 / t.original as f64, modes::human_bytes(t.original as usize))).small().color(DIM));
+                            ui.label(
+                                RichText::new(format!(
+                                    "zip of {} file(s), {:.0}% of {}",
+                                    t.files,
+                                    100.0 * t.size as f64 / t.original as f64,
+                                    modes::human_bytes(t.original as usize)
+                                ))
+                                .small()
+                                .color(DIM),
+                            );
                         }
                         ui.with_layout(Layout::right_to_left(Align::Center), |ui| match &t.state {
                             XferState::WaitingForYou => {
@@ -1269,7 +1447,11 @@ impl App {
                         _ => String::new(),
                     };
                     if !label.is_empty() || frac < 1.0 {
-                        ui.add(egui::ProgressBar::new(frac).text(label).fill(if t.dir == Dir::Out { BRASS.linear_multiply(0.7) } else { TEAL.linear_multiply(0.7) }));
+                        ui.add(egui::ProgressBar::new(frac).text(label).fill(if t.dir == Dir::Out {
+                            BRASS.linear_multiply(0.7)
+                        } else {
+                            TEAL.linear_multiply(0.7)
+                        }));
                     }
                 });
                 ui.add_space(6.0);
@@ -1282,7 +1464,13 @@ impl App {
             for (at, l) in &s.log {
                 ui.horizontal_wrapped(|ui| {
                     ui.label(RichText::new(at.hhmm()).monospace().small().color(DIM));
-                    let c = if l.starts_with('⚠') { RED } else if l.contains("Whistle") || l.contains("CQ") { BRASS } else { TEXT };
+                    let c = if l.starts_with('⚠') {
+                        RED
+                    } else if l.contains("Whistle") || l.contains("CQ") {
+                        BRASS
+                    } else {
+                        TEXT
+                    };
                     ui.label(RichText::new(l).monospace().color(c));
                 });
             }
@@ -1343,9 +1531,10 @@ impl App {
             ui.label(RichText::new("RADIO AUDIO").size(11.0).strong().color(DIM));
             ui.label(RichText::new("0–3 kHz").size(11.0).color(DIM));
             if let Some(w) = &s.whistle
-                && w.at.elapsed() < Duration::from_secs(8) {
-                    ui.label(RichText::new(format!("🚂 whistle {:+.0} Hz", w.offset_hz)).size(11.5).strong().color(BRASS));
-                }
+                && w.at.elapsed() < Duration::from_secs(8)
+            {
+                ui.label(RichText::new(format!("🚂 whistle {:+.0} Hz", w.offset_hz)).size(11.5).strong().color(BRASS));
+            }
         });
         let (rect, wr) = ui.allocate_exact_size(vec2(width, ui.available_height().max(40.0)), Sense::hover());
         wr.help(&help::W_AUDIO);
@@ -1354,11 +1543,7 @@ impl App {
         let x = |hz: f32| rect.left() + rect.width() * hz / 3000.0;
         // Whistle sweep band and the receive passband.
         let wp = s.bandwidth.unwrap_or(Bandwidth::Hz2300).whistle_profile();
-        p.rect_filled(
-            Rect::from_x_y_ranges(x(wp.f_lo as f32)..=x(wp.f_hi as f32), rect.top()..=rect.top() + 3.0),
-            0.0,
-            BRASS.linear_multiply(0.8),
-        );
+        p.rect_filled(Rect::from_x_y_ranges(x(wp.f_lo as f32)..=x(wp.f_hi as f32), rect.top()..=rect.top() + 3.0), 0.0, BRASS.linear_multiply(0.8));
         for hz in [500.0, 1000.0, 1500.0, 2000.0, 2500.0] {
             p.line_segment([Pos2::new(x(hz), rect.bottom() - 6.0), Pos2::new(x(hz), rect.bottom())], Stroke::new(1.0, DIM));
             p.text(Pos2::new(x(hz), rect.bottom() - 8.0), Align2::CENTER_BOTTOM, format!("{}", hz as u32), FontId::proportional(10.0), DIM);
@@ -1519,7 +1704,10 @@ impl App {
             13 if since > Duration::from_secs(3) => {
                 self.guide_open = false;
                 ctx.send_viewport_cmd(shoot(t.dir.join("6-help-hover.ppm")));
-                let _ = std::fs::write(t.dir.join("hover.txt"), format!("target {:?} hovered {} pointer {:?}", self.call_cq_at, self.call_cq_hovered, ctx.input(|i| i.pointer.hover_pos())));
+                let _ = std::fs::write(
+                    t.dir.join("hover.txt"),
+                    format!("target {:?} hovered {} pointer {:?}", self.call_cq_at, self.call_cq_hovered, ctx.input(|i| i.pointer.hover_pos())),
+                );
                 next = true;
             }
             14 if since > Duration::from_secs(1) => {
@@ -2054,11 +2242,7 @@ impl App {
                 .show(ctx, |ui| {
                     ui.label(RichText::new(e2e::LEGAL_WARNING).color(TEXT));
                     ui.add_space(6.0);
-                    ui.label(
-                        RichText::new("You are responsible for where you transmit. Whistlestop does not check which band you are on.")
-                            .small()
-                            .color(DIM),
-                    );
+                    ui.label(RichText::new("You are responsible for where you transmit. Whistlestop does not check which band you are on.").small().color(DIM));
                     ui.add_space(8.0);
                     ui.horizontal(|ui| {
                         let b = egui::Button::new(RichText::new(format!("I understand: set {}", want.label())).strong()).fill(RED.linear_multiply(0.4));
@@ -2080,11 +2264,17 @@ impl App {
             }
         }
         if apply {
-            if let Err(e) = self.cfg.save() {
-                self.toast(format!("Could not save settings: {e}"));
+            if self.client.is_some() {
+                // The radio computer's settings: it saves and applies them.
+                self.send(Cmd::Start(self.cfg.clone()));
+            } else {
+                if let Err(e) = self.cfg.save() {
+                    self.toast(format!("Could not save settings: {e}"));
+                }
+                self.publish_cfg();
+                self.send(Cmd::Start(self.cfg.clone()));
             }
             self.sdr_span = self.cfg.sdr.span_hz;
-            self.send(Cmd::Start(self.cfg.clone()));
             open = false;
         }
         self.settings_open = open;
@@ -2101,10 +2291,52 @@ impl eframe::App for App {
             self.send(Cmd::SendFiles { paths: dropped, zip: self.zip });
             self.tab = Tab::Files;
         }
+        // Remote operation.
+        if let Some(c) = &self.client {
+            let notes: Vec<String> = c.notes.lock().unwrap().drain(..).collect();
+            let lost = !c.alive.load(std::sync::atomic::Ordering::Relaxed);
+            for n in notes {
+                self.toast(n);
+            }
+            if lost {
+                self.disconnect_remote("Lost the connection to the radio computer; back to this computer");
+                self.rm.error = Some("The connection was lost.".into());
+                self.rm.open = true;
+            }
+        } else {
+            // Settings changed by someone operating this computer remotely.
+            let g = self.shared_cfg.lock().unwrap().clone();
+            if g.0 != self.cfg_ver {
+                self.cfg_ver = g.0;
+                self.cfg = g.1;
+            }
+        }
+        if self.rm.open {
+            let serving = self.server.as_ref().map(|s| (s.port, s.clients.lock().unwrap().clone()));
+            let connected = self.client.as_ref().map(|c| c.desc.clone());
+            let cfg = self.local_cfg.as_mut().unwrap_or(&mut self.cfg);
+            let act = self.rm.show(&ctx, remote::View { connected: connected.as_deref(), serving, cfg });
+            match act {
+                Some(remote::RemoteAction::Connect { addr, password }) => self.connect_remote(&ctx, addr, password),
+                Some(remote::RemoteAction::Disconnect) => self.disconnect_remote("Back to this computer"),
+                Some(remote::RemoteAction::Serve) => {
+                    let c = self.local_cfg.as_ref().unwrap_or(&self.cfg).clone();
+                    let _ = c.save();
+                    if self.client.is_none() {
+                        self.publish_cfg();
+                    }
+                    self.start_server();
+                }
+                None => {}
+            }
+        }
         // Take a snapshot of the engine state for this frame.
         let mut snap = {
-            let mut g = self.h.state.lock().unwrap();
-            let rows: std::collections::VecDeque<_> = std::mem::take(&mut g.audio_rows);
+            let g = self.h.state.lock().unwrap();
+            // Rows added since the last frame (left in place for others).
+            let fresh = (g.audio_seq.saturating_sub(self.audio_seen) as usize).min(g.audio_rows.len());
+            self.audio_seen = g.audio_seq;
+            let rows: std::collections::VecDeque<_> = g.audio_rows.iter().skip(g.audio_rows.len() - fresh).cloned().collect();
             State {
                 running: g.running,
                 demo: g.demo,
@@ -2128,6 +2360,7 @@ impl eframe::App for App {
                 table: g.table.clone(),
                 log: g.log.clone(),
                 audio_rows: rows,
+                audio_seq: g.audio_seq,
                 listen_mode: g.listen_mode,
                 est_bps: g.est_bps,
                 wide: g.wide.clone(),
@@ -2147,14 +2380,12 @@ impl eframe::App for App {
             }
         };
 
-        egui::Panel::top("top")
-            .frame(Frame::NONE.fill(BG).inner_margin(Margin::symmetric(14, 10)))
-            .show(ui, |ui| {
-                self.top_bar(ui, &snap);
-                let r = ui.max_rect();
-                let y = r.bottom() + 9.0;
-                ui.painter().line_segment([Pos2::new(r.left() - 14.0, y), Pos2::new(r.right() + 14.0, y)], Stroke::new(1.0, BRASS.linear_multiply(0.35)));
-            });
+        egui::Panel::top("top").frame(Frame::NONE.fill(BG).inner_margin(Margin::symmetric(14, 10))).show(ui, |ui| {
+            self.top_bar(ui, &snap);
+            let r = ui.max_rect();
+            let y = r.bottom() + 9.0;
+            ui.painter().line_segment([Pos2::new(r.left() - 14.0, y), Pos2::new(r.right() + 14.0, y)], Stroke::new(1.0, BRASS.linear_multiply(0.35)));
+        });
         let screen_h = ctx.content_rect().height();
         if help::on() {
             egui::Panel::top("help-banner").frame(Frame::NONE.fill(BRASS.linear_multiply(0.2)).inner_margin(Margin::symmetric(14, 5))).show(ui, |ui| {
@@ -2209,9 +2440,7 @@ impl eframe::App for App {
                 .with_inner_size([1080.0, 820.0])
                 .with_min_inner_size([640.0, 420.0]);
             ctx.show_viewport_immediate(guide_window_id(), builder, |ui, _| {
-                egui::CentralPanel::default()
-                    .frame(Frame::NONE.fill(BG).inner_margin(Margin::same(14)))
-                    .show(ui, |ui| self.guide.show(ui));
+                egui::CentralPanel::default().frame(Frame::NONE.fill(BG).inner_margin(Margin::same(14))).show(ui, |ui| self.guide.show(ui));
                 if ui.input(|i| i.viewport().close_requested()) {
                     self.guide_open = false;
                 }
@@ -2231,11 +2460,13 @@ impl eframe::App for App {
         }
         // Errors from the engine show briefly as a toast too.
         if let Some((_, l)) = snap.log.back()
-            && l.starts_with('⚠') && self.last_err.as_deref() != Some(l.as_str()) {
-                self.last_err = Some(l.clone());
-                let l = l.clone();
-                self.toast(l);
-            }
+            && l.starts_with('⚠')
+            && self.last_err.as_deref() != Some(l.as_str())
+        {
+            self.last_err = Some(l.clone());
+            let l = l.clone();
+            self.toast(l);
+        }
         ctx.request_repaint_after(Duration::from_millis(66));
     }
 

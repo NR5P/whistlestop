@@ -12,7 +12,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct RigStatus {
     pub freq_hz: f64,
     pub mode: String,
@@ -37,7 +37,10 @@ impl RigctldClient {
             .with_context(|| format!("connecting to rigctld at {addr}"))?;
         s.set_nodelay(true).ok();
         let (r, w) = s.into_split();
-        Ok(Self { r: BufReader::new(r), w })
+        Ok(Self {
+            r: BufReader::new(r),
+            w,
+        })
     }
 
     async fn line(&mut self) -> Result<String> {
@@ -98,13 +101,21 @@ impl SimRig {
             return 1.0;
         }
         let band = crate::bandplan::band_of(self.status.freq_hz);
-        let tuned = *self.funcs.get("TUNER").unwrap_or(&false) && self.tuned_band.is_some() && self.tuned_band == band;
-        if tuned { 1.15 } else if band == Some("20m") { 1.3 } else { 2.8 }
+        let tuned = *self.funcs.get("TUNER").unwrap_or(&false)
+            && self.tuned_band.is_some()
+            && self.tuned_band == band;
+        if tuned {
+            1.15
+        } else if band == Some("20m") {
+            1.3
+        } else {
+            2.8
+        }
     }
 }
 
 /// What a radio supports, from Hamlib's capability report.
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct RigCaps {
     pub model: String,
     pub get_levels: Vec<String>,
@@ -121,11 +132,21 @@ impl RigCaps {
     pub fn parse(text: &str) -> RigCaps {
         let mut c = RigCaps::default();
         let words = |v: &str| -> Vec<String> {
-            v.split_whitespace().map(|w| w.split('(').next().unwrap_or(w).to_string()).filter(|w| !w.is_empty() && w != "None").collect()
+            v.split_whitespace()
+                .map(|w| w.split('(').next().unwrap_or(w).to_string())
+                .filter(|w| !w.is_empty() && w != "None")
+                .collect()
         };
-        let db = |v: &str| -> Vec<i32> { v.split_whitespace().filter_map(|w| w.trim_end_matches("dB").parse().ok()).filter(|d| *d != 0).collect() };
+        let db = |v: &str| -> Vec<i32> {
+            v.split_whitespace()
+                .filter_map(|w| w.trim_end_matches("dB").parse().ok())
+                .filter(|d| *d != 0)
+                .collect()
+        };
         for line in text.lines() {
-            let Some((k, v)) = line.split_once(':') else { continue };
+            let Some((k, v)) = line.split_once(':') else {
+                continue;
+            };
             match k.trim() {
                 "Model name" => c.model = v.trim().to_string(),
                 "Mfg name" if c.model.is_empty() => c.model = v.trim().to_string(),
@@ -148,7 +169,9 @@ impl RigCaps {
         let v = |s: &str| s.split_whitespace().map(String::from).collect::<Vec<_>>();
         RigCaps {
             model: "Demo transceiver".into(),
-            get_levels: v("AF RF SQL MICGAIN COMP NR AGC PREAMP ATT RFPOWER SWR ALC RFPOWER_METER STRENGTH"),
+            get_levels: v(
+                "AF RF SQL MICGAIN COMP NR AGC PREAMP ATT RFPOWER SWR ALC RFPOWER_METER STRENGTH",
+            ),
             set_levels: v("AF RF SQL MICGAIN COMP NR AGC PREAMP ATT RFPOWER"),
             get_funcs: v("NB NR ANF COMP VOX MON TUNER"),
             set_funcs: v("NB NR ANF COMP VOX MON TUNER"),
@@ -188,14 +211,32 @@ impl Rig {
         *freq_link.lock().unwrap() = freq_hz;
         Rig::Sim(SimRig {
             freq_link,
-            levels: [("AF", 0.5), ("RF", 1.0), ("SQL", 0.0), ("MICGAIN", 0.5), ("COMP", 0.0), ("NR", 0.3), ("AGC", 5.0), ("PREAMP", 0.0), ("ATT", 0.0)]
-                .into_iter()
-                .map(|(k, v)| (k.to_string(), v))
-                .collect(),
-            funcs: [("NB", false), ("NR", false), ("ANF", false), ("COMP", false), ("VOX", false), ("MON", false), ("TUNER", true)]
-                .into_iter()
-                .map(|(k, v)| (k.to_string(), v))
-                .collect(),
+            levels: [
+                ("AF", 0.5),
+                ("RF", 1.0),
+                ("SQL", 0.0),
+                ("MICGAIN", 0.5),
+                ("COMP", 0.0),
+                ("NR", 0.3),
+                ("AGC", 5.0),
+                ("PREAMP", 0.0),
+                ("ATT", 0.0),
+            ]
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v))
+            .collect(),
+            funcs: [
+                ("NB", false),
+                ("NR", false),
+                ("ANF", false),
+                ("COMP", false),
+                ("VOX", false),
+                ("MON", false),
+                ("TUNER", true),
+            ]
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v))
+            .collect(),
             vfo: "VFOA".into(),
             split: false,
             rit: 0,
@@ -261,7 +302,10 @@ impl Rig {
 
     pub async fn set_power(&mut self, frac: f32) -> Result<()> {
         match self {
-            Rig::Rigctld(c) => c.set(&format!("L RFPOWER {:.2}", frac.clamp(0.0, 1.0))).await,
+            Rig::Rigctld(c) => {
+                c.set(&format!("L RFPOWER {:.2}", frac.clamp(0.0, 1.0)))
+                    .await
+            }
             Rig::Cat(h) => {
                 let f = frac.clamp(0.0, 1.0);
                 h.call(move |d| d.set_level("RFPOWER", f)).await
@@ -281,8 +325,16 @@ impl Rig {
                 let freq_hz = c.get("f", 1).await?[0].parse()?;
                 let m = c.get("m", 2).await?;
                 let ptt = c.get("t", 1).await.map(|v| v[0] == "1").unwrap_or(false);
-                let strength_db = c.get("l STRENGTH", 1).await.ok().and_then(|v| v[0].parse().ok());
-                let rf_power = c.get("l RFPOWER", 1).await.ok().and_then(|v| v[0].parse().ok());
+                let strength_db = c
+                    .get("l STRENGTH", 1)
+                    .await
+                    .ok()
+                    .and_then(|v| v[0].parse().ok());
+                let rf_power = c
+                    .get("l RFPOWER", 1)
+                    .await
+                    .ok()
+                    .and_then(|v| v[0].parse().ok());
                 Ok(RigStatus {
                     freq_hz,
                     mode: m[0].clone(),
@@ -327,8 +379,20 @@ impl Rig {
             }
             Rig::Sim(s) => Ok(match name {
                 "SWR" => s.swr(),
-                "ALC" => if s.status.ptt { 0.25 } else { 0.0 },
-                "RFPOWER_METER" => if s.status.ptt { s.status.rf_power.unwrap_or(0.5) } else { 0.0 },
+                "ALC" => {
+                    if s.status.ptt {
+                        0.25
+                    } else {
+                        0.0
+                    }
+                }
+                "RFPOWER_METER" => {
+                    if s.status.ptt {
+                        s.status.rf_power.unwrap_or(0.5)
+                    } else {
+                        0.0
+                    }
+                }
                 "STRENGTH" => s.status.strength_db.unwrap_or(-30) as f32,
                 _ => *s.levels.get(name).unwrap_or(&0.0),
             }),
@@ -338,7 +402,14 @@ impl Rig {
     pub async fn set_level(&mut self, name: &str, v: f32) -> Result<()> {
         match self {
             Rig::Rigctld(c) => {
-                let val = if matches!(name, "AGC" | "PREAMP" | "ATT" | "KEYSPD" | "NOTCHF" | "IF" | "CWPITCH") { format!("{}", v.round() as i64) } else { format!("{v:.3}") };
+                let val = if matches!(
+                    name,
+                    "AGC" | "PREAMP" | "ATT" | "KEYSPD" | "NOTCHF" | "IF" | "CWPITCH"
+                ) {
+                    format!("{}", v.round() as i64)
+                } else {
+                    format!("{v:.3}")
+                };
                 c.set(&format!("L {name} {val}")).await
             }
             Rig::Cat(h) => {
@@ -395,7 +466,13 @@ impl Rig {
                         s.funcs.insert("TUNER".into(), true);
                         s.tuned_band = crate::bandplan::band_of(s.status.freq_hz);
                     }
-                    "XCHG" => s.vfo = if s.vfo == "VFOA" { "VFOB".into() } else { "VFOA".into() },
+                    "XCHG" => {
+                        s.vfo = if s.vfo == "VFOA" {
+                            "VFOB".into()
+                        } else {
+                            "VFOA".into()
+                        }
+                    }
                     _ => {}
                 }
                 Ok(())
@@ -455,7 +532,10 @@ impl Rig {
 
     pub async fn set_offset(&mut self, xit: bool, hz: i32) -> Result<()> {
         match self {
-            Rig::Rigctld(c) => c.set(&format!("{} {hz}", if xit { "Z" } else { "J" })).await,
+            Rig::Rigctld(c) => {
+                c.set(&format!("{} {hz}", if xit { "Z" } else { "J" }))
+                    .await
+            }
             Rig::Cat(h) => h.call(move |d| d.set_offset(xit, hz)).await,
             Rig::Sim(s) => {
                 if xit {
@@ -524,7 +604,9 @@ mod tests {
     /// Hamlib isn't installed).
     #[tokio::test]
     async fn full_controls_against_real_rigctld() {
-        let Ok(p) = crate::rigsetup::start_dummy(45_871) else { return };
+        let Ok(p) = crate::rigsetup::start_dummy(45_871) else {
+            return;
+        };
         let mut rig = None;
         for _ in 0..50 {
             if let Ok(c) = RigctldClient::connect(&p.addr).await {
@@ -535,7 +617,10 @@ mod tests {
         }
         let mut rig = rig.expect("rigctld dummy");
         let caps = rig.caps().await.unwrap();
-        assert!(caps.can_set_level("AF") && caps.can_func("TUNER") && caps.can_op("TUNE"), "{caps:?}");
+        assert!(
+            caps.can_set_level("AF") && caps.can_func("TUNER") && caps.can_op("TUNE"),
+            "{caps:?}"
+        );
         assert!(!caps.att_db.is_empty());
         rig.set_level("AF", 0.4).await.unwrap();
         assert!((rig.get_level("AF").await.unwrap() - 0.4).abs() < 0.01);

@@ -43,7 +43,12 @@ async fn dial(addr: &str) -> Result<TcpStream> {
 
 impl Tnc {
     /// Connect to Mercury. Events go to `events`.
-    pub async fn connect(host: &str, port: u16, bcast_port: Option<u16>, events: mpsc::UnboundedSender<TncEvent>) -> Result<Self> {
+    pub async fn connect(
+        host: &str,
+        port: u16,
+        bcast_port: Option<u16>,
+        events: mpsc::UnboundedSender<TncEvent>,
+    ) -> Result<Self> {
         let (mut cr, ctl) = dial(&format!("{host}:{port}")).await?.into_split();
         let (mut dr, data) = dial(&format!("{host}:{}", port + 1)).await?.into_split();
         let (rtx, replies) = mpsc::unbounded_channel();
@@ -122,7 +127,12 @@ impl Tnc {
             }
             None => None,
         };
-        Ok(Self { ctl, data, bcast, replies })
+        Ok(Self {
+            ctl,
+            data,
+            bcast,
+            replies,
+        })
     }
 
     /// Send a command and wait for OK. WRONG/BUSY become errors.
@@ -146,7 +156,8 @@ impl Tnc {
     }
 
     pub async fn setup(&mut self, mycall: &str, arq_bw: u32) -> Result<()> {
-        self.command(&format!("MYCALL {}", mycall.to_ascii_uppercase())).await?;
+        self.command(&format!("MYCALL {}", mycall.to_ascii_uppercase()))
+            .await?;
         self.command(&format!("BW{arq_bw}")).await?;
         self.command("LISTEN ON").await
     }
@@ -157,7 +168,10 @@ impl Tnc {
     }
 
     pub async fn send_broadcast(&mut self, frame: &[u8]) -> Result<()> {
-        let w = self.bcast.as_mut().ok_or_else(|| anyhow!("broadcast port not open"))?;
+        let w = self
+            .bcast
+            .as_mut()
+            .ok_or_else(|| anyhow!("broadcast port not open"))?;
         w.write_all(&kiss_encode(frame, 0x00)).await?;
         Ok(())
     }
@@ -169,8 +183,15 @@ pub fn parse_connected(line: &str, mycall: &str) -> Option<(String, u32)> {
     if p.len() < 3 || p[0] != "CONNECTED" {
         return None;
     }
-    let peer = if p[1].eq_ignore_ascii_case(mycall) { p[2] } else { p[1] };
-    Some((peer.to_string(), p.get(3).and_then(|b| b.parse().ok()).unwrap_or(0)))
+    let peer = if p[1].eq_ignore_ascii_case(mycall) {
+        p[2]
+    } else {
+        p[1]
+    };
+    Some((
+        peer.to_string(),
+        p.get(3).and_then(|b| b.parse().ok()).unwrap_or(0),
+    ))
 }
 
 #[cfg(test)]
@@ -181,15 +202,28 @@ mod tests {
 
     #[test]
     fn connected_parsing() {
-        assert_eq!(parse_connected("CONNECTED N0CALL K7BOT 2300", "N0CALL"), Some(("K7BOT".into(), 2300)));
-        assert_eq!(parse_connected("CONNECTED K7BOT N0CALL 500", "n0call"), Some(("K7BOT".into(), 500)));
+        assert_eq!(
+            parse_connected("CONNECTED N0CALL K7BOT 2300", "N0CALL"),
+            Some(("K7BOT".into(), 2300))
+        );
+        assert_eq!(
+            parse_connected("CONNECTED K7BOT N0CALL 500", "n0call"),
+            Some(("K7BOT".into(), 500))
+        );
     }
 
     #[tokio::test]
     async fn session_against_fake_mercury() {
-        let fake = FakeMercury::start(FakeOptions { fast: true, ..Default::default() }).await.unwrap();
+        let fake = FakeMercury::start(FakeOptions {
+            fast: true,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
         let (tx, mut rx) = mpsc::unbounded_channel();
-        let mut t = Tnc::connect("127.0.0.1", fake.port, Some(fake.bcast_port), tx).await.unwrap();
+        let mut t = Tnc::connect("127.0.0.1", fake.port, Some(fake.bcast_port), tx)
+            .await
+            .unwrap();
         t.setup("N0CALL", 2300).await.unwrap();
         assert!(t.command("BOGUS").await.is_err());
         t.command("CONNECT N0CALL K7BOT").await.unwrap();
@@ -200,13 +234,25 @@ mod tests {
             }
         }
         assert_eq!(peer.unwrap().0, "K7BOT");
-        t.send_data(&Link::Chat { id: 1, text: "hello".into() }.encode()).await.unwrap();
+        t.send_data(
+            &Link::Chat {
+                id: 1,
+                text: "hello".into(),
+            }
+            .encode(),
+        )
+        .await
+        .unwrap();
         // The bot says HELLO and answers the chat.
         let mut dec = crate::protocol::LinkDecoder::default();
         let mut got_chat = false;
         while !got_chat {
             if let Some(TncEvent::Data(d)) = rx.recv().await {
-                got_chat = dec.feed(&d).unwrap().iter().any(|p| matches!(p, Link::Chat { .. }));
+                got_chat = dec
+                    .feed(&d)
+                    .unwrap()
+                    .iter()
+                    .any(|p| matches!(p, Link::Chat { .. }));
             }
         }
     }

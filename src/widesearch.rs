@@ -44,8 +44,13 @@ impl Decimator {
         let mut taps: Vec<f64> = (0..n)
             .map(|i| {
                 let x = i as f64 - m;
-                let s = if x == 0.0 { 2.0 * fc } else { (2.0 * PI * fc * x).sin() / (PI * x) };
-                let w = 0.42 - 0.5 * (2.0 * PI * i as f64 / (n - 1) as f64).cos() + 0.08 * (4.0 * PI * i as f64 / (n - 1) as f64).cos();
+                let s = if x == 0.0 {
+                    2.0 * fc
+                } else {
+                    (2.0 * PI * fc * x).sin() / (PI * x)
+                };
+                let w = 0.42 - 0.5 * (2.0 * PI * i as f64 / (n - 1) as f64).cos()
+                    + 0.08 * (4.0 * PI * i as f64 / (n - 1) as f64).cos();
                 s * w
             })
             .collect();
@@ -94,10 +99,13 @@ impl Decimator {
 /// 80 % holds the segment plus a whistle's width on each side.
 pub fn rate_for(seg: &Segment) -> u32 {
     let need = seg.hi_hz - seg.lo_hz + 6000.0;
-    [64_000u32, 128_000, 256_000].into_iter().find(|&r| need <= 0.8 * r as f64).unwrap_or(256_000)
+    [64_000u32, 128_000, 256_000]
+        .into_iter()
+        .find(|&r| need <= 0.8 * r as f64)
+        .unwrap_or(256_000)
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct WideHit {
     /// The caller's USB dial frequency, as the SDR sees it (before the main
     /// radio fine-tunes it).
@@ -160,7 +168,12 @@ impl WideWatch {
 
     /// Dial frequencies of the virtual receivers covering the segment.
     pub fn channels(&self) -> Vec<f64> {
-        bandplan::channels(&self.seg, self.step_hz, self.params.f_lo - 200.0, self.params.f_hi + 200.0)
+        bandplan::channels(
+            &self.seg,
+            self.step_hz,
+            self.params.f_lo - 200.0,
+            self.params.f_hi + 200.0,
+        )
     }
 
     /// Cut 8 kHz USB receiver audio for `dial` out of the window spectrum.
@@ -188,7 +201,11 @@ impl WideWatch {
             return vec![];
         }
         let n = n_win.next_power_of_two();
-        let mut spec: Vec<Complex32> = self.ring.range(self.ring.len() - n_win..).copied().collect();
+        let mut spec: Vec<Complex32> = self
+            .ring
+            .range(self.ring.len() - n_win..)
+            .copied()
+            .collect();
         spec.resize(n, Complex32::new(0.0, 0.0));
         self.planner.plan_fft_forward(n).process(&mut spec);
 
@@ -208,17 +225,22 @@ impl WideWatch {
         for c in candidates {
             let a = self.channel_audio(&spec, c);
             if let Some(v) = self.det.detect(&a)
-                && v.offset_hz.abs() < 30.0 {
-                    let dial = c + v.offset_hz;
-                    match hits.iter_mut().find(|h| (h.dial_hz - dial).abs() < 60.0) {
-                        Some(h) if h.score >= v.score => {}
-                        Some(h) => {
-                            h.dial_hz = dial;
-                            h.score = v.score;
-                        }
-                        None => hits.push(WideHit { dial_hz: dial, score: v.score, band: self.seg.band.clone() }),
+                && v.offset_hz.abs() < 30.0
+            {
+                let dial = c + v.offset_hz;
+                match hits.iter_mut().find(|h| (h.dial_hz - dial).abs() < 60.0) {
+                    Some(h) if h.score >= v.score => {}
+                    Some(h) => {
+                        h.dial_hz = dial;
+                        h.score = v.score;
                     }
+                    None => hits.push(WideHit {
+                        dial_hz: dial,
+                        score: v.score,
+                        band: self.seg.band.clone(),
+                    }),
                 }
+            }
         }
         hits
     }
@@ -226,12 +248,23 @@ impl WideWatch {
 
 /// A caller's whistle as complex baseband: `dial_off` is its dial minus the
 /// stream's centre frequency. `t0` is the time into the whistle at sample 0.
-pub fn complex_whistle(fs: f64, n: usize, dial_off: f64, t0: f64, p: &WhistleParams, phase: &mut f64) -> Vec<Complex32> {
+pub fn complex_whistle(
+    fs: f64,
+    n: usize,
+    dial_off: f64,
+    t0: f64,
+    p: &WhistleParams,
+    phase: &mut f64,
+) -> Vec<Complex32> {
     (0..n)
         .map(|i| {
             let t = t0 + i as f64 / fs;
             let q = t.rem_euclid(p.period_s());
-            let fa = if q < p.chirp_s { p.f_lo + p.k() * q } else { p.f_hi - p.k() * (q - p.chirp_s) };
+            let fa = if q < p.chirp_s {
+                p.f_lo + p.k() * q
+            } else {
+                p.f_hi - p.k() * (q - p.chirp_s)
+            };
             *phase += 2.0 * PI * (dial_off + fa) / fs;
             Complex32::new(phase.cos() as f32, phase.sin() as f32)
         })
@@ -245,19 +278,27 @@ mod tests {
     use rand_distr::{Distribution, Normal};
 
     fn seg20() -> Segment {
-        Segment { band: "20m".into(), lo_hz: 14_100_500.0, hi_hz: 14_112_000.0 }
+        Segment {
+            band: "20m".into(),
+            lo_hz: 14_100_500.0,
+            hi_hz: 14_112_000.0,
+        }
     }
 
     fn noise(n: usize, sigma: f32, rng: &mut StdRng) -> Vec<Complex32> {
         let d = Normal::new(0.0f32, sigma).unwrap();
-        (0..n).map(|_| Complex32::new(d.sample(rng), d.sample(rng))).collect()
+        (0..n)
+            .map(|_| Complex32::new(d.sample(rng), d.sample(rng)))
+            .collect()
     }
 
     #[test]
     fn decimator_passes_in_band_and_rejects_far_signals() {
         let fs = 2_048_000.0;
         let tone = |f: f64| -> Vec<Complex32> {
-            (0..fs as usize / 4).map(|i| Complex32::from_polar(1.0, (2.0 * PI * f * i as f64 / fs) as f32)).collect()
+            (0..fs as usize / 4)
+                .map(|i| Complex32::from_polar(1.0, (2.0 * PI * f * i as f64 / fs) as f32))
+                .collect()
         };
         let power = |f: f64| -> f32 {
             let mut d = Decimator::new(fs, 32, 100_000.0);
@@ -265,7 +306,11 @@ mod tests {
             d.process(&tone(f), &mut out);
             out[200..].iter().map(|c| c.norm_sqr()).sum::<f32>() / (out.len() - 200) as f32
         };
-        assert!((power(110_000.0) - 1.0).abs() < 0.05, "in band {}", power(110_000.0));
+        assert!(
+            (power(110_000.0) - 1.0).abs() < 0.05,
+            "in band {}",
+            power(110_000.0)
+        );
         assert!(power(400_000.0) < 1e-4, "far {}", power(400_000.0)); // > 40 dB down
         assert!(power(100_000.0 + 48_000.0) < 1e-3); // just outside: 30 dB down
     }
@@ -283,13 +328,23 @@ mod tests {
         let mut x = noise(n, 0.05, &mut rng);
         for (dial, amp) in callers {
             let mut ph = 0.0;
-            for (s, c) in x.iter_mut().zip(complex_whistle(fs, n, dial - w.center_rf, 0.13, &p, &mut ph)) {
+            for (s, c) in x.iter_mut().zip(complex_whistle(
+                fs,
+                n,
+                dial - w.center_rf,
+                0.13,
+                &p,
+                &mut ph,
+            )) {
                 *s += c * amp;
             }
         }
         // A carrier, to be ignored.
         for (i, s) in x.iter_mut().enumerate() {
-            *s += Complex32::from_polar(0.3, (2.0 * PI * (14_105_000.0 - w.center_rf) * i as f64 / fs) as f32);
+            *s += Complex32::from_polar(
+                0.3,
+                (2.0 * PI * (14_105_000.0 - w.center_rf) * i as f64 / fs) as f32,
+            );
         }
         w.push(&x);
         let mut hits = w.scan();
@@ -331,6 +386,10 @@ mod tests {
         w.push(&out);
         let hits = w.scan();
         assert_eq!(hits.len(), 1, "{hits:?}");
-        assert!((hits[0].dial_hz - 14_103_700.0).abs() < 3.0, "{}", hits[0].dial_hz);
+        assert!(
+            (hits[0].dial_hz - 14_103_700.0).abs() < 3.0,
+            "{}",
+            hits[0].dial_hz
+        );
     }
 }

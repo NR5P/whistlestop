@@ -52,12 +52,18 @@ pub struct Depot {
 }
 
 pub fn now_s() -> u64 {
-    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 pub fn new_id() -> u64 {
     use std::hash::BuildHasher;
-    let t = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
+    let t = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
     std::collections::hash_map::RandomState::new().hash_one(t) | 1
 }
 
@@ -67,7 +73,10 @@ pub fn default_path() -> PathBuf {
 
 impl Depot {
     pub fn load(path: PathBuf) -> Depot {
-        let mut d: Depot = std::fs::read_to_string(&path).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
+        let mut d: Depot = std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default();
         d.path = Some(path);
         d
     }
@@ -91,7 +100,9 @@ impl Depot {
     }
 
     pub fn post_via(&mut self, from: &str, to: &str, via: Option<&str>, text: &str) -> &Mail {
-        let via = via.map(|v| v.trim().to_uppercase()).filter(|v| !v.is_empty());
+        let via = via
+            .map(|v| v.trim().to_uppercase())
+            .filter(|v| !v.is_empty());
         self.departures.push(Mail {
             id: new_id(),
             from: from.to_uppercase(),
@@ -133,10 +144,20 @@ impl Depot {
     /// Carry mail for someone else (relaying). False if we already have it
     /// or it has been relayed too often.
     pub fn take_in_transit(&mut self, m: Mail, from_station: &str) -> bool {
-        if m.hops >= MAX_HOPS || self.transit.iter().chain(self.delivered.iter()).any(|x| x.id == m.id) {
+        if m.hops >= MAX_HOPS
+            || self
+                .transit
+                .iter()
+                .chain(self.delivered.iter())
+                .any(|x| x.id == m.id)
+        {
             return false;
         }
-        self.transit.push(Mail { handed: Some(from_station.to_uppercase()), via: None, ..m });
+        self.transit.push(Mail {
+            handed: Some(from_station.to_uppercase()),
+            via: None,
+            ..m
+        });
         self.save();
         true
     }
@@ -199,10 +220,24 @@ mod tests {
         d.post("n0call", "K7BOT", "Second note");
         d.post("n0call", "W1AW", "Hello");
         assert_eq!(d.waiting_for("K7BOT").len(), 2);
-        assert_eq!(d.waiting_calls(), vec!["K7BOT".to_string(), "W1AW".to_string()]);
+        assert_eq!(
+            d.waiting_calls(),
+            vec!["K7BOT".to_string(), "W1AW".to_string()]
+        );
         assert!(d.confirm(id, "K7BOT").is_some());
         assert_eq!(d.waiting_for("K7BOT").len(), 1);
-        let m = Mail { id: 77, from: "K7BOT".into(), to: "N0CALL".into(), created: 1, text: "hi".into(), read: true, delivered_at: None, via: None, hops: 0, handed: None };
+        let m = Mail {
+            id: 77,
+            from: "K7BOT".into(),
+            to: "N0CALL".into(),
+            created: 1,
+            text: "hi".into(),
+            read: true,
+            delivered_at: None,
+            via: None,
+            hops: 0,
+            handed: None,
+        };
         assert!(d.arrive(m.clone()));
         assert!(!d.arrive(m), "repeat delivery is ignored");
         assert_eq!(d.unread(), 1);
@@ -221,12 +256,33 @@ mod tests {
         assert_eq!(d.waiting_for("K7BOT").len(), 1);
         assert_eq!(d.waiting_calls(), vec!["W1AW".to_string()]);
         // Carrying mail for someone else, then forwarding it.
-        let m = Mail { id: 9, from: "AA1AA".into(), to: "W1AW".into(), created: 1, text: "relay me".into(), read: true, delivered_at: None, via: None, hops: 1, handed: None };
+        let m = Mail {
+            id: 9,
+            from: "AA1AA".into(),
+            to: "W1AW".into(),
+            created: 1,
+            text: "relay me".into(),
+            read: true,
+            delivered_at: None,
+            via: None,
+            hops: 1,
+            handed: None,
+        };
         assert!(d.take_in_transit(m.clone(), "AA1AA"));
         assert!(!d.take_in_transit(m.clone(), "AA1AA"), "no duplicates");
         assert_eq!(d.waiting_for("W1AW").len(), 2);
         assert!(d.confirm(9, "W1AW").is_some());
         assert!(d.transit.is_empty());
-        assert!(!d.take_in_transit(Mail { id: 10, hops: MAX_HOPS, ..m }, "X"), "too many hops");
+        assert!(
+            !d.take_in_transit(
+                Mail {
+                    id: 10,
+                    hops: MAX_HOPS,
+                    ..m
+                },
+                "X"
+            ),
+            "too many hops"
+        );
     }
 }

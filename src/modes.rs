@@ -47,14 +47,118 @@ impl Mode {
 /// per symbol = QPSK unless set to 4 = 16-QAM) and its 32-MFSK floor; FEC and
 /// rates from `docs/MODES.md` (v1.9.23).
 pub const MODES: &[Mode] = &[
-    Mode { name: "MFSK500", index: 12, bitrate_code: 100, bandwidth_hz: 500, payload_bps: 31.0, frame_bytes: 98, frame_s: 26.2, min_snr_db: -14.0, modulation: "32-MFSK", carriers: 32, spacing_hz: 15.6, fec: "LDPC 1/2 (N=1600)" },
-    Mode { name: "MFSK", index: 11, bitrate_code: 100, bandwidth_hz: 1000, payload_bps: 60.0, frame_bytes: 98, frame_s: 13.5, min_snr_db: -11.0, modulation: "32-MFSK", carriers: 32, spacing_hz: 31.25, fec: "LDPC 1/2 (N=1600)" },
-    Mode { name: "DATAC15", index: 7, bitrate_code: 15, bandwidth_hz: 200, payload_bps: 68.0, frame_bytes: 30, frame_s: 3.74, min_snr_db: -7.0, modulation: "OFDM QPSK", carriers: 3, spacing_hz: 62.5, fec: "LDPC 1/3 (768,256)" },
-    Mode { name: "DATAC4", index: 3, bitrate_code: 4, bandwidth_hz: 250, payload_bps: 87.0, frame_bytes: 54, frame_s: 5.17, min_snr_db: -4.0, modulation: "OFDM QPSK", carriers: 4, spacing_hz: 62.5, fec: "LDPC 0.30 (1472,448)" },
-    Mode { name: "DATAC3", index: 1, bitrate_code: 3, bandwidth_hz: 500, payload_bps: 321.0, frame_bytes: 126, frame_s: 3.19, min_snr_db: 0.0, modulation: "OFDM QPSK", carriers: 9, spacing_hz: 62.5, fec: "LDPC 1/2 (2048,1024)" },
-    Mode { name: "DATAC1", index: 0, bitrate_code: 1, bandwidth_hz: 1700, payload_bps: 980.0, frame_bytes: 510, frame_s: 4.18, min_snr_db: 5.0, modulation: "OFDM QPSK", carriers: 27, spacing_hz: 62.5, fec: "LDPC 1/2 (8192,4096)" },
-    Mode { name: "DATAC17", index: 9, bitrate_code: 17, bandwidth_hz: 2100, payload_bps: 1410.0, frame_bytes: 1180, frame_s: 6.71, min_snr_db: 10.0, modulation: "OFDM QPSK", carriers: 33, spacing_hz: 62.5, fec: "LDPC 0.59 (15936,9456)" },
-    Mode { name: "QAM16C2", index: 10, bitrate_code: 25, bandwidth_hz: 2100, payload_bps: 3100.0, frame_bytes: 1213, frame_s: 3.2, min_snr_db: 15.7, modulation: "OFDM 16-QAM", carriers: 33, spacing_hz: 62.5, fec: "LDPC 0.60 (16200,9720)" },
+    Mode {
+        name: "MFSK500",
+        index: 12,
+        bitrate_code: 100,
+        bandwidth_hz: 500,
+        payload_bps: 31.0,
+        frame_bytes: 98,
+        frame_s: 26.2,
+        min_snr_db: -14.0,
+        modulation: "32-MFSK",
+        carriers: 32,
+        spacing_hz: 15.6,
+        fec: "LDPC 1/2 (N=1600)",
+    },
+    Mode {
+        name: "MFSK",
+        index: 11,
+        bitrate_code: 100,
+        bandwidth_hz: 1000,
+        payload_bps: 60.0,
+        frame_bytes: 98,
+        frame_s: 13.5,
+        min_snr_db: -11.0,
+        modulation: "32-MFSK",
+        carriers: 32,
+        spacing_hz: 31.25,
+        fec: "LDPC 1/2 (N=1600)",
+    },
+    Mode {
+        name: "DATAC15",
+        index: 7,
+        bitrate_code: 15,
+        bandwidth_hz: 200,
+        payload_bps: 68.0,
+        frame_bytes: 30,
+        frame_s: 3.74,
+        min_snr_db: -7.0,
+        modulation: "OFDM QPSK",
+        carriers: 3,
+        spacing_hz: 62.5,
+        fec: "LDPC 1/3 (768,256)",
+    },
+    Mode {
+        name: "DATAC4",
+        index: 3,
+        bitrate_code: 4,
+        bandwidth_hz: 250,
+        payload_bps: 87.0,
+        frame_bytes: 54,
+        frame_s: 5.17,
+        min_snr_db: -4.0,
+        modulation: "OFDM QPSK",
+        carriers: 4,
+        spacing_hz: 62.5,
+        fec: "LDPC 0.30 (1472,448)",
+    },
+    Mode {
+        name: "DATAC3",
+        index: 1,
+        bitrate_code: 3,
+        bandwidth_hz: 500,
+        payload_bps: 321.0,
+        frame_bytes: 126,
+        frame_s: 3.19,
+        min_snr_db: 0.0,
+        modulation: "OFDM QPSK",
+        carriers: 9,
+        spacing_hz: 62.5,
+        fec: "LDPC 1/2 (2048,1024)",
+    },
+    Mode {
+        name: "DATAC1",
+        index: 0,
+        bitrate_code: 1,
+        bandwidth_hz: 1700,
+        payload_bps: 980.0,
+        frame_bytes: 510,
+        frame_s: 4.18,
+        min_snr_db: 5.0,
+        modulation: "OFDM QPSK",
+        carriers: 27,
+        spacing_hz: 62.5,
+        fec: "LDPC 1/2 (8192,4096)",
+    },
+    Mode {
+        name: "DATAC17",
+        index: 9,
+        bitrate_code: 17,
+        bandwidth_hz: 2100,
+        payload_bps: 1410.0,
+        frame_bytes: 1180,
+        frame_s: 6.71,
+        min_snr_db: 10.0,
+        modulation: "OFDM QPSK",
+        carriers: 33,
+        spacing_hz: 62.5,
+        fec: "LDPC 0.59 (15936,9456)",
+    },
+    Mode {
+        name: "QAM16C2",
+        index: 10,
+        bitrate_code: 25,
+        bandwidth_hz: 2100,
+        payload_bps: 3100.0,
+        frame_bytes: 1213,
+        frame_s: 3.2,
+        min_snr_db: 15.7,
+        modulation: "OFDM 16-QAM",
+        carriers: 33,
+        spacing_hz: 62.5,
+        fec: "LDPC 0.60 (16200,9720)",
+    },
 ];
 
 /// Mercury's ARQ speed ladder for a session bandwidth (BW500 or wide),
@@ -63,7 +167,9 @@ pub fn arq_ladder(session_bw: u32) -> Vec<&'static Mode> {
     let names: &[&str] = if session_bw == 500 {
         &["MFSK500", "DATAC15", "DATAC4", "DATAC3"]
     } else {
-        &["MFSK", "DATAC15", "DATAC4", "DATAC3", "DATAC1", "DATAC17", "QAM16C2"]
+        &[
+            "MFSK", "DATAC15", "DATAC4", "DATAC3", "DATAC1", "DATAC17", "QAM16C2",
+        ]
     };
     names.iter().filter_map(|n| mode_by_name(n)).collect()
 }
@@ -77,11 +183,15 @@ pub fn mode_by_index(index: u8) -> Option<&'static Mode> {
 }
 
 pub fn mode_by_bitrate_code(code: u16) -> Option<&'static Mode> {
-    MODES.iter().find(|m| m.bitrate_code == code && m.name != "MFSK500")
+    MODES
+        .iter()
+        .find(|m| m.bitrate_code == code && m.name != "MFSK500")
 }
 
 /// Bandwidth the operator selects, narrow to wide.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
 pub enum Bandwidth {
     Hz250,
     Hz500,
@@ -92,8 +202,14 @@ pub enum Bandwidth {
 }
 
 impl Bandwidth {
-    pub const ALL: [Bandwidth; 6] =
-        [Self::Hz250, Self::Hz500, Self::Hz1000, Self::Hz1700, Self::Hz2300, Self::Hz2750];
+    pub const ALL: [Bandwidth; 6] = [
+        Self::Hz250,
+        Self::Hz500,
+        Self::Hz1000,
+        Self::Hz1700,
+        Self::Hz2300,
+        Self::Hz2750,
+    ];
 
     pub fn hz(self) -> u32 {
         match self {
@@ -140,7 +256,10 @@ impl Bandwidth {
 
     /// Roundtable modes allowed inside this bandwidth, slowest first.
     pub fn modes(self) -> Vec<&'static Mode> {
-        MODES.iter().filter(|m| m.bandwidth_hz <= self.hz()).collect()
+        MODES
+            .iter()
+            .filter(|m| m.bandwidth_hz <= self.hz())
+            .collect()
     }
 }
 
@@ -247,7 +366,11 @@ impl ThroughputEstimator {
         if it.next() != Some("BITRATE") {
             return;
         }
-        let code = it.next().and_then(|c| c.trim_matches(|ch| ch == '(' || ch == ')').parse::<u16>().ok());
+        let code = it.next().and_then(|c| {
+            c.trim_matches(|ch| ch == '(' || ch == ')')
+                .parse::<u16>()
+                .ok()
+        });
         let bps = it.next().and_then(|b| b.parse::<f64>().ok());
         if let Some(c) = code {
             self.reported_mode = mode_by_bitrate_code(c);
@@ -258,7 +381,10 @@ impl ThroughputEstimator {
     }
 
     pub fn on_snr_line(&mut self, line: &str) {
-        if let Some(v) = line.strip_prefix("SN ").and_then(|v| v.trim().parse::<f64>().ok()) {
+        if let Some(v) = line
+            .strip_prefix("SN ")
+            .and_then(|v| v.trim().parse::<f64>().ok())
+        {
             self.snr_db = Some(v);
         }
     }
@@ -299,7 +425,12 @@ mod tests {
         assert_eq!(best_mode(Bandwidth::Hz500, 30.0, 1.0).name, "DATAC3");
         assert_eq!(best_mode(Bandwidth::Hz250, 30.0, 1.0).name, "DATAC4");
         assert_eq!(best_mode(Bandwidth::Hz1700, 30.0, 1.0).name, "DATAC1");
-        assert!(Bandwidth::Hz250.modes().iter().all(|m| m.bandwidth_hz <= 250));
+        assert!(
+            Bandwidth::Hz250
+                .modes()
+                .iter()
+                .all(|m| m.bandwidth_hz <= 250)
+        );
         assert_eq!(Bandwidth::Hz1000.mercury_arq_bw(), 500);
         assert_eq!(Bandwidth::parse("narrow"), Some(Bandwidth::Hz500));
         assert_eq!(Bandwidth::parse("2300Hz"), Some(Bandwidth::Hz2300));
@@ -311,7 +442,10 @@ mod tests {
         assert_eq!(predict_broadcast_s(100, m), m.frame_s);
         assert_eq!(predict_broadcast_s(124, m), 2.0 * m.frame_s);
         // 10 KB at good SNR wide is much faster than narrow at poor SNR.
-        assert!(predict_arq_s(10_000, Bandwidth::Hz2300, 20.0) < predict_arq_s(10_000, Bandwidth::Hz500, -3.0));
+        assert!(
+            predict_arq_s(10_000, Bandwidth::Hz2300, 20.0)
+                < predict_arq_s(10_000, Bandwidth::Hz500, -3.0)
+        );
         assert_eq!(human_duration(75.0), "1m15s");
     }
 

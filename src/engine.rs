@@ -25,7 +25,7 @@ use tokio::sync::mpsc;
 
 // ------------------------------------------------------------------ API ---
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum Cmd {
     Start(Config),
     Stop,
@@ -40,13 +40,21 @@ pub enum Cmd {
     StopSearch,
     /// Tune by this many Hz (e.g. onto a whistle heard while parked).
     Nudge(f64),
-    CallCq { table: Option<String> },
+    CallCq {
+        table: Option<String>,
+    },
     StopCq,
     Connect(String),
     Disconnect,
     Chat(String),
-    SendFiles { paths: Vec<PathBuf>, zip: bool },
-    AnswerOffer { fid: u64, accept: bool },
+    SendFiles {
+        paths: Vec<PathBuf>,
+        zip: bool,
+    },
+    AnswerOffer {
+        fid: u64,
+        accept: bool,
+    },
     Cancel(u64),
     JoinTable(String),
     LeaveTable,
@@ -60,7 +68,10 @@ pub enum Cmd {
     RigOp(String),
     RigVfo(String),
     RigSplit(bool),
-    RigOffset { xit: bool, hz: i32 },
+    RigOffset {
+        xit: bool,
+        hz: i32,
+    },
     RigPassband(i64),
     /// The Radio Controls window is open: poll the extended controls.
     RigWatch(bool),
@@ -71,7 +82,11 @@ pub enum Cmd {
     /// You're away (or back).
     SetAway(bool),
     /// Write Depot mail to a station.
-    DepotPost { to: String, via: Option<String>, text: String },
+    DepotPost {
+        to: String,
+        via: Option<String>,
+        text: String,
+    },
     DepotDelete(u64),
     DepotRead(u64),
     /// Connect to a station now to deliver its mail (or collect yours).
@@ -86,19 +101,22 @@ pub enum Cmd {
     BeaconNow,
     MonitorVolume(f32),
     /// Wide whistle search on the SDR; `auto` tunes the radio to hits.
-    WideSearch { on: bool, auto: bool },
+    WideSearch {
+        on: bool,
+        auto: bool,
+    },
     /// Tune to an SDR hit and fine-lock on it with the radio's own audio.
     LockOn(f64),
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Who {
     Me,
     Them,
     System,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct ChatLine {
     pub at: chrono_lite::Clock,
     pub who: Who,
@@ -109,13 +127,13 @@ pub struct ChatLine {
     pub delivered: bool,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Dir {
     Out,
     In,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum XferState {
     Offered,
     WaitingForYou,
@@ -126,7 +144,7 @@ pub enum XferState {
     Declined,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Transfer {
     pub fid: u64,
     pub dir: Dir,
@@ -138,10 +156,11 @@ pub struct Transfer {
     pub original: u64,
     pub state: XferState,
     pub eta_s: f64,
+    #[serde(with = "ser::opt_instant")]
     pub started: Option<Instant>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Heard {
     pub at: chrono_lite::Clock,
     pub call: String,
@@ -150,23 +169,25 @@ pub struct Heard {
     pub table: Option<String>,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct LinkInfo {
     pub peer: String,
     pub bw: u32,
+    #[serde(with = "ser::opt_instant")]
     pub since: Option<Instant>,
     pub peer_name: String,
     pub peer_grid: String,
     pub peer_app: String,
     /// How the peer hears us (their REPORT).
     pub their_report_db: Option<i8>,
+    #[serde(with = "ser::opt_mode")]
     pub mode: Option<&'static Mode>,
     pub bps: f64,
     /// End-to-end encryption on this link.
     pub e2e: E2eView,
 }
 
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum E2eView {
     /// Encryption is off in Settings.
     #[default]
@@ -179,17 +200,19 @@ pub enum E2eView {
     Plain { why: String },
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct Member {
     pub snr_of_host: Option<i8>,
+    #[serde(with = "ser::opt_instant")]
     pub last: Option<Instant>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct TableState {
     pub name: String,
     pub id: u16,
     pub host: bool,
+    #[serde(with = "ser::mode")]
     pub mode: &'static Mode,
     pub members: HashMap<String, Member>,
     pub floor: Option<String>,
@@ -198,7 +221,7 @@ pub struct TableState {
     pub sending_eta_s: f64,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct SearchView {
     pub active: bool,
     pub scope: String,
@@ -208,7 +231,7 @@ pub struct SearchView {
     pub note: String,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct CqView {
     pub active: bool,
     pub cycle: u32,
@@ -217,15 +240,16 @@ pub struct CqView {
     pub table: Option<String>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct WhistleSeen {
+    #[serde(with = "ser::instant")]
     pub at: Instant,
     pub dial_hz: f64,
     pub offset_hz: f64,
     pub score: f64,
 }
 
-#[derive(Default)]
+#[derive(Default, serde::Serialize, serde::Deserialize)]
 pub struct State {
     pub running: bool,
     pub demo: bool,
@@ -248,8 +272,14 @@ pub struct State {
     pub cq: CqView,
     pub table: Option<TableState>,
     pub log: VecDeque<(chrono_lite::Clock, String)>,
-    /// Radio-audio waterfall rows (dB per bin, 0..4 kHz), newest last.
+    /// Radio-audio waterfall rows (dB per bin, 0..4 kHz), newest last
+    /// (the last 64; `audio_seq` counts every row ever added). Sent to a
+    /// remote computer separately, only the new ones.
+    #[serde(skip)]
     pub audio_rows: VecDeque<Vec<f32>>,
+    #[serde(skip)]
+    pub audio_seq: u64,
+    #[serde(with = "ser::opt_mode")]
     pub listen_mode: Option<&'static Mode>,
     pub est_bps: f64,
     pub wide: WideView,
@@ -278,7 +308,7 @@ pub struct State {
 
 /// Radio controls beyond the basics, polled while their window is open,
 /// plus transmit meters.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct RigExt {
     pub levels: std::collections::BTreeMap<String, f32>,
     pub funcs: std::collections::BTreeMap<String, bool>,
@@ -296,7 +326,7 @@ pub struct RigExt {
     pub tune_pending: bool,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct WideView {
     pub on: bool,
     pub auto: bool,
@@ -305,25 +335,26 @@ pub struct WideView {
     pub hits: Vec<(f64, f64, f64)>,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct QsyView {
     pub home_hz: f64,
     pub at_hz: f64,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct LibView {
     pub path: String,
     pub entries: Vec<crate::protocol::LibEntry>,
     pub note: String,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct MailAlert {
     pub call: String,
     /// We hold mail for them (true), or they hold mail for us (false).
     pub ours: bool,
     pub count: usize,
+    #[serde(with = "ser::instant")]
     pub at: Instant,
 }
 
@@ -331,11 +362,91 @@ pub const WIDE_SCOPE: &str = "SDR wide search";
 
 pub type SharedState = Arc<Mutex<State>>;
 
+/// Serde helpers for state that crosses the network (remote operation):
+/// an `Instant` travels as "seconds ago", a Mercury mode by its name.
+pub mod ser {
+    use crate::modes::{MODES, Mode};
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+    use std::time::{Duration, Instant};
+
+    fn ago(t: &Instant) -> f64 {
+        t.elapsed().as_secs_f64()
+    }
+    fn back(secs: f64) -> Instant {
+        Instant::now()
+            .checked_sub(Duration::from_secs_f64(secs.max(0.0)))
+            .unwrap_or_else(Instant::now)
+    }
+    fn find(name: &str) -> Result<&'static Mode, String> {
+        MODES
+            .iter()
+            .find(|m| m.name == name)
+            .ok_or_else(|| format!("unknown mode {name}"))
+    }
+
+    pub mod instant {
+        use super::*;
+        pub fn serialize<S: Serializer>(t: &Instant, s: S) -> Result<S::Ok, S::Error> {
+            ago(t).serialize(s)
+        }
+        pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Instant, D::Error> {
+            Ok(back(f64::deserialize(d)?))
+        }
+    }
+    pub mod opt_instant {
+        use super::*;
+        pub fn serialize<S: Serializer>(t: &Option<Instant>, s: S) -> Result<S::Ok, S::Error> {
+            t.as_ref().map(ago).serialize(s)
+        }
+        pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Option<Instant>, D::Error> {
+            Ok(Option::<f64>::deserialize(d)?.map(back))
+        }
+    }
+    pub mod mode {
+        use super::*;
+        pub fn serialize<S: Serializer>(m: &&'static Mode, s: S) -> Result<S::Ok, S::Error> {
+            m.name.serialize(s)
+        }
+        pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<&'static Mode, D::Error> {
+            find(&String::deserialize(d)?).map_err(serde::de::Error::custom)
+        }
+    }
+    pub mod opt_mode {
+        use super::*;
+        pub fn serialize<S: Serializer>(
+            m: &Option<&'static Mode>,
+            s: S,
+        ) -> Result<S::Ok, S::Error> {
+            m.map(|m| m.name).serialize(s)
+        }
+        pub fn deserialize<'de, D: Deserializer<'de>>(
+            d: D,
+        ) -> Result<Option<&'static Mode>, D::Error> {
+            match Option::<String>::deserialize(d)? {
+                Some(n) => find(&n).map(Some).map_err(serde::de::Error::custom),
+                None => Ok(None),
+            }
+        }
+    }
+}
+
+#[derive(Clone)]
 pub struct Handle {
     pub tx: mpsc::UnboundedSender<Cmd>,
     pub state: SharedState,
     pub sdr: sdr::Shared,
+    /// The radio's received audio, for remote listeners (filled only while
+    /// one is listening).
+    pub pcm: PcmTap,
 }
+
+/// Received audio (8 kHz) waiting for remote listeners.
+#[derive(Default)]
+pub struct PcmBuf {
+    pub on: bool,
+    pub samples: VecDeque<f32>,
+}
+pub type PcmTap = Arc<Mutex<PcmBuf>>;
 
 impl Handle {
     pub fn send(&self, c: Cmd) {
@@ -345,11 +456,16 @@ impl Handle {
 
 /// A tiny wall-clock time for display, without a date/time crate.
 pub mod chrono_lite {
-    #[derive(Clone, Copy, Debug)]
+    #[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
     pub struct Clock(pub u64);
     impl Clock {
         pub fn now() -> Self {
-            Clock(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0))
+            Clock(
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0),
+            )
         }
         /// UTC hh:mm (hams log in UTC).
         pub fn hhmm(&self) -> String {
@@ -365,28 +481,52 @@ pub fn spawn(repaint: impl Fn() + Send + Sync + 'static) -> Handle {
     let (tx, rx) = mpsc::unbounded_channel();
     let state: SharedState = Default::default();
     let sdr_shared: sdr::Shared = Default::default();
-    let (st, sd) = (state.clone(), sdr_shared.clone());
+    let pcm: PcmTap = Default::default();
+    let (st, sd, pc) = (state.clone(), sdr_shared.clone(), pcm.clone());
     let repaint: Arc<dyn Fn() + Send + Sync> = Arc::new(repaint);
     std::thread::Builder::new()
         .name("whistlestop-engine".into())
         .spawn(move || {
-            let rt = tokio::runtime::Builder::new_multi_thread().enable_all().worker_threads(2).build().unwrap();
-            rt.block_on(run(rx, st, sd, repaint));
+            let rt = tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .worker_threads(2)
+                .build()
+                .unwrap();
+            rt.block_on(run(rx, st, sd, pc, repaint));
         })
         .unwrap();
-    Handle { tx, state, sdr: sdr_shared }
+    Handle {
+        tx,
+        state,
+        sdr: sdr_shared,
+        pcm,
+    }
 }
 
 // ---------------------------------------------------------------- engine ---
 
 enum SearchPhase {
-    Settle { until: Instant },
-    Dwell { from: u64 },
-    Hold { from: u64 },
+    Settle {
+        until: Instant,
+    },
+    Dwell {
+        from: u64,
+    },
+    Hold {
+        from: u64,
+    },
     /// Retuned onto a whistle the scan found (`coarse` Hz off the channel):
     /// measure it finely. `again`: this is the second listen.
-    Verify { target: f64, from: u64, coarse: f64, again: bool, hops: u8 },
-    WaitCq { until: Instant },
+    Verify {
+        target: f64,
+        from: u64,
+        coarse: f64,
+        again: bool,
+        hops: u8,
+    },
+    WaitCq {
+        until: Instant,
+    },
 }
 
 struct Search {
@@ -394,6 +534,22 @@ struct Search {
     idx: usize,
     phase: SearchPhase,
     scope: String,
+    /// A wide-search hand-off that interrupted a stepping scan keeps the
+    /// scan here and resumes it (on the same channel) if the hit comes to
+    /// nothing.
+    resume: Option<Box<Search>>,
+}
+
+impl Search {
+    /// A stepping scan still going channel to channel: nothing found yet,
+    /// so an SDR hit may cut in.
+    fn interruptible(&self) -> bool {
+        self.scope != WIDE_SCOPE
+            && matches!(
+                self.phase,
+                SearchPhase::Settle { .. } | SearchPhase::Dwell { .. } | SearchPhase::Hold { .. }
+            )
+    }
 }
 
 enum CqPhase {
@@ -412,6 +568,8 @@ struct Station {
     cfg: Config,
     st: SharedState,
     sdr: sdr::Shared,
+    pcm: PcmTap,
+    pcm_from: u64,
     _repaint: Arc<dyn Fn() + Send + Sync>,
     rig: Option<Rig>,
     tnc: Option<Tnc>,
@@ -515,7 +673,13 @@ struct Station {
     last_query: Instant,
 }
 
-async fn run(mut cmds: mpsc::UnboundedReceiver<Cmd>, st: SharedState, sdr: sdr::Shared, repaint: Arc<dyn Fn() + Send + Sync>) {
+async fn run(
+    mut cmds: mpsc::UnboundedReceiver<Cmd>,
+    st: SharedState,
+    sdr: sdr::Shared,
+    pcm: PcmTap,
+    repaint: Arc<dyn Fn() + Send + Sync>,
+) {
     let mut station: Option<Station> = None;
     let mut tick = tokio::time::interval(Duration::from_millis(100));
     let mut poll = tokio::time::interval(Duration::from_millis(700));
@@ -532,7 +696,7 @@ async fn run(mut cmds: mpsc::UnboundedReceiver<Cmd>, st: SharedState, sdr: sdr::
                 match c {
                     Cmd::Start(cfg) => {
                         if let Some(s) = station.take() { s.shutdown().await; }
-                        station = Some(Station::start(cfg, st.clone(), sdr.clone(), repaint.clone()).await);
+                        station = Some(Station::start(cfg, st.clone(), sdr.clone(), pcm.clone(), repaint.clone()).await);
                     }
                     Cmd::Stop => {
                         if let Some(s) = station.take() { s.shutdown().await; }
@@ -563,7 +727,13 @@ async fn run(mut cmds: mpsc::UnboundedReceiver<Cmd>, st: SharedState, sdr: sdr::
 }
 
 impl Station {
-    async fn start(cfg: Config, st: SharedState, sdr: sdr::Shared, repaint: Arc<dyn Fn() + Send + Sync>) -> Station {
+    async fn start(
+        cfg: Config,
+        st: SharedState,
+        sdr: sdr::Shared,
+        pcm: PcmTap,
+        repaint: Arc<dyn Fn() + Send + Sync>,
+    ) -> Station {
         let vfo = Arc::new(Mutex::new(14_096_000.0));
         let rx: SharedRx = Default::default();
         let sim_stop = Arc::new(AtomicBool::new(false));
@@ -577,6 +747,8 @@ impl Station {
             cfg: cfg.clone(),
             st: st.clone(),
             sdr,
+            pcm,
+            pcm_from: 0,
             _repaint: repaint,
             rig: None,
             tnc: None,
@@ -629,15 +801,26 @@ impl Station {
             mon_from: 0,
             real_demo: None,
             // Demo keeps its own mailbox; tests can point anywhere.
-            depot: crate::depot::Depot::load(std::env::var_os("WHISTLESTOP_DEPOT").map(PathBuf::from).or_else(|| (!cfg.depot_file.is_empty()).then(|| PathBuf::from(&cfg.depot_file))).unwrap_or_else(|| {
-                if cfg!(test) {
-                    std::env::temp_dir().join(format!("ws-depot-{}-{}.json", std::process::id(), cfg.callsign))
-                } else if cfg.demo {
-                    crate::depot::default_path().with_file_name("depot-demo.json")
-                } else {
-                    crate::depot::default_path()
-                }
-            })),
+            depot: crate::depot::Depot::load(
+                std::env::var_os("WHISTLESTOP_DEPOT")
+                    .map(PathBuf::from)
+                    .or_else(|| {
+                        (!cfg.depot_file.is_empty()).then(|| PathBuf::from(&cfg.depot_file))
+                    })
+                    .unwrap_or_else(|| {
+                        if cfg!(test) {
+                            std::env::temp_dir().join(format!(
+                                "ws-depot-{}-{}.json",
+                                std::process::id(),
+                                cfg.callsign
+                            ))
+                        } else if cfg.demo {
+                            crate::depot::default_path().with_file_name("depot-demo.json")
+                        } else {
+                            crate::depot::default_path()
+                        }
+                    }),
+            ),
             away: false,
             last_beacon: Instant::now(),
             last_link_activity: Instant::now(),
@@ -660,24 +843,39 @@ impl Station {
         };
         {
             let mut g = st.lock().unwrap();
-            *g = State { running: true, demo: cfg.demo, mycall: cfg.callsign.to_uppercase(), bandwidth: Some(bw), ..Default::default() };
+            *g = State {
+                running: true,
+                demo: cfg.demo,
+                mycall: cfg.callsign.to_uppercase(),
+                bandwidth: Some(bw),
+                ..Default::default()
+            };
         }
         // Demo on real Mercury when it's installed; otherwise all simulated.
         let real = if cfg.demo && cfg.demo_real_mercury {
             match crate::realdemo::find_mercury(&cfg.mercury_bin) {
-                Some(bin) => match crate::realdemo::start(&bin).await {
-                    Ok(d) => Some(d),
-                    Err(e) => {
-                        s.log(format!("⚠ Demo couldn't start real Mercury ({e}); using the simulated modem"));
-                        None
+                Some(bin) => {
+                    match crate::realdemo::start(&bin).await {
+                        Ok(d) => Some(d),
+                        Err(e) => {
+                            s.log(format!("⚠ Demo couldn't start real Mercury ({e}); using the simulated modem"));
+                            None
+                        }
                     }
-                },
+                }
                 None => None,
             }
         } else {
             None
         };
-        let real_ports = real.as_ref().map(|d| (d.rig_addr.clone(), d.audio_addr.clone(), d.mercury_port, d.bcast_port));
+        let real_ports = real.as_ref().map(|d| {
+            (
+                d.rig_addr.clone(),
+                d.audio_addr.clone(),
+                d.mercury_port,
+                d.bcast_port,
+            )
+        });
         s.log(match (&real, cfg.demo) {
             (Some(_), _) => "Whistlestop starting in Demo mode: two real Mercury modems on a simulated 20 m band, you and K7BOT".to_string(),
             (None, true) => "Whistlestop starting in Demo mode (simulated radio, band and Mercury; install Mercury for a real-Mercury demo)".to_string(),
@@ -692,7 +890,11 @@ impl Station {
         } else if cfg.rig_mode == crate::rigsetup::RigMode::Direct && real.is_none() && !cfg.demo {
             // Whistlestop's own CAT drivers: find the radio and its protocol.
             let cat = cfg.cat.clone();
-            match tokio::task::spawn_blocking(move || crate::cat::connect(&cat)).await.map_err(|e| anyhow::anyhow!("{e}")).and_then(|r| r) {
+            match tokio::task::spawn_blocking(move || crate::cat::connect(&cat))
+                .await
+                .map_err(|e| anyhow::anyhow!("{e}"))
+                .and_then(|r| r)
+            {
                 Ok(d) => {
                     let h = crate::cat::CatHandle::start(d);
                     let desc = h.desc.clone();
@@ -715,8 +917,15 @@ impl Station {
                 Err(e) => s.log(format!("⚠ Radio (direct CAT): {e:#}")),
             }
         } else {
-            let mut addr = real_ports.as_ref().map(|p| p.0.clone()).unwrap_or(cfg.rigctld.clone());
-            let mut desc = if real_ports.is_some() { "Demo radio on the simulated band".to_string() } else { format!("rigctld at {addr}") };
+            let mut addr = real_ports
+                .as_ref()
+                .map(|p| p.0.clone())
+                .unwrap_or(cfg.rigctld.clone());
+            let mut desc = if real_ports.is_some() {
+                "Demo radio on the simulated band".to_string()
+            } else {
+                format!("rigctld at {addr}")
+            };
             if cfg.rig_mode == crate::rigsetup::RigMode::Managed && !cfg.demo {
                 match crate::rigsetup::start_rigctld(&cfg.managed_rig) {
                     Ok(p) => {
@@ -754,23 +963,52 @@ impl Station {
         }
         if let Some(r) = s.rig.as_mut() {
             // What this radio can do decides which controls are offered.
-            let caps = tokio::time::timeout(Duration::from_secs(4), r.caps()).await.ok().and_then(|c| c.ok()).unwrap_or_default();
+            let caps = tokio::time::timeout(Duration::from_secs(4), r.caps())
+                .await
+                .ok()
+                .and_then(|c| c.ok())
+                .unwrap_or_default();
             if !caps.model.is_empty() {
-                s.log(format!("Radio reports: {} ({} adjustable levels, {} functions{})", caps.model, caps.set_levels.len(), caps.set_funcs.len(), if caps.has_tuner() { ", antenna tuner" } else { "" }));
+                s.log(format!(
+                    "Radio reports: {} ({} adjustable levels, {} functions{})",
+                    caps.model,
+                    caps.set_levels.len(),
+                    caps.set_funcs.len(),
+                    if caps.has_tuner() {
+                        ", antenna tuner"
+                    } else {
+                        ""
+                    }
+                ));
             }
             s.set(|g| g.rig_caps = Some(caps.clone()));
             s.rig_caps = caps;
         }
 
         // Audio.
-        let audio_in = real_ports.as_ref().map(|p| format!("ether:{}", p.1)).unwrap_or(cfg.audio_in.clone());
+        let audio_in = real_ports
+            .as_ref()
+            .map(|p| format!("ether:{}", p.1))
+            .unwrap_or(cfg.audio_in.clone());
         if cfg.demo && real.is_none() {
             let band = SimBand::new(
                 vfo.clone(),
                 vec![
-                    SimSignal::Whistler { rf_hz: 14_103_150.0, snr_db: -2.0, whistle_s: 10.0, cycle_s: 30.0, start_s: 4.0 },
-                    SimSignal::Carrier { rf_hz: 14_101_900.0, snr_db: 8.0 },
-                    SimSignal::Ft8 { rf_hz: 14_097_350.0, snr_db: 0.0 },
+                    SimSignal::Whistler {
+                        rf_hz: 14_103_150.0,
+                        snr_db: -2.0,
+                        whistle_s: 10.0,
+                        cycle_s: 30.0,
+                        start_s: 4.0,
+                    },
+                    SimSignal::Carrier {
+                        rf_hz: 14_101_900.0,
+                        snr_db: 8.0,
+                    },
+                    SimSignal::Ft8 {
+                        rf_hz: 14_097_350.0,
+                        snr_db: 0.0,
+                    },
                 ],
             );
             audio::run_sim(band, rx.clone(), sim_stop.clone());
@@ -781,7 +1019,8 @@ impl Station {
                 match std::net::TcpStream::connect(addr) {
                     Ok(t) => {
                         t.set_nodelay(true).ok();
-                        s._input = Some(LiveInput::ether(t.try_clone().expect("clone"), rx.clone()));
+                        s._input =
+                            Some(LiveInput::ether(t.try_clone().expect("clone"), rx.clone()));
                         s.output = Some(Arc::new(LiveOutput::ether(t)));
                         s.set(|g| g.audio_ok = true);
                         s.log(format!("Audio: test ether at {addr}"));
@@ -789,17 +1028,17 @@ impl Station {
                     Err(e) => s.log(format!("⚠ Audio: ether at {addr}: {e}")),
                 }
             } else {
-            match LiveInput::start(&cfg.audio_in, rx.clone()) {
-                Ok(i) => {
-                    s._input = Some(i);
-                    s.set(|g| g.audio_ok = true);
+                match LiveInput::start(&cfg.audio_in, rx.clone()) {
+                    Ok(i) => {
+                        s._input = Some(i);
+                        s.set(|g| g.audio_ok = true);
+                    }
+                    Err(e) => s.log(format!("⚠ Audio input: {e}")),
                 }
-                Err(e) => s.log(format!("⚠ Audio input: {e}")),
-            }
-            match LiveOutput::start(&cfg.audio_out) {
-                Ok(o) => s.output = Some(Arc::new(o)),
-                Err(e) => s.log(format!("⚠ Audio output: {e} (CQ whistle disabled)")),
-            }
+                match LiveOutput::start(&cfg.audio_out) {
+                    Ok(o) => s.output = Some(Arc::new(o)),
+                    Err(e) => s.log(format!("⚠ Audio output: {e} (CQ whistle disabled)")),
+                }
             }
         }
 
@@ -807,7 +1046,12 @@ impl Station {
         let (host, port, bport) = if let Some(p) = &real_ports {
             ("127.0.0.1".to_string(), p.2, p.3)
         } else if cfg.demo {
-            match FakeMercury::start(FakeOptions { rig_freq: Some(vfo.clone()), ..Default::default() }).await {
+            match FakeMercury::start(FakeOptions {
+                rig_freq: Some(vfo.clone()),
+                ..Default::default()
+            })
+            .await
+            {
                 Ok(f) => ("127.0.0.1".to_string(), f.port, f.bcast_port),
                 Err(e) => {
                     s.log(format!("⚠ demo Mercury: {e}"));
@@ -815,7 +1059,11 @@ impl Station {
                 }
             }
         } else {
-            (cfg.mercury_host.clone(), cfg.mercury_port, cfg.mercury_bcast_port)
+            (
+                cfg.mercury_host.clone(),
+                cfg.mercury_port,
+                cfg.mercury_bcast_port,
+            )
         };
         let (etx, erx) = mpsc::unbounded_channel();
         match Tnc::connect(&host, port, Some(bport), etx).await {
@@ -829,7 +1077,10 @@ impl Station {
                         g.mercury_ok = true;
                         g.listen_mode = modes::mode_by_name("DATAC3");
                     });
-                    s.log(format!("Mercury: connected ({host}:{port}), listening as {}", cfg.callsign.to_uppercase()));
+                    s.log(format!(
+                        "Mercury: connected ({host}:{port}), listening as {}",
+                        cfg.callsign.to_uppercase()
+                    ));
                 }
                 Err(e) => s.log(format!("⚠ Mercury setup: {e}")),
             },
@@ -867,7 +1118,14 @@ impl Station {
     fn start_sdr(&mut self) {
         self.sdr_stop.store(true, Ordering::Relaxed);
         self.sdr_stop = Arc::new(AtomicBool::new(false));
-        sdr::start(self.cfg.sdr.clone(), self.vfo.clone(), self.sdr_span.clone(), self.cfg.demo, self.sdr.clone(), self.sdr_stop.clone());
+        sdr::start(
+            self.cfg.sdr.clone(),
+            self.vfo.clone(),
+            self.sdr_span.clone(),
+            self.cfg.demo,
+            self.sdr.clone(),
+            self.sdr_stop.clone(),
+        );
     }
 
     fn set(&self, f: impl FnOnce(&mut State)) {
@@ -907,9 +1165,21 @@ impl Station {
         let caps = self.rig_caps.clone();
         let Some(r) = self.rig.as_mut() else { return };
         if tx {
-            let swr = if caps.can_get_level("SWR") { r.get_level("SWR").await.ok().filter(|v| *v >= 1.0) } else { None };
-            let alc = if caps.can_get_level("ALC") { r.get_level("ALC").await.ok() } else { None };
-            let po = if caps.can_get_level("RFPOWER_METER") { r.get_level("RFPOWER_METER").await.ok() } else { None };
+            let swr = if caps.can_get_level("SWR") {
+                r.get_level("SWR").await.ok().filter(|v| *v >= 1.0)
+            } else {
+                None
+            };
+            let alc = if caps.can_get_level("ALC") {
+                r.get_level("ALC").await.ok()
+            } else {
+                None
+            };
+            let po = if caps.can_get_level("RFPOWER_METER") {
+                r.get_level("RFPOWER_METER").await.ok()
+            } else {
+                None
+            };
             if let Some(v) = swr {
                 self.swr_peak = self.swr_peak.max(v);
             }
@@ -926,7 +1196,9 @@ impl Station {
                 let band = bandplan::band_of(self.dial());
                 self.set(|g| g.rig_ext.swr_last_tx = Some(peak));
                 if peak > self.cfg.swr_limit {
-                    let recently = self.last_autotune.is_some_and(|(at, b)| b == band && at.elapsed() < Duration::from_secs(120));
+                    let recently = self.last_autotune.is_some_and(|(at, b)| {
+                        b == band && at.elapsed() < Duration::from_secs(120)
+                    });
                     let can = caps.has_tuner();
                     self.log(format!(
                         "⚠ High SWR: {peak:.1} on {} (limit {:.1}){}",
@@ -968,7 +1240,9 @@ impl Station {
 
     /// Everything the Radio Controls window shows that the radio reports.
     async fn poll_ext(&mut self) {
-        const LEVELS: [&str; 10] = ["AF", "RF", "SQL", "MICGAIN", "COMP", "NR", "AGC", "PREAMP", "ATT", "RFPOWER"];
+        const LEVELS: [&str; 10] = [
+            "AF", "RF", "SQL", "MICGAIN", "COMP", "NR", "AGC", "PREAMP", "ATT", "RFPOWER",
+        ];
         const FUNCS: [&str; 7] = ["NB", "NR", "ANF", "COMP", "VOX", "MON", "TUNER"];
         let caps = self.rig_caps.clone();
         let Some(r) = self.rig.as_mut() else { return };
@@ -978,7 +1252,10 @@ impl Station {
                 ext.levels.insert(l.to_string(), v);
             }
         }
-        for f in FUNCS.iter().filter(|f| caps.get_funcs.iter().any(|x| x == *f)) {
+        for f in FUNCS
+            .iter()
+            .filter(|f| caps.get_funcs.iter().any(|x| x == *f))
+        {
             if let Ok(v) = r.get_func(f).await {
                 ext.funcs.insert(f.to_string(), v);
             }
@@ -997,7 +1274,14 @@ impl Station {
         }
         let (swr, swr_last, alc, po, note, pend) = {
             let g = self.st.lock().unwrap();
-            (g.rig_ext.swr, g.rig_ext.swr_last_tx, g.rig_ext.alc, g.rig_ext.power_out, g.rig_ext.tuner_note.clone(), g.rig_ext.tune_pending)
+            (
+                g.rig_ext.swr,
+                g.rig_ext.swr_last_tx,
+                g.rig_ext.alc,
+                g.rig_ext.power_out,
+                g.rig_ext.tuner_note.clone(),
+                g.rig_ext.tune_pending,
+            )
         };
         ext.swr = swr;
         ext.swr_last_tx = swr_last;
@@ -1013,7 +1297,9 @@ impl Station {
     async fn tune_antenna(&mut self, why: &str) -> anyhow::Result<()> {
         let caps = self.rig_caps.clone();
         let band = bandplan::band_of(self.dial());
-        let Some(r) = self.rig.as_mut() else { anyhow::bail!("no radio") };
+        let Some(r) = self.rig.as_mut() else {
+            anyhow::bail!("no radio")
+        };
         if caps.can_func("TUNER") {
             r.set_func("TUNER", true).await?;
         }
@@ -1027,7 +1313,8 @@ impl Station {
         let when = Clock::now().hhmm();
         self.set(|g| {
             g.rig_ext.tune_pending = false;
-            g.rig_ext.tuner_note = format!("Tuned on {} at {when}", band.unwrap_or("this frequency"));
+            g.rig_ext.tuner_note =
+                format!("Tuned on {} at {when}", band.unwrap_or("this frequency"));
         });
         self.log(format!("Antenna tuner: tune started ({why})"));
         Ok(())
@@ -1111,9 +1398,11 @@ impl Station {
                 }
                 let table_mode = self.st.lock().unwrap().table.as_ref().map(|t| t.mode);
                 if let Some(m) = table_mode
-                    && m.bandwidth_hz > bw.hz() {
-                        self.table_set_speed(modes::best_mode(bw, -30.0, 0.0)).await?;
-                    }
+                    && m.bandwidth_hz > bw.hz()
+                {
+                    self.table_set_speed(modes::best_mode(bw, -30.0, 0.0))
+                        .await?;
+                }
                 self.set(|g| g.bandwidth = Some(bw));
                 self.push_wide_cfg();
                 self.log(format!(
@@ -1129,10 +1418,14 @@ impl Station {
                 if let Some(m) = &self.monitor {
                     m.lock().unwrap().clear_tx();
                 }
-                if let Some(Cq { phase: CqPhase::Whistle { .. }, .. }) = &self.cq
-                    && let Some(o) = &self.output {
-                        o.abort();
-                    }
+                if let Some(Cq {
+                    phase: CqPhase::Whistle { .. },
+                    ..
+                }) = &self.cq
+                    && let Some(o) = &self.output
+                {
+                    o.abort();
+                }
                 self.cq = None;
                 self.ptt(false).await;
                 self.set(|g| g.cq = CqView::default());
@@ -1160,10 +1453,20 @@ impl Station {
                 }
                 let id = self.next_chat_id;
                 self.next_chat_id += 1;
-                self.hi_queue.push_back(Link::Chat { id, text: text.clone() });
+                self.hi_queue.push_back(Link::Chat {
+                    id,
+                    text: text.clone(),
+                });
                 let me = self.mycall();
                 self.set(|g| {
-                    g.chat.push(ChatLine { at: Clock::now(), who: Who::Me, from: me, text, id, delivered: false })
+                    g.chat.push(ChatLine {
+                        at: Clock::now(),
+                        who: Who::Me,
+                        from: me,
+                        text,
+                        id,
+                        delivered: false,
+                    })
                 });
                 self.pump().await?;
             }
@@ -1182,16 +1485,34 @@ impl Station {
             Cmd::LeaveTable => {
                 if let Some(id) = self.table_id() {
                     let me = self.mycall();
-                    self.table_tx(TableFrame { table: id, from: me, body: TableBody::Leave }.encode());
+                    self.table_tx(
+                        TableFrame {
+                            table: id,
+                            from: me,
+                            body: TableBody::Leave,
+                        }
+                        .encode(),
+                    );
                 }
                 self.set(|g| g.table = None);
                 self.log("Left the Roundtable".into());
             }
             Cmd::TableSay(text) => self.table_say(text)?,
             Cmd::PassFloor(to) => {
-                let Some(id) = self.table_id() else { anyhow::bail!("not at a Roundtable") };
+                let Some(id) = self.table_id() else {
+                    anyhow::bail!("not at a Roundtable")
+                };
                 let me = self.mycall();
-                self.table_tx(TableFrame { table: id, from: me, body: TableBody::Floor { to: to.to_uppercase() } }.encode());
+                self.table_tx(
+                    TableFrame {
+                        table: id,
+                        from: me,
+                        body: TableBody::Floor {
+                            to: to.to_uppercase(),
+                        },
+                    }
+                    .encode(),
+                );
                 self.set(|g| {
                     if let Some(t) = g.table.as_mut() {
                         t.floor = Some(to.to_uppercase());
@@ -1244,12 +1565,19 @@ impl Station {
                 if let Some(r) = self.rig.as_mut() {
                     r.set_offset(xit, hz).await?;
                 }
-                self.set(|g| if xit { g.rig_ext.xit = hz } else { g.rig_ext.rit = hz });
+                self.set(|g| {
+                    if xit {
+                        g.rig_ext.xit = hz
+                    } else {
+                        g.rig_ext.rit = hz
+                    }
+                });
             }
             Cmd::RigPassband(hz) => {
                 let mode = self.st.lock().unwrap().rig.mode.clone();
                 if let Some(r) = self.rig.as_mut() {
-                    r.set_mode(if mode.is_empty() { "PKTUSB" } else { &mode }, hz).await?;
+                    r.set_mode(if mode.is_empty() { "PKTUSB" } else { &mode }, hz)
+                        .await?;
                 }
             }
             Cmd::RigWatch(on) => {
@@ -1260,7 +1588,12 @@ impl Station {
             Cmd::SetAway(on) => {
                 self.away = on;
                 self.set(|g| g.away = on);
-                self.log(if on { "🚪 Away: links get your away message; what they type waits in your Depot".into() } else { "Back at the radio".into() });
+                self.log(if on {
+                    "🚪 Away: links get your away message; what they type waits in your Depot"
+                        .into()
+                } else {
+                    "Back at the radio".into()
+                });
             }
             Cmd::DepotPost { to, via, text } => {
                 let to = to.trim().to_uppercase();
@@ -1268,7 +1601,9 @@ impl Station {
                     anyhow::bail!("write a callsign and a message");
                 }
                 let me = self.mycall();
-                let via = via.map(|v| v.trim().to_uppercase()).filter(|v| !v.is_empty() && *v != to);
+                let via = via
+                    .map(|v| v.trim().to_uppercase())
+                    .filter(|v| !v.is_empty() && *v != to);
                 self.depot.post_via(&me, &to, via.as_deref(), text.trim());
                 self.log(match &via {
                     Some(v) => format!("📮 Mail for {to} waits in Departures, to be handed to {v}"),
@@ -1276,12 +1611,33 @@ impl Station {
                 });
                 // Linked with them (or the relay) right now: send it at once.
                 if let Some(p) = self.peer.clone()
-                    && (p == to || via.as_deref() == Some(p.as_str())) {
-                        let ids: Vec<u64> = self.depot.departures.iter().rev().take(1).map(|m| m.id).collect();
-                        let mail: Vec<Link> = self.depot.departures.iter().filter(|m| ids.contains(&m.id)).map(|m| Link::Mail { id: m.id, from: m.from.clone(), to: m.to.clone(), created: m.created, hops: m.hops, text: m.text.clone() }).collect();
-                        self.hi_queue.extend(mail);
-                        self.pump().await?;
-                    }
+                    && (p == to || via.as_deref() == Some(p.as_str()))
+                {
+                    let ids: Vec<u64> = self
+                        .depot
+                        .departures
+                        .iter()
+                        .rev()
+                        .take(1)
+                        .map(|m| m.id)
+                        .collect();
+                    let mail: Vec<Link> = self
+                        .depot
+                        .departures
+                        .iter()
+                        .filter(|m| ids.contains(&m.id))
+                        .map(|m| Link::Mail {
+                            id: m.id,
+                            from: m.from.clone(),
+                            to: m.to.clone(),
+                            created: m.created,
+                            hops: m.hops,
+                            text: m.text.clone(),
+                        })
+                        .collect();
+                    self.hi_queue.extend(mail);
+                    self.pump().await?;
+                }
                 self.sync_depot();
             }
             Cmd::DepotDelete(id) => {
@@ -1304,29 +1660,45 @@ impl Station {
             }
             Cmd::BeaconNow => self.send_beacon("by hand")?,
             Cmd::Qsy(hz) => {
-                let Some(peer) = self.peer.clone() else { anyhow::bail!("not linked") };
+                let Some(peer) = self.peer.clone() else {
+                    anyhow::bail!("not linked")
+                };
                 if bandplan::band_of(hz).is_none() {
                     anyhow::bail!("{:.3} kHz isn't in an amateur band", hz / 1e3);
                 }
                 let id = crate::depot::new_id();
                 self.qsy_out = Some((id, hz));
-                self.hi_queue.push_back(Link::Qsy { id, dial_hz: hz.round() as u64, why: String::new() });
+                self.hi_queue.push_back(Link::Qsy {
+                    id,
+                    dial_hz: hz.round() as u64,
+                    why: String::new(),
+                });
                 self.log(format!("↔ Asking {peer} to QSY to {:.3} kHz", hz / 1e3));
-                self.set(|g| g.qsy_note = Some(format!("Asked {peer} to move to {:.3} kHz…", hz / 1e3)));
+                self.set(|g| {
+                    g.qsy_note = Some(format!("Asked {peer} to move to {:.3} kHz…", hz / 1e3))
+                });
                 self.pump().await?;
             }
             Cmd::LibList(path) => {
                 if self.peer.is_none() {
                     anyhow::bail!("not linked");
                 }
-                self.hi_queue.push_back(Link::ListReq { id: crate::depot::new_id(), path });
+                self.hi_queue.push_back(Link::ListReq {
+                    id: crate::depot::new_id(),
+                    path,
+                });
                 self.pump().await?;
             }
             Cmd::LibFetch(path) => {
-                let Some(peer) = self.peer.clone() else { anyhow::bail!("not linked") };
+                let Some(peer) = self.peer.clone() else {
+                    anyhow::bail!("not linked")
+                };
                 let id = crate::depot::new_id();
                 self.wanted.insert(id);
-                self.hi_queue.push_back(Link::Fetch { id, path: path.clone() });
+                self.hi_queue.push_back(Link::Fetch {
+                    id,
+                    path: path.clone(),
+                });
                 self.log(format!("📚 Asking {peer} for {path}"));
                 self.pump().await?;
             }
@@ -1345,7 +1717,6 @@ impl Station {
                 if self.cq.is_some() || self.peer.is_some() {
                     anyhow::bail!("busy: stop the CQ or link first");
                 }
-                self.stop_search("for a wide-search hit");
                 self.wide_handoff(dial, 0.0);
             }
             Cmd::WideSearch { on, auto } => {
@@ -1355,7 +1726,14 @@ impl Station {
                 self.cfg.sdr.wide_auto = auto;
                 self.push_wide_cfg();
                 self.log(if on {
-                    format!("Wide whistle search on{}", if auto { ": the radio will tune to whistles it finds" } else { "" })
+                    format!(
+                        "Wide whistle search on{}",
+                        if auto {
+                            ": the radio will tune to whistles it finds"
+                        } else {
+                            ""
+                        }
+                    )
                 } else {
                     "Wide whistle search off".into()
                 });
@@ -1365,14 +1743,17 @@ impl Station {
     }
 
     fn tnc(&mut self) -> anyhow::Result<&mut Tnc> {
-        self.tnc.as_mut().ok_or_else(|| anyhow::anyhow!("Mercury is not connected"))
+        self.tnc
+            .as_mut()
+            .ok_or_else(|| anyhow::anyhow!("Mercury is not connected"))
     }
 
     async fn ptt(&mut self, on: bool) {
         if let Some(r) = self.rig.as_mut()
-            && let Err(e) = r.ptt(on).await {
-                self.log(format!("⚠ PTT: {e}"));
-            }
+            && let Err(e) = r.ptt(on).await
+        {
+            self.log(format!("⚠ PTT: {e}"));
+        }
         self.set(|g| g.tx = on);
     }
 
@@ -1384,14 +1765,20 @@ impl Station {
 
     fn step_hz(&self) -> f64 {
         // Neighbouring channels overlap so every caller is within reach.
-        self.cfg.step_hz.min(1.8 * self.whistle_params().scan_reach_hz())
+        self.cfg
+            .step_hz
+            .min(1.8 * self.whistle_params().scan_reach_hz())
     }
 
     /// The fine offset from a matched-filter measurement, choosing between
     /// it and its alias the one that agrees with the scan's coarse offset.
     fn fine_offset(&self, coarse: f64, measured: f64) -> f64 {
         let alias = self.whistle_params().alias_of(measured);
-        if (alias - coarse).abs() < (measured - coarse).abs() { alias } else { measured }
+        if (alias - coarse).abs() < (measured - coarse).abs() {
+            alias
+        } else {
+            measured
+        }
     }
 
     async fn start_search(&mut self, scope: SearchScope) -> anyhow::Result<()> {
@@ -1400,29 +1787,58 @@ impl Station {
         }
         let segs = bandplan::segments_for(&scope, &self.cfg.segments, self.dial());
         if segs.is_empty() {
-            anyhow::bail!("no digital segment configured for that band (the radio is on {:.3} kHz)", self.dial() / 1e3);
+            anyhow::bail!(
+                "no digital segment configured for that band (the radio is on {:.3} kHz)",
+                self.dial() / 1e3
+            );
         }
         let p = self.whistle_params();
         let (alo, ahi) = (p.f_lo - 200.0, p.f_hi + 200.0);
-        let channels: Vec<f64> = segs.iter().flat_map(|s| bandplan::channels(s, self.step_hz(), alo, ahi)).collect();
+        let channels: Vec<f64> = segs
+            .iter()
+            .flat_map(|s| bandplan::channels(s, self.step_hz(), alo, ahi))
+            .collect();
         let label = match &scope {
-            SearchScope::CurrentBand => format!("{} digital segment", bandplan::band_of(self.dial()).unwrap_or("?")),
+            SearchScope::CurrentBand => format!(
+                "{} digital segment",
+                bandplan::band_of(self.dial()).unwrap_or("?")
+            ),
             SearchScope::Band(b) => format!("{b} digital segment"),
             SearchScope::AllBands => "all bands".into(),
         };
         let cycle = channels.len() as f64 * (self.cfg.dwell_s + 0.15);
-        self.log(format!("Search: {label}, {} channels, {:.0} s per pass", channels.len(), cycle));
+        self.log(format!(
+            "Search: {label}, {} channels, {:.0} s per pass",
+            channels.len(),
+            cycle
+        ));
         let first = channels[0];
-        self.search = Some(Search { channels, idx: 0, phase: SearchPhase::Settle { until: Instant::now() }, scope: label.clone() });
+        self.search = Some(Search {
+            channels,
+            idx: 0,
+            phase: SearchPhase::Settle {
+                until: Instant::now(),
+            },
+            scope: label.clone(),
+            resume: None,
+        });
         self.tune(first).await?;
         self.set_settle();
-        self.set(|g| g.search = SearchView { active: true, scope: label, ..Default::default() });
+        self.set(|g| {
+            g.search = SearchView {
+                active: true,
+                scope: label,
+                ..Default::default()
+            }
+        });
         Ok(())
     }
 
     fn set_settle(&mut self) {
         if let Some(s) = self.search.as_mut() {
-            s.phase = SearchPhase::Settle { until: Instant::now() + Duration::from_millis(150) };
+            s.phase = SearchPhase::Settle {
+                until: Instant::now() + Duration::from_millis(150),
+            };
         }
     }
 
@@ -1434,7 +1850,9 @@ impl Station {
     }
 
     async fn step_search(&mut self) -> anyhow::Result<()> {
-        let Some(mut s) = self.search.take() else { return Ok(()) };
+        let Some(mut s) = self.search.take() else {
+            return Ok(());
+        };
         // A short dwell on every channel; a promising one gets up to 2 s;
         // a found whistle is measured over three of its 0.4 s patterns.
         let dwell = self.cfg.dwell_s;
@@ -1448,7 +1866,9 @@ impl Station {
         match &s.phase {
             SearchPhase::Settle { until } => {
                 if Instant::now() >= *until {
-                    s.phase = SearchPhase::Dwell { from: audio::now_count(&self.rx) };
+                    s.phase = SearchPhase::Dwell {
+                        from: audio::now_count(&self.rx),
+                    };
                 }
             }
             SearchPhase::Dwell { from } => {
@@ -1458,9 +1878,17 @@ impl Station {
                     match self.tracker.scan(&x) {
                         Some(h) if found(h.z, dwell) => {
                             self.log(format!("🚂 Whistle on {:.1} kHz, {:+.0} Hz off (score {:.1}). Retuning onto it.", ch / 1e3, h.offset_hz, h.z));
-                            s.phase = SearchPhase::Verify { target: ch + h.offset_hz, from: 0, coarse: h.offset_hz, again: false, hops: 0 };
+                            s.phase = SearchPhase::Verify {
+                                target: ch + h.offset_hz,
+                                from: 0,
+                                coarse: h.offset_hz,
+                                again: false,
+                                hops: 0,
+                            };
                         }
-                        Some(h) if h.z >= TrackDetector::MAYBE && hold_s > dwell => s.phase = SearchPhase::Hold { from },
+                        Some(h) if h.z >= TrackDetector::MAYBE && hold_s > dwell => {
+                            s.phase = SearchPhase::Hold { from }
+                        }
                         _ => next_channel = true,
                     }
                 }
@@ -1471,19 +1899,41 @@ impl Station {
                     match self.tracker.scan(&x) {
                         Some(h) if found(h.z, hold_s) => {
                             self.log(format!("🚂 Whistle on {:.1} kHz, {:+.0} Hz off (score {:.1}, after listening longer). Retuning onto it.", ch / 1e3, h.offset_hz, h.z));
-                            s.phase = SearchPhase::Verify { target: ch + h.offset_hz, from: 0, coarse: h.offset_hz, again: false, hops: 0 };
+                            s.phase = SearchPhase::Verify {
+                                target: ch + h.offset_hz,
+                                from: 0,
+                                coarse: h.offset_hz,
+                                again: false,
+                                hops: 0,
+                            };
                         }
                         _ => next_channel = true,
                     }
                 }
             }
-            SearchPhase::Verify { target, from, coarse, again, hops } => {
+            SearchPhase::Verify {
+                target,
+                from,
+                coarse,
+                again,
+                hops,
+            } => {
                 let (target, from, coarse, again, hops) = (*target, *from, *coarse, *again, *hops);
-                let got = if from == 0 { None } else { self.rx.lock().unwrap().range(from, n_verify) };
+                let got = if from == 0 {
+                    None
+                } else {
+                    self.rx.lock().unwrap().range(from, n_verify)
+                };
                 if from == 0 {
                     self.tune(target).await?;
                     tokio::time::sleep(Duration::from_millis(150)).await;
-                    s.phase = SearchPhase::Verify { target, from: audio::now_count(&self.rx).max(1), coarse, again, hops };
+                    s.phase = SearchPhase::Verify {
+                        target,
+                        from: audio::now_count(&self.rx).max(1),
+                        coarse,
+                        again,
+                        hops,
+                    };
                 } else if let Some(x) = got {
                     // Now within a few tens of hertz: the matched filter
                     // measures the rest to about a hertz.
@@ -1493,59 +1943,98 @@ impl Station {
                     // only when the two agree. It copes with a strong signal
                     // inside the sweep and an SDR hand-off's crystal error.
                     let secs = x.len() as f64 / FS as f64;
-                    let reach = if wide { self.whistle_params().scan_reach_hz() } else { 150.0 };
-                    let coarse_now = self.tracker.scan(&x).filter(|h| h.z >= TrackDetector::found(secs) && h.offset_hz.abs() <= reach);
+                    let reach = if wide {
+                        self.whistle_params().scan_reach_hz()
+                    } else {
+                        150.0
+                    };
+                    let coarse_now = self.tracker.scan(&x).filter(|h| {
+                        h.z >= TrackDetector::found(secs) && h.offset_hz.abs() <= reach
+                    });
                     let fine = self.detector.detect(&x).map(|d| d.offset_hz);
                     let v = match (coarse_now, fine) {
                         (Some(h), Some(f)) => {
                             let f = self.fine_offset(h.offset_hz, f);
-                            Some(if (f - h.offset_hz).abs() <= 25.0 { f } else { h.offset_hz })
+                            Some(if (f - h.offset_hz).abs() <= 25.0 {
+                                f
+                            } else {
+                                h.offset_hz
+                            })
                         }
                         (Some(h), None) => Some(h.offset_hz),
                         (None, _) => self.detector.detect_near(&x, 60.0).map(|d| d.offset_hz),
                     };
-                    let heard_something = coarse_now.is_some() || self.tracker.scan(&x).is_some_and(|h| h.z >= TrackDetector::MAYBE);
+                    let heard_something = coarse_now.is_some()
+                        || self
+                            .tracker
+                            .scan(&x)
+                            .is_some_and(|h| h.z >= TrackDetector::MAYBE);
                     // Clearly there, but further off than expected (a first
                     // look that only caught the bottom of a sweep at the
                     // passband edge): walk to it, up to two more hops.
                     let walk = if v.is_none() && hops < 2 {
-                        self.tracker.scan(&x).filter(|h| h.z >= TrackDetector::found(secs) && h.offset_hz.abs() > 150.0 && h.offset_hz.abs() <= self.whistle_params().scan_reach_hz())
+                        self.tracker.scan(&x).filter(|h| {
+                            h.z >= TrackDetector::found(secs)
+                                && h.offset_hz.abs() > 150.0
+                                && h.offset_hz.abs() <= self.whistle_params().scan_reach_hz()
+                        })
                     } else {
                         None
                     };
                     if let Some(h) = walk {
-                        self.log(format!("🚂 The whistle is {:+.0} Hz further; retuning again", h.offset_hz));
-                        s.phase = SearchPhase::Verify { target: target + h.offset_hz, from: 0, coarse: coarse + h.offset_hz, again: false, hops: hops + 1 };
+                        self.log(format!(
+                            "🚂 The whistle is {:+.0} Hz further; retuning again",
+                            h.offset_hz
+                        ));
+                        s.phase = SearchPhase::Verify {
+                            target: target + h.offset_hz,
+                            from: 0,
+                            coarse: coarse + h.offset_hz,
+                            again: false,
+                            hops: hops + 1,
+                        };
                     } else {
-                    match v {
-                        Some(off) => {
-                            let fine = target + off;
-                            if (fine - target).abs() >= 2.0 {
-                                self.tune(fine).await?;
-                            }
-                            self.log(format!(
+                        match v {
+                            Some(off) => {
+                                let fine = target + off;
+                                if (fine - target).abs() >= 2.0 {
+                                    self.tune(fine).await?;
+                                }
+                                self.log(format!(
                                 "Locked on {:.3} kHz (first estimate {coarse:+.0} Hz, fine {:+.1} Hz). Waiting for the CQ…",
                                 fine / 1e3,
                                 fine - target
                             ));
-                            s.phase = SearchPhase::WaitCq { until: Instant::now() + Duration::from_secs(45) };
+                                s.phase = SearchPhase::WaitCq {
+                                    until: Instant::now() + Duration::from_secs(45),
+                                };
+                            }
+                            _ if !again && heard_something => {
+                                // Faded, or the pattern straddled the window: listen once more.
+                                s.phase = SearchPhase::Verify {
+                                    target,
+                                    from: audio::now_count(&self.rx).max(1),
+                                    coarse,
+                                    again: true,
+                                    hops,
+                                };
+                            }
+                            // Reached by walking (two looks agreed where it is),
+                            // and now silent: the whistle has likely ended and its
+                            // CQ is about to follow. Wait for it here.
+                            _ if hops > 0 => {
+                                self.log(format!("Whistle ended; staying on {:.3} kHz (the scan's estimate) for the CQ…", target / 1e3));
+                                s.phase = SearchPhase::WaitCq {
+                                    until: Instant::now() + Duration::from_secs(20),
+                                };
+                            }
+                            _ => {
+                                self.log(
+                                    "Whistle not confirmed after retuning; resuming search".into(),
+                                );
+                                next_channel = true;
+                            }
                         }
-                        _ if !again && heard_something => {
-                            // Faded, or the pattern straddled the window: listen once more.
-                            s.phase = SearchPhase::Verify { target, from: audio::now_count(&self.rx).max(1), coarse, again: true, hops };
-                        }
-                        // Reached by walking (two looks agreed where it is),
-                        // and now silent: the whistle has likely ended and its
-                        // CQ is about to follow. Wait for it here.
-                        _ if hops > 0 => {
-                            self.log(format!("Whistle ended; staying on {:.3} kHz (the scan's estimate) for the CQ…", target / 1e3));
-                            s.phase = SearchPhase::WaitCq { until: Instant::now() + Duration::from_secs(20) };
-                        }
-                        _ => {
-                            self.log("Whistle not confirmed after retuning; resuming search".into());
-                            next_channel = true;
-                        }
-                    }
                     }
                 }
             }
@@ -1557,14 +2046,32 @@ impl Station {
             }
         }
         if next_channel && s.scope == WIDE_SCOPE {
-            // A wide-search hand-off has one channel: give up on it.
-            self.set(|g| g.search.active = false);
+            // A wide-search hand-off has one channel: give up on it, and
+            // go back to the scan it interrupted, if any.
+            match s.resume.take() {
+                Some(mut r) => {
+                    let f = r.channels[r.idx];
+                    self.log(format!(
+                        "Back to the {} search from {:.1} kHz",
+                        r.scope,
+                        f / 1e3
+                    ));
+                    r.phase = SearchPhase::Settle {
+                        until: Instant::now() + Duration::from_millis(150),
+                    };
+                    self.tune(f).await?;
+                    self.search = Some(*r);
+                }
+                None => self.set(|g| g.search.active = false),
+            }
             return Ok(());
         }
         if next_channel {
             s.idx = (s.idx + 1) % s.channels.len();
             let f = s.channels[s.idx];
-            s.phase = SearchPhase::Settle { until: Instant::now() + Duration::from_millis(150) };
+            s.phase = SearchPhase::Settle {
+                until: Instant::now() + Duration::from_millis(150),
+            };
             self.tune(f).await?;
         }
         let note = match &s.phase {
@@ -1572,10 +2079,20 @@ impl Station {
             SearchPhase::Hold { .. } => "something whistle-like… holding".into(),
             SearchPhase::Verify { .. } => "whistle! measuring".into(),
             SearchPhase::WaitCq { until } => {
-                format!("locked on, waiting for CQ ({}s)", until.saturating_duration_since(Instant::now()).as_secs())
+                format!(
+                    "locked on, waiting for CQ ({}s)",
+                    until.saturating_duration_since(Instant::now()).as_secs()
+                )
             }
         };
-        let view = SearchView { active: true, scope: s.scope.clone(), index: s.idx, total: s.channels.len(), channel_hz: s.channels[s.idx], note };
+        let view = SearchView {
+            active: true,
+            scope: s.scope.clone(),
+            index: s.idx,
+            total: s.channels.len(),
+            channel_hz: s.channels[s.idx],
+            note,
+        };
         self.set(|g| g.search = view);
         self.search = Some(s);
         Ok(())
@@ -1591,11 +2108,20 @@ impl Station {
         if let Some(t) = &table {
             self.join_table(t.clone(), true).await?;
         }
-        self.cq = Some(Cq { table: table.clone(), cycle: 0, phase: CqPhase::Frame { until: Instant::now() } });
+        self.cq = Some(Cq {
+            table: table.clone(),
+            cycle: 0,
+            phase: CqPhase::Frame {
+                until: Instant::now(),
+            },
+        });
         self.begin_cq_cycle().await;
         self.log(format!(
             "Calling CQ{} on {:.3} kHz: {:.0} s whistle, then CQFRAME",
-            table.as_ref().map(|t| format!(" for Roundtable \"{t}\"")).unwrap_or_default(),
+            table
+                .as_ref()
+                .map(|t| format!(" for Roundtable \"{t}\""))
+                .unwrap_or_default(),
             self.dial() / 1e3,
             self.cfg.whistle_s
         ));
@@ -1610,7 +2136,11 @@ impl Station {
         let secs = self.cfg.whistle_s;
         let params = self.whistle_params();
         let out = self.output.clone();
-        let mon = if self.cfg.demo { self.monitor.clone() } else { None };
+        let mon = if self.cfg.demo {
+            self.monitor.clone()
+        } else {
+            None
+        };
         self.ptt(true).await;
         tokio::spawn(async move {
             match out {
@@ -1632,7 +2162,9 @@ impl Station {
     }
 
     async fn step_cq(&mut self) -> anyhow::Result<()> {
-        let Some(cq) = self.cq.as_ref() else { return Ok(()) };
+        let Some(cq) = self.cq.as_ref() else {
+            return Ok(());
+        };
         let cycles = self.cfg.cq_cycles;
         let (cycle, table) = (cq.cycle, cq.table.clone());
         let phase = match &cq.phase {
@@ -1640,30 +2172,43 @@ impl Station {
                 self.ptt(false).await;
                 let me = self.mycall();
                 let arq_bw = self.bw.mercury_arq_bw();
-                self.tnc()?.command(&format!("CQFRAME {me} {arq_bw}")).await?;
-                if self.cfg.demo && self.real_demo.is_none()
-                    && let Some(m) = &self.monitor {
-                        let m = m.lock().unwrap();
-                        let mut seed = 0x5eed_u64 ^ Instant::now().elapsed().as_nanos() as u64 ^ 0x9e37;
-                        m.push_tx(&audio::ofdm_burst(m.rate as f64, 3.1, &mut seed));
-                    }
-                let kind = if table.is_some() { CALL_TABLE } else { CALL_CHAT };
+                self.tnc()?
+                    .command(&format!("CQFRAME {me} {arq_bw}"))
+                    .await?;
+                if self.cfg.demo
+                    && self.real_demo.is_none()
+                    && let Some(m) = &self.monitor
+                {
+                    let m = m.lock().unwrap();
+                    let mut seed = 0x5eed_u64 ^ Instant::now().elapsed().as_nanos() as u64 ^ 0x9e37;
+                    m.push_tx(&audio::ofdm_burst(m.rate as f64, 3.1, &mut seed));
+                }
+                let kind = if table.is_some() {
+                    CALL_TABLE
+                } else {
+                    CALL_CHAT
+                };
                 let call = TableFrame {
                     table: table.as_deref().map(table_id).unwrap_or(0),
                     from: me,
                     body: TableBody::Call {
                         kind,
                         table_name: table.clone().unwrap_or_default(),
-                        bw_code: Bandwidth::ALL.iter().position(|b| *b == self.bw).unwrap_or(4) as u8,
+                        bw_code: Bandwidth::ALL
+                            .iter()
+                            .position(|b| *b == self.bw)
+                            .unwrap_or(4) as u8,
                         grid: self.cfg.grid.clone(),
                     },
                 };
                 self.table_tx(call.encode());
-                Some(CqPhase::Frame { until: Instant::now() + Duration::from_secs(4) })
+                Some(CqPhase::Frame {
+                    until: Instant::now() + Duration::from_secs(4),
+                })
             }
-            CqPhase::Frame { until } if Instant::now() >= *until => {
-                Some(CqPhase::Listen { until: Instant::now() + Duration::from_secs_f64(self.cfg.cq_listen_s) })
-            }
+            CqPhase::Frame { until } if Instant::now() >= *until => Some(CqPhase::Listen {
+                until: Instant::now() + Duration::from_secs_f64(self.cfg.cq_listen_s),
+            }),
             CqPhase::Listen { until } if Instant::now() >= *until => {
                 if cycle >= cycles {
                     self.log("No answer to CQ".into());
@@ -1684,10 +2229,19 @@ impl Station {
                 CqPhase::Whistle { .. } => "whistling".to_string(),
                 CqPhase::Frame { .. } => "sending CQFRAME".into(),
                 CqPhase::Listen { until } => {
-                    format!("listening for answers ({}s)", until.saturating_duration_since(Instant::now()).as_secs())
+                    format!(
+                        "listening for answers ({}s)",
+                        until.saturating_duration_since(Instant::now()).as_secs()
+                    )
                 }
             };
-            let v = CqView { active: true, cycle: cq.cycle, cycles, phase, table: cq.table.clone() };
+            let v = CqView {
+                active: true,
+                cycle: cq.cycle,
+                cycles,
+                phase,
+                table: cq.table.clone(),
+            };
             self.set(|g| g.cq = v);
         }
         Ok(())
@@ -1748,7 +2302,9 @@ impl Station {
         let word = l.split_whitespace().next().unwrap_or("").to_string();
         match word.as_str() {
             "CONNECTED" => {
-                let Some((peer, bw)) = parse_connected(&l, &self.mycall()) else { return Ok(()) };
+                let Some((peer, bw)) = parse_connected(&l, &self.mycall()) else {
+                    return Ok(());
+                };
                 self.stop_search("— linked");
                 if self.cq.take().is_some() {
                     if let Some(o) = &self.output {
@@ -1763,7 +2319,12 @@ impl Station {
                 self.set(|g| {
                     g.incoming_call = false;
                     g.calling = None;
-                    g.link = Some(LinkInfo { peer: peer.clone(), bw, since: Some(Instant::now()), ..Default::default() });
+                    g.link = Some(LinkInfo {
+                        peer: peer.clone(),
+                        bw,
+                        since: Some(Instant::now()),
+                        ..Default::default()
+                    });
                     g.chat.push(ChatLine {
                         at: Clock::now(),
                         who: Who::System,
@@ -1792,7 +2353,10 @@ impl Station {
                             l.e2e = E2eView::Negotiating;
                         }
                     });
-                    let m = format!("Setting up encryption ({}); chat and files wait for it", policy.label());
+                    let m = format!(
+                        "Setting up encryption ({}); chat and files wait for it",
+                        policy.label()
+                    );
                     self.log(m.clone());
                     self.system_line(m);
                 }
@@ -1803,10 +2367,16 @@ impl Station {
                 // Depot mail for this station goes across now.
                 self.last_link_activity = Instant::now();
                 self.queue_mail_for(&peer);
-                let they_called = l.split_whitespace().nth(1).is_some_and(|c| !c.eq_ignore_ascii_case(&self.mycall()));
+                let they_called = l
+                    .split_whitespace()
+                    .nth(1)
+                    .is_some_and(|c| !c.eq_ignore_ascii_case(&self.mycall()));
                 if self.away && they_called {
                     let text = format!("[{}] {}", self.mycall(), self.cfg.away_message);
-                    self.hi_queue.push_back(Link::Chat { id: 0, text: text.clone() });
+                    self.hi_queue.push_back(Link::Chat {
+                        id: 0,
+                        text: text.clone(),
+                    });
                     self.system_line(format!("(away) sent: {text}"));
                 }
                 self.pump().await?;
@@ -1859,8 +2429,12 @@ impl Station {
                     g.calling = None;
                     g.incoming_call = false;
                     for t in g.transfers.iter_mut() {
-                        if matches!(t.state, XferState::Sending | XferState::Receiving | XferState::Offered) {
-                            t.state = XferState::Failed("link ended — will resume next time".into());
+                        if matches!(
+                            t.state,
+                            XferState::Sending | XferState::Receiving | XferState::Offered
+                        ) {
+                            t.state =
+                                XferState::Failed("link ended — will resume next time".into());
                         }
                     }
                 });
@@ -1870,7 +2444,9 @@ impl Station {
                     self.set(|g| g.incoming_call = true);
                     // Hold the search: a connect is arriving here.
                     if let Some(s) = self.search.as_mut() {
-                        s.phase = SearchPhase::WaitCq { until: Instant::now() + Duration::from_secs(60) };
+                        s.phase = SearchPhase::WaitCq {
+                            until: Instant::now() + Duration::from_secs(60),
+                        };
                     }
                 }
             }
@@ -1881,7 +2457,10 @@ impl Station {
                 self.log(format!("📣 CQ from {call} on {:.3} kHz", dial / 1e3));
                 self.add_heard(&call, "CQ".into(), None);
                 self.heard_station(&call).await?;
-                let locked = matches!(self.search.as_ref().map(|s| &s.phase), Some(SearchPhase::WaitCq { .. }));
+                let locked = matches!(
+                    self.search.as_ref().map(|s| &s.phase),
+                    Some(SearchPhase::WaitCq { .. })
+                );
                 if locked {
                     self.stop_search(&format!("found {call}"));
                     if self.cfg.auto_answer && self.peer.is_none() {
@@ -1903,7 +2482,6 @@ impl Station {
                 self.mercury_buffer = n;
                 self.est.on_buffer(Instant::now(), n);
                 self.pump().await?;
-
             }
             "BITRATE" => {
                 self.est.on_bitrate_line(&l);
@@ -1922,7 +2500,10 @@ impl Station {
             }
             // Mercury answers VERSION as VARA does ("VARA version 4.9.0
             // registered") so VARA programs accept it.
-            _ if l.to_ascii_lowercase().contains("mercury") || word == "VERSION" || (word == "VARA" && l.to_ascii_lowercase().contains("version")) => {
+            _ if l.to_ascii_lowercase().contains("mercury")
+                || word == "VERSION"
+                || (word == "VARA" && l.to_ascii_lowercase().contains("version")) =>
+            {
                 let v = version_text(&l);
                 self.set(|g| g.modem_version = Some(v));
             }
@@ -1933,7 +2514,14 @@ impl Station {
 
     fn system_line(&self, text: String) {
         self.set(|g| {
-            g.chat.push(ChatLine { at: Clock::now(), who: Who::System, from: String::new(), text, id: 0, delivered: true })
+            g.chat.push(ChatLine {
+                at: Clock::now(),
+                who: Who::System,
+                from: String::new(),
+                text,
+                id: 0,
+                delivered: true,
+            })
         });
     }
 
@@ -1948,7 +2536,10 @@ impl Station {
                      no one is in the middle."
                 ),
             ),
-            Notice::Plain { why } => (E2eView::Plain { why: why.clone() }, format!("🔓 Not encrypted: {why}")),
+            Notice::Plain { why } => (
+                E2eView::Plain { why: why.clone() },
+                format!("🔓 Not encrypted: {why}"),
+            ),
         };
         self.log(line.clone());
         self.system_line(line);
@@ -1966,7 +2557,12 @@ impl Station {
         self.hi_queue.clear();
         self.log(format!("⚠ Encryption: {why}. Disconnecting."));
         self.system_line(format!("⚠ Encryption: {why}. Disconnecting."));
-        self.ctl_queue.push_back(Link::Bye { text: "encryption problem, disconnecting".into() }.encode());
+        self.ctl_queue.push_back(
+            Link::Bye {
+                text: "encryption problem, disconnecting".into(),
+            }
+            .encode(),
+        );
         self.pump().await?;
         self.tnc()?.command("DISCONNECT").await?;
         Ok(())
@@ -1976,7 +2572,16 @@ impl Station {
         let dial = self.dial();
         self.set(|g| {
             g.heard.retain(|h| !(h.call == call && h.what == what));
-            g.heard.insert(0, Heard { at: Clock::now(), call: call.to_string(), dial_hz: dial, what, table });
+            g.heard.insert(
+                0,
+                Heard {
+                    at: Clock::now(),
+                    call: call.to_string(),
+                    dial_hz: dial,
+                    what,
+                    table,
+                },
+            );
             g.heard.truncate(30);
         });
     }
@@ -1986,18 +2591,39 @@ impl Station {
         match p {
             Link::Qsy { id, dial_hz, why } => {
                 let hz = dial_hz as f64;
-                let why = if why.is_empty() { String::new() } else { format!(" ({why})") };
+                let why = if why.is_empty() {
+                    String::new()
+                } else {
+                    format!(" ({why})")
+                };
                 match self.qsy_verdict(hz) {
                     Ok(()) => {
-                        self.hi_queue.push_back(Link::QsyAnswer { id, accept: true, reason: String::new() });
+                        self.hi_queue.push_back(Link::QsyAnswer {
+                            id,
+                            accept: true,
+                            reason: String::new(),
+                        });
                         self.qsy_move = Some((hz, Instant::now(), false));
-                        self.log(format!("↔ {peer} asked to QSY to {:.3} kHz{why}: agreed", hz / 1e3));
+                        self.log(format!(
+                            "↔ {peer} asked to QSY to {:.3} kHz{why}: agreed",
+                            hz / 1e3
+                        ));
                         self.system_line(format!("↔ {peer} asked to move to {:.3} kHz: agreed. Back here when the link ends.", hz / 1e3));
                     }
                     Err(reason) => {
-                        self.hi_queue.push_back(Link::QsyAnswer { id, accept: false, reason: reason.clone() });
-                        self.log(format!("↔ {peer} asked to QSY to {:.3} kHz{why}: declined ({reason})", hz / 1e3));
-                        self.system_line(format!("↔ {peer} asked to move to {:.3} kHz: declined ({reason})", hz / 1e3));
+                        self.hi_queue.push_back(Link::QsyAnswer {
+                            id,
+                            accept: false,
+                            reason: reason.clone(),
+                        });
+                        self.log(format!(
+                            "↔ {peer} asked to QSY to {:.3} kHz{why}: declined ({reason})",
+                            hz / 1e3
+                        ));
+                        self.system_line(format!(
+                            "↔ {peer} asked to move to {:.3} kHz: declined ({reason})",
+                            hz / 1e3
+                        ));
                     }
                 }
             }
@@ -2018,21 +2644,48 @@ impl Station {
             Link::ListReq { id, path } => {
                 let ans = self.library_answer(id, &path);
                 if let Link::ListAns { note, entries, .. } = &ans {
-                    self.log(format!("📚 {peer} browsed the library ({}): {}", if path.is_empty() { "top" } else { &path }, if note.is_empty() { format!("{} entries", entries.len()) } else { note.clone() }));
+                    self.log(format!(
+                        "📚 {peer} browsed the library ({}): {}",
+                        if path.is_empty() { "top" } else { &path },
+                        if note.is_empty() {
+                            format!("{} entries", entries.len())
+                        } else {
+                            note.clone()
+                        }
+                    ));
                 }
                 self.hi_queue.push_back(ans);
             }
-            Link::ListAns { path, entries, note, .. } => self.set(|g| g.library = Some(LibView { path, entries, note })),
+            Link::ListAns {
+                path,
+                entries,
+                note,
+                ..
+            } => self.set(|g| {
+                g.library = Some(LibView {
+                    path,
+                    entries,
+                    note,
+                })
+            }),
             Link::Fetch { id, path } => match self.library_file(&path) {
                 Ok((name, data)) => {
                     self.log(format!("📚 Sending {path} from the library to {peer}"));
-                    self.hi_queue.push_back(Link::FetchAnswer { id, ok: true, reason: String::new() });
+                    self.hi_queue.push_back(Link::FetchAnswer {
+                        id,
+                        ok: true,
+                        reason: String::new(),
+                    });
                     let len = data.len() as u64;
                     self.offer_data(id, name, data, false, 1, len).await?;
                 }
                 Err(e) => {
                     self.log(format!("📚 {peer} asked for {path}: refused ({e})"));
-                    self.hi_queue.push_back(Link::FetchAnswer { id, ok: false, reason: e.to_string() });
+                    self.hi_queue.push_back(Link::FetchAnswer {
+                        id,
+                        ok: false,
+                        reason: e.to_string(),
+                    });
                 }
             },
             Link::FetchAnswer { id, ok, reason } => {
@@ -2041,7 +2694,9 @@ impl Station {
                     self.system_line(format!("📚 {peer} couldn't send that: {reason}"));
                 }
             }
-            Link::Hello { name, grid, app, .. } => {
+            Link::Hello {
+                name, grid, app, ..
+            } => {
                 self.set(|g| {
                     if let Some(l) = g.link.as_mut() {
                         l.peer_name = name;
@@ -2053,13 +2708,31 @@ impl Station {
             Link::Chat { id, text } => {
                 self.last_link_activity = Instant::now();
                 if self.away && !peer.is_empty() {
-                    let m = crate::depot::Mail { id: crate::depot::new_id(), from: peer.clone(), to: self.mycall(), created: crate::depot::now_s(), text: text.clone(), read: false, delivered_at: None, via: None, hops: 0, handed: None };
+                    let m = crate::depot::Mail {
+                        id: crate::depot::new_id(),
+                        from: peer.clone(),
+                        to: self.mycall(),
+                        created: crate::depot::now_s(),
+                        text: text.clone(),
+                        read: false,
+                        delivered_at: None,
+                        via: None,
+                        hops: 0,
+                        handed: None,
+                    };
                     self.depot.arrive(m);
                     self.sync_depot();
                 }
                 self.hi_queue.push_back(Link::Received { id });
                 self.set(|g| {
-                    g.chat.push(ChatLine { at: Clock::now(), who: Who::Them, from: peer, text, id, delivered: true })
+                    g.chat.push(ChatLine {
+                        at: Clock::now(),
+                        who: Who::Them,
+                        from: peer,
+                        text,
+                        id,
+                        delivered: true,
+                    })
                 });
                 self.pump().await?;
             }
@@ -2068,8 +2741,16 @@ impl Station {
                     c.delivered = true;
                 }
             }),
-            Link::Offer { fid, name, size, sha, zipped, files } => {
-                let inc = Incoming::new(&self.cfg.download_dir, fid, name.clone(), size, sha, zipped);
+            Link::Offer {
+                fid,
+                name,
+                size,
+                sha,
+                zipped,
+                files,
+            } => {
+                let inc =
+                    Incoming::new(&self.cfg.download_dir, fid, name.clone(), size, sha, zipped);
                 let have = inc.have();
                 self.incoming.insert(fid, inc);
                 let eta = self.est.eta_s((size - have) as usize, self.bw);
@@ -2091,7 +2772,14 @@ impl Station {
                 self.log(format!(
                     "{peer} offers {name} ({}){}, about {}",
                     modes::human_bytes(size as usize),
-                    if have > 0 { format!(", {} already here — will resume", modes::human_bytes(have as usize)) } else { String::new() },
+                    if have > 0 {
+                        format!(
+                            ", {} already here — will resume",
+                            modes::human_bytes(have as usize)
+                        )
+                    } else {
+                        String::new()
+                    },
                     modes::human_duration(eta)
                 ));
                 // A library file we asked for: take it.
@@ -2099,12 +2787,19 @@ impl Station {
                     self.answer_offer(fid, true).await?;
                 }
             }
-            Link::Answer { fid, accept, resume_from } => {
+            Link::Answer {
+                fid,
+                accept,
+                resume_from,
+            } => {
                 if let Some(o) = self.outgoing.iter_mut().find(|o| o.fid == fid) {
                     if accept {
                         o.next = Some(resume_from.min(o.data.len() as u64));
                         if resume_from > 0 {
-                            self.log(format!("{peer} already has {} — resuming", modes::human_bytes(resume_from as usize)));
+                            self.log(format!(
+                                "{peer} already has {} — resuming",
+                                modes::human_bytes(resume_from as usize)
+                            ));
                         }
                         self.xfer(fid, |t| {
                             t.state = XferState::Sending;
@@ -2158,7 +2853,11 @@ impl Station {
             Link::Done { fid, ok } => {
                 self.outgoing.retain(|o| o.fid != fid);
                 self.xfer(fid, |t| {
-                    t.state = if ok { XferState::Done(None) } else { XferState::Failed("checksum failed at the other end".into()) };
+                    t.state = if ok {
+                        XferState::Done(None)
+                    } else {
+                        XferState::Failed("checksum failed at the other end".into())
+                    };
                     t.done = t.size;
                 });
             }
@@ -2167,7 +2866,9 @@ impl Station {
                 if let Some(i) = self.incoming.remove(&fid) {
                     i.save_partial();
                 }
-                self.xfer(fid, |t| t.state = XferState::Failed(format!("cancelled by {peer}")));
+                self.xfer(fid, |t| {
+                    t.state = XferState::Failed(format!("cancelled by {peer}"))
+                });
             }
             Link::Report { snr_db, mode_index } => self.set(|g| {
                 if let Some(l) = g.link.as_mut() {
@@ -2179,7 +2880,14 @@ impl Station {
             }),
             Link::Bye { text } => {
                 self.set(|g| {
-                    g.chat.push(ChatLine { at: Clock::now(), who: Who::Them, from: peer, text, id: 0, delivered: true })
+                    g.chat.push(ChatLine {
+                        at: Clock::now(),
+                        who: Who::Them,
+                        from: peer,
+                        text,
+                        id: 0,
+                        delivered: true,
+                    })
                 });
                 // They're leaving and will disconnect (Mercury's disconnect
                 // takes ~20 s to arrive). If it never does (say, after a
@@ -2190,25 +2898,58 @@ impl Station {
                 }
             }
             // Handled by the e2e channel before we get here.
-            Link::Mail { id, from, to, created, hops, text } => {
+            Link::Mail {
+                id,
+                from,
+                to,
+                created,
+                hops,
+                text,
+            } => {
                 self.last_link_activity = Instant::now();
-                let m = crate::depot::Mail { id, from: from.clone(), to: to.clone(), created, text, read: false, delivered_at: None, via: None, hops, handed: None };
+                let m = crate::depot::Mail {
+                    id,
+                    from: from.clone(),
+                    to: to.clone(),
+                    created,
+                    text,
+                    read: false,
+                    delivered_at: None,
+                    via: None,
+                    hops,
+                    handed: None,
+                };
                 if to.eq_ignore_ascii_case(&self.mycall()) {
                     self.hi_queue.push_back(Link::MailAck { id });
                     if self.depot.arrive(m) {
                         self.log(format!("📬 Mail from {from} arrived in your Depot"));
-                        self.system_line(format!("📬 Mail from {from} is in your Depot (Arrivals)"));
+                        self.system_line(format!(
+                            "📬 Mail from {from} is in your Depot (Arrivals)"
+                        ));
                     }
                     self.set(|g| g.mail_alerts.retain(|a| !(a.call == from && !a.ours)));
                 } else if self.cfg.relay {
                     // Store and forward: carry it on toward its station.
-                    let fresh = self.depot.take_in_transit(crate::depot::Mail { hops: hops.saturating_add(1), ..m }, &peer);
-                    let already = self.depot.transit.iter().chain(self.depot.delivered.iter()).any(|x| x.id == id);
+                    let fresh = self.depot.take_in_transit(
+                        crate::depot::Mail {
+                            hops: hops.saturating_add(1),
+                            ..m
+                        },
+                        &peer,
+                    );
+                    let already = self
+                        .depot
+                        .transit
+                        .iter()
+                        .chain(self.depot.delivered.iter())
+                        .any(|x| x.id == id);
                     if fresh || already {
                         self.hi_queue.push_back(Link::MailAck { id });
                     }
                     if fresh {
-                        self.log(format!("🚚 Carrying mail from {from} for {to} (In Transit)"));
+                        self.log(format!(
+                            "🚚 Carrying mail from {from} for {to} (In Transit)"
+                        ));
                         self.system_line(format!("🚚 {peer} handed you mail for {to}: it's In Transit until you reach {to}"));
                     } else if !already {
                         self.log(format!("Mail for {to} not taken: relayed too many times"));
@@ -2230,7 +2971,8 @@ impl Station {
                 }
                 self.sync_depot();
             }
-            Link::KeyCommit { .. } | Link::KeyX { .. } | Link::Sealed { .. } | Link::Unknown(_) => {}
+            Link::KeyCommit { .. } | Link::KeyX { .. } | Link::Sealed { .. } | Link::Unknown(_) => {
+            }
         }
         Ok(())
     }
@@ -2258,19 +3000,40 @@ impl Station {
                 modes::human_bytes(z.data.len()),
                 100.0 * z.ratio()
             ));
-            (z.name.clone(), z.data, true, z.files as u64, z.original_bytes)
+            (
+                z.name.clone(),
+                z.data,
+                true,
+                z.files as u64,
+                z.original_bytes,
+            )
         } else {
             let data = std::fs::read(&paths[0])?;
             let len = data.len() as u64;
-            (paths[0].file_name().unwrap().to_string_lossy().into_owned(), data, false, 1, len)
+            (
+                paths[0].file_name().unwrap().to_string_lossy().into_owned(),
+                data,
+                false,
+                1,
+                len,
+            )
         };
         let fid = self.next_fid;
         self.next_fid += 1;
-        self.offer_data(fid, name, data, zipped, files, original).await
+        self.offer_data(fid, name, data, zipped, files, original)
+            .await
     }
 
     /// Offer data to the linked station (or as soon as one is linked).
-    async fn offer_data(&mut self, fid: u64, name: String, data: Vec<u8>, zipped: bool, files: u64, original: u64) -> anyhow::Result<()> {
+    async fn offer_data(
+        &mut self,
+        fid: u64,
+        name: String,
+        data: Vec<u8>,
+        zipped: bool,
+        files: u64,
+        original: u64,
+    ) -> anyhow::Result<()> {
         let out = Outgoing::new(fid, name.clone(), data, zipped, files);
         let size = out.data.len() as u64;
         let eta = self.est.eta_s(file_wire_size(&name, size), self.bw);
@@ -2297,7 +3060,11 @@ impl Station {
             "Offering {name} ({}), about {} at the current speed{}",
             modes::human_bytes(size as usize),
             modes::human_duration(eta),
-            if self.peer.is_none() { " — will offer when linked" } else { "" }
+            if self.peer.is_none() {
+                " — will offer when linked"
+            } else {
+                ""
+            }
         ));
         self.pump().await
     }
@@ -2307,9 +3074,17 @@ impl Station {
         if !accept {
             self.incoming.remove(&fid);
         }
-        self.hi_queue.push_back(Link::Answer { fid, accept, resume_from: have });
+        self.hi_queue.push_back(Link::Answer {
+            fid,
+            accept,
+            resume_from: have,
+        });
         self.xfer(fid, |t| {
-            t.state = if accept { XferState::Receiving } else { XferState::Declined };
+            t.state = if accept {
+                XferState::Receiving
+            } else {
+                XferState::Declined
+            };
             t.started = Some(Instant::now());
         });
         self.pump().await
@@ -2328,7 +3103,9 @@ impl Station {
         }
         // Chat and files wait until the link is plain or keys are agreed.
         while let Some(p) = self.hi_queue.front() {
-            let Some(bytes) = self.e2e.as_mut().and_then(|c| c.wrap(p)) else { return Ok(()) };
+            let Some(bytes) = self.e2e.as_mut().and_then(|c| c.wrap(p)) else {
+                return Ok(());
+            };
             self.hi_queue.pop_front();
             self.mercury_buffer += bytes.len();
             self.tnc()?.send_data(&bytes).await?;
@@ -2337,15 +3114,25 @@ impl Station {
             return Ok(());
         }
         while self.mercury_buffer < 2 * CHUNK {
-            let Some(o) = self.outgoing.iter_mut().find(|o| o.next.is_some() && !o.finished_sending()) else { break };
+            let Some(o) = self
+                .outgoing
+                .iter_mut()
+                .find(|o| o.next.is_some() && !o.finished_sending())
+            else {
+                break;
+            };
             let fid = o.fid;
             let Some(chunk) = o.next_chunk() else { break };
             let sent = o.next.unwrap_or(0);
             let total = o.data.len();
-            let Some(bytes) = self.e2e.as_mut().and_then(|c| c.wrap(&chunk)) else { break };
+            let Some(bytes) = self.e2e.as_mut().and_then(|c| c.wrap(&chunk)) else {
+                break;
+            };
             self.mercury_buffer += bytes.len();
             self.tnc()?.send_data(&bytes).await?;
-            let eta = self.est.eta_s(total - sent as usize + self.mercury_buffer, self.bw);
+            let eta = self
+                .est
+                .eta_s(total - sent as usize + self.mercury_buffer, self.bw);
             self.xfer(fid, |t| {
                 t.done = sent.saturating_sub(self.mercury_buffer as u64);
                 t.eta_s = eta;
@@ -2384,10 +3171,26 @@ impl Station {
         if !host {
             let me = self.mycall();
             let snr = self.est.snr_db.unwrap_or(0.0).round() as i8;
-            self.table_tx(TableFrame { table: id, from: me, body: TableBody::Join { table_name: name.clone(), snr_of_host: snr } }.encode());
-            self.log(format!("Joined Roundtable \"{name}\" on {:.3} kHz", self.dial() / 1e3));
+            self.table_tx(
+                TableFrame {
+                    table: id,
+                    from: me,
+                    body: TableBody::Join {
+                        table_name: name.clone(),
+                        snr_of_host: snr,
+                    },
+                }
+                .encode(),
+            );
+            self.log(format!(
+                "Joined Roundtable \"{name}\" on {:.3} kHz",
+                self.dial() / 1e3
+            ));
         } else {
-            self.log(format!("Hosting Roundtable \"{name}\" on {:.3} kHz", self.dial() / 1e3));
+            self.log(format!(
+                "Hosting Roundtable \"{name}\" on {:.3} kHz",
+                self.dial() / 1e3
+            ));
         }
         Ok(())
     }
@@ -2399,7 +3202,10 @@ impl Station {
     fn table_say(&mut self, text: String) -> anyhow::Result<()> {
         let (id, mode) = {
             let g = self.st.lock().unwrap();
-            let t = g.table.as_ref().ok_or_else(|| anyhow::anyhow!("not at a Roundtable: join or host one first"))?;
+            let t = g
+                .table
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("not at a Roundtable: join or host one first"))?;
             (t.id, t.mode)
         };
         self.table_msg_id += 1;
@@ -2425,7 +3231,10 @@ impl Station {
             }
             self.pending_speed = None;
             self.apply_table_mode(m).await?;
-            self.log(format!("Roundtable speed → {} ({} bps)", m.name, m.payload_bps));
+            self.log(format!(
+                "Roundtable speed → {} ({} bps)",
+                m.name, m.payload_bps
+            ));
         }
         if Instant::now() < self.table_busy_until || self.tnc.is_none() {
             return Ok(());
@@ -2438,7 +3247,12 @@ impl Station {
             });
             return Ok(());
         };
-        let mode = self.st.lock().unwrap().listen_mode.unwrap_or(&modes::MODES[4]);
+        let mode = self
+            .st
+            .lock()
+            .unwrap()
+            .listen_mode
+            .unwrap_or(&modes::MODES[4]);
         self.tnc()?.send_broadcast(&f).await?;
         self.table_busy_until = Instant::now() + Duration::from_secs_f64(mode.frame_s + 0.4);
         let left = self.table_queue.len() as f64 * mode.frame_s;
@@ -2451,22 +3265,42 @@ impl Station {
     }
 
     async fn on_table_frame(&mut self, f: &[u8]) -> anyhow::Result<()> {
-        let Some(fr) = TableFrame::decode(f) else { return Ok(()) };
+        let Some(fr) = TableFrame::decode(f) else {
+            return Ok(());
+        };
         match &fr.body {
-            TableBody::Call { kind, table_name, .. } => {
-                let what = if *kind == CALL_TABLE { format!("Roundtable \"{table_name}\"") } else { "CQ (chat)".into() };
-                self.add_heard(&fr.from, what, (*kind == CALL_TABLE).then(|| table_name.clone()));
+            TableBody::Call {
+                kind, table_name, ..
+            } => {
+                let what = if *kind == CALL_TABLE {
+                    format!("Roundtable \"{table_name}\"")
+                } else {
+                    "CQ (chat)".into()
+                };
+                self.add_heard(
+                    &fr.from,
+                    what,
+                    (*kind == CALL_TABLE).then(|| table_name.clone()),
+                );
                 self.heard_station(&fr.from).await?;
                 return Ok(());
             }
-            TableBody::Beacon { grid, away, mail_for } => {
+            TableBody::Beacon {
+                grid,
+                away,
+                mail_for,
+            } => {
                 let me = self.mycall();
                 let for_me = mail_for.iter().any(|c| c.eq_ignore_ascii_case(&me));
                 let what = format!(
                     "Station ID {}{}{}",
                     grid,
                     if *away { " · away" } else { "" },
-                    if mail_for.is_empty() { String::new() } else { format!(" · mail for {}", mail_for.join(" ")) }
+                    if mail_for.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" · mail for {}", mail_for.join(" "))
+                    }
                 );
                 self.add_heard(&fr.from, what, None);
                 if for_me {
@@ -2478,20 +3312,28 @@ impl Station {
             TableBody::Notice { to, count } => {
                 if to.eq_ignore_ascii_case(&self.mycall()) {
                     self.add_heard(&fr.from, format!("has {count} message(s) for you"), None);
-                    self.they_have_mail(&fr.from.clone(), *count as usize).await?;
+                    self.they_have_mail(&fr.from.clone(), *count as usize)
+                        .await?;
                 }
                 self.heard_station(&fr.from).await?;
                 return Ok(());
             }
             _ => {}
         }
-        let Some(my_id) = self.table_id() else { return Ok(()) };
+        let Some(my_id) = self.table_id() else {
+            return Ok(());
+        };
         if fr.table != my_id {
             return Ok(());
         }
         let from = fr.from.clone();
         match fr.body {
-            TableBody::Text { id, part, total, data } => {
+            TableBody::Text {
+                id,
+                part,
+                total,
+                data,
+            } => {
                 if let Some(text) = self.table_asm.add(&from, id, part, total, &data) {
                     self.set(|g| {
                         if let Some(t) = g.table.as_mut() {
@@ -2507,7 +3349,11 @@ impl Station {
                         let m = t.members.entry(from.clone()).or_default();
                         m.snr_of_host = Some(snr_of_host);
                         m.last = Some(Instant::now());
-                        t.lines.push((Clock::now(), String::new(), format!("{from} joined (hears the host at {snr_of_host:+} dB)")));
+                        t.lines.push((
+                            Clock::now(),
+                            String::new(),
+                            format!("{from} joined (hears the host at {snr_of_host:+} dB)"),
+                        ));
                     }
                 });
                 self.ramp().await?;
@@ -2515,29 +3361,38 @@ impl Station {
             TableBody::Speed { mode_index } => {
                 if let Some(m) = modes::mode_by_index(mode_index) {
                     self.apply_table_mode(m).await?;
-                    self.log(format!("Roundtable speed → {} ({} bps), set by {from}", m.name, m.payload_bps));
+                    self.log(format!(
+                        "Roundtable speed → {} ({} bps), set by {from}",
+                        m.name, m.payload_bps
+                    ));
                 }
             }
             TableBody::Again { of, id, missing } => {
                 if of == self.mycall()
-                    && let Some(frames) = self.table_sent.get(&id).cloned() {
-                        for (i, fr) in frames.into_iter().enumerate() {
-                            if missing & (1 << i) != 0 {
-                                self.table_queue.push_back(fr);
-                            }
+                    && let Some(frames) = self.table_sent.get(&id).cloned()
+                {
+                    for (i, fr) in frames.into_iter().enumerate() {
+                        if missing & (1 << i) != 0 {
+                            self.table_queue.push_back(fr);
                         }
                     }
+                }
             }
             TableBody::Floor { to } => self.set(|g| {
                 if let Some(t) = g.table.as_mut() {
                     t.floor = Some(to.clone());
-                    t.lines.push((Clock::now(), String::new(), format!("{from} passes the floor to {to}")));
+                    t.lines.push((
+                        Clock::now(),
+                        String::new(),
+                        format!("{from} passes the floor to {to}"),
+                    ));
                 }
             }),
             TableBody::Leave => self.set(|g| {
                 if let Some(t) = g.table.as_mut() {
                     t.members.remove(&from);
-                    t.lines.push((Clock::now(), String::new(), format!("{from} left")));
+                    t.lines
+                        .push((Clock::now(), String::new(), format!("{from} left")));
                 }
             }),
             TableBody::Call { .. } | TableBody::Beacon { .. } | TableBody::Notice { .. } => {}
@@ -2557,18 +3412,35 @@ impl Station {
     }
 
     async fn table_set_speed(&mut self, m: &'static Mode) -> anyhow::Result<()> {
-        let Some(id) = self.table_id() else { return Ok(()) };
+        let Some(id) = self.table_id() else {
+            return Ok(());
+        };
         let me = self.mycall();
-        let f = TableFrame { table: id, from: me, body: TableBody::Speed { mode_index: m.index } }.encode();
+        let f = TableFrame {
+            table: id,
+            from: me,
+            body: TableBody::Speed {
+                mode_index: m.index,
+            },
+        }
+        .encode();
         // Announce twice in the old mode, and switch only once Mercury has
         // actually sent both (switching sooner sends them in the new mode,
         // which members still on the old one cannot hear).
-        let old = self.st.lock().unwrap().listen_mode.unwrap_or(&modes::MODES[4]);
+        let old = self
+            .st
+            .lock()
+            .unwrap()
+            .listen_mode
+            .unwrap_or(&modes::MODES[4]);
         self.tnc()?.send_broadcast(&f).await?;
         self.tnc()?.send_broadcast(&f).await?;
         let at = Instant::now() + Duration::from_secs_f64(2.0 * old.frame_s + 3.0);
         self.pending_speed = Some((m, at));
-        self.log(format!("Roundtable: announcing speed change {} → {} ({} bps)", old.name, m.name, m.payload_bps));
+        self.log(format!(
+            "Roundtable: announcing speed change {} → {} ({} bps)",
+            old.name, m.name, m.payload_bps
+        ));
         Ok(())
     }
 
@@ -2579,9 +3451,19 @@ impl Station {
         }
         let (host, worst, current) = {
             let g = self.st.lock().unwrap();
-            let Some(t) = g.table.as_ref() else { return Ok(()) };
-            let recent = |m: &Member| m.last.is_some_and(|l| l.elapsed() < Duration::from_secs(300));
-            let worst = t.members.values().filter(|m| recent(m)).filter_map(|m| m.snr_of_host).min();
+            let Some(t) = g.table.as_ref() else {
+                return Ok(());
+            };
+            let recent = |m: &Member| {
+                m.last
+                    .is_some_and(|l| l.elapsed() < Duration::from_secs(300))
+            };
+            let worst = t
+                .members
+                .values()
+                .filter(|m| recent(m))
+                .filter_map(|m| m.snr_of_host)
+                .min();
             (t.host, worst, t.mode)
         };
         let Some(worst) = worst else { return Ok(()) };
@@ -2593,7 +3475,9 @@ impl Station {
         if target.payload_bps < current.payload_bps {
             self.last_downgrade = Instant::now();
             self.table_set_speed(target).await?;
-        } else if target.payload_bps > current.payload_bps && self.last_downgrade.elapsed() > Duration::from_secs(120) {
+        } else if target.payload_bps > current.payload_bps
+            && self.last_downgrade.elapsed() > Duration::from_secs(120)
+        {
             self.table_set_speed(target).await?;
         }
         Ok(())
@@ -2604,6 +3488,7 @@ impl Station {
     async fn tick(&mut self) -> anyhow::Result<()> {
         self.step_waterfall();
         self.step_monitor();
+        self.step_pcm();
         self.step_wide().await?;
         self.step_automation().await?;
         self.step_qsy().await?;
@@ -2611,13 +3496,14 @@ impl Station {
             let quiet = {
                 let g = self.st.lock().unwrap();
                 !g.tx && g.link.is_none() && g.calling.is_none()
-            } && self.cq.is_none() && self.search.is_none() && self.table_queue.is_empty();
-            if quiet
-                && let Err(e) = self.tune_antenna("high SWR").await {
-                    self.pending_tune = false;
-                    self.set(|g| g.rig_ext.tune_pending = false);
-                    self.log(format!("⚠ Antenna tuner: {e}"));
-                }
+            } && self.cq.is_none()
+                && self.search.is_none()
+                && self.table_queue.is_empty();
+            if quiet && let Err(e) = self.tune_antenna("high SWR").await {
+                self.pending_tune = false;
+                self.set(|g| g.rig_ext.tune_pending = false);
+                self.log(format!("⚠ Antenna tuner: {e}"));
+            }
         }
         if self.search.is_some() {
             self.step_search().await?;
@@ -2664,7 +3550,10 @@ impl Station {
                 }
                 let snr = self.est.snr_db.unwrap_or(0.0).round().clamp(-60.0, 60.0) as i8;
                 let mi = self.est.reported_mode.map(|m| m.index).unwrap_or(1);
-                self.hi_queue.push_back(Link::Report { snr_db: snr, mode_index: mi });
+                self.hi_queue.push_back(Link::Report {
+                    snr_db: snr,
+                    mode_index: mi,
+                });
                 self.pump().await?;
             }
         } else {
@@ -2679,7 +3568,18 @@ impl Station {
                 let id = self.table_id().unwrap();
                 let me = self.mycall();
                 for (of, mid, missing) in self.table_asm.missing() {
-                    self.table_tx(TableFrame { table: id, from: me.clone(), body: TableBody::Again { of, id: mid, missing } }.encode());
+                    self.table_tx(
+                        TableFrame {
+                            table: id,
+                            from: me.clone(),
+                            body: TableBody::Again {
+                                of,
+                                id: mid,
+                                missing,
+                            },
+                        }
+                        .encode(),
+                    );
                 }
             }
             if self.last_ramp.elapsed() > Duration::from_secs(30) {
@@ -2700,10 +3600,20 @@ impl Station {
             .depot
             .waiting_for(call)
             .into_iter()
-            .map(|m| Link::Mail { id: m.id, from: m.from.clone(), to: m.to.clone(), created: m.created, hops: m.hops, text: m.text.clone() })
+            .map(|m| Link::Mail {
+                id: m.id,
+                from: m.from.clone(),
+                to: m.to.clone(),
+                created: m.created,
+                hops: m.hops,
+                text: m.text.clone(),
+            })
             .collect();
         if !mail.is_empty() {
-            self.log(format!("📮 Sending {} Depot message(s) to {call}", mail.len()));
+            self.log(format!(
+                "📮 Sending {} Depot message(s) to {call}",
+                mail.len()
+            ));
         }
         self.hi_queue.extend(mail);
     }
@@ -2715,7 +3625,10 @@ impl Station {
             return true;
         }
         let d = self.dial();
-        self.cfg.segments.iter().any(|s| d + 300.0 >= s.lo_hz && d + 2700.0 <= s.hi_hz)
+        self.cfg
+            .segments
+            .iter()
+            .any(|s| d + 300.0 >= s.lo_hz && d + 2700.0 <= s.hi_hz)
     }
 
     fn qsy_verdict(&self, hz: f64) -> Result<(), String> {
@@ -2743,7 +3656,11 @@ impl Station {
         if let Some(at) = self.hangup_at {
             if self.peer.is_none() {
                 self.hangup_at = None;
-            } else if (self.mercury_buffer == 0 && self.hi_queue.is_empty() && at.elapsed() > Duration::from_millis(500)) || at.elapsed() > Duration::from_secs(6) {
+            } else if (self.mercury_buffer == 0
+                && self.hi_queue.is_empty()
+                && at.elapsed() > Duration::from_millis(500))
+                || at.elapsed() > Duration::from_secs(6)
+            {
                 self.hangup_at = None;
                 self.tnc()?.command("DISCONNECT").await?;
             }
@@ -2754,7 +3671,11 @@ impl Station {
             self.qsy_home = None;
             if self.peer.is_none() {
                 self.tune(home).await?;
-                self.log(format!("↔ QSY over: back from {:.3} to {:.3} kHz", at / 1e3, home / 1e3));
+                self.log(format!(
+                    "↔ QSY over: back from {:.3} to {:.3} kHz",
+                    at / 1e3,
+                    home / 1e3
+                ));
             }
             self.set(|g| g.qsy = None);
         }
@@ -2767,7 +3688,8 @@ impl Station {
             let due = if asked {
                 at.elapsed() > Duration::from_secs(3)
             } else {
-                (self.mercury_buffer == 0 && at.elapsed() > Duration::from_secs(2)) || at.elapsed() > Duration::from_secs(6)
+                (self.mercury_buffer == 0 && at.elapsed() > Duration::from_secs(2))
+                    || at.elapsed() > Duration::from_secs(6)
             };
             if self.peer.is_none() {
                 self.qsy_move = None;
@@ -2778,9 +3700,16 @@ impl Station {
                 self.qsy = Some((home, hz));
                 self.qsy_tuned = false;
                 self.qsy_fail = false;
-                self.log(format!("↔ QSY: moved to {:.3} kHz (home {:.3} kHz)", hz / 1e3, home / 1e3));
+                self.log(format!(
+                    "↔ QSY: moved to {:.3} kHz (home {:.3} kHz)",
+                    hz / 1e3,
+                    home / 1e3
+                ));
                 self.set(|g| {
-                    g.qsy = Some(QsyView { home_hz: home, at_hz: hz });
+                    g.qsy = Some(QsyView {
+                        home_hz: home,
+                        at_hz: hz,
+                    });
                     g.qsy_note = None;
                 });
             }
@@ -2794,8 +3723,14 @@ impl Station {
         }
         if self.qsy_fail && self.peer.is_some() {
             self.qsy_fail = false;
-            self.log("⚠ SWR stays high on the QSY frequency: ending the link so both stations go home".into());
-            self.hi_queue.push_back(Link::Chat { id: 0, text: "SWR is too high for me here; ending the link so we both go back.".into() });
+            self.log(
+                "⚠ SWR stays high on the QSY frequency: ending the link so both stations go home"
+                    .into(),
+            );
+            self.hi_queue.push_back(Link::Chat {
+                id: 0,
+                text: "SWR is too high for me here; ending the link so we both go back.".into(),
+            });
             self.hang_up("73").await?;
         }
         Ok(())
@@ -2815,7 +3750,10 @@ impl Station {
     }
 
     fn cooled(&mut self, call: &str, secs: u64) -> bool {
-        let ok = self.auto_cooldown.get(call).is_none_or(|t| t.elapsed() > Duration::from_secs(secs));
+        let ok = self
+            .auto_cooldown
+            .get(call)
+            .is_none_or(|t| t.elapsed() > Duration::from_secs(secs));
         if ok {
             self.auto_cooldown.insert(call.to_string(), Instant::now());
         }
@@ -2832,18 +3770,43 @@ impl Station {
         }
         self.set(|g| {
             g.mail_alerts.retain(|a| !(a.call == call && a.ours));
-            g.mail_alerts.push(MailAlert { call: call.clone(), ours: true, count: n, at: Instant::now() });
+            g.mail_alerts.push(MailAlert {
+                call: call.clone(),
+                ours: true,
+                count: n,
+                at: Instant::now(),
+            });
         });
         let quiet = self.quiet() && self.cq.is_none() && self.search.is_none();
-        if self.away && self.cfg.auto_deliver && quiet && self.auto_allowed() && self.cooled(&format!("deliver {call}"), 900) {
+        if self.away
+            && self.cfg.auto_deliver
+            && quiet
+            && self.auto_allowed()
+            && self.cooled(&format!("deliver {call}"), 900)
+        {
             let me = self.mycall();
             self.tnc()?.command(&format!("CONNECT {me} {call}")).await?;
             self.link_auto = Some(true);
             self.set(|g| g.calling = Some(call.clone()));
-            self.log(format!("🤖 Away: connecting to {call} to deliver {n} Depot message(s)"));
-        } else if self.cfg.notify_mail && self.auto_allowed() && self.cooled(&format!("notice {call}"), 900) {
+            self.log(format!(
+                "🤖 Away: connecting to {call} to deliver {n} Depot message(s)"
+            ));
+        } else if self.cfg.notify_mail
+            && self.auto_allowed()
+            && self.cooled(&format!("notice {call}"), 900)
+        {
             let me = self.mycall();
-            self.table_tx(TableFrame { table: 0, from: me, body: TableBody::Notice { to: call.clone(), count: n.min(255) as u8 } }.encode());
+            self.table_tx(
+                TableFrame {
+                    table: 0,
+                    from: me,
+                    body: TableBody::Notice {
+                        to: call.clone(),
+                        count: n.min(255) as u8,
+                    },
+                }
+                .encode(),
+            );
             self.log(format!("📣 Told {call}: {n} message(s) waiting here"));
         }
         Ok(())
@@ -2854,16 +3817,28 @@ impl Station {
         let call = call.to_uppercase();
         self.set(|g| {
             g.mail_alerts.retain(|a| !(a.call == call && !a.ours));
-            g.mail_alerts.push(MailAlert { call: call.clone(), ours: false, count, at: Instant::now() });
+            g.mail_alerts.push(MailAlert {
+                call: call.clone(),
+                ours: false,
+                count,
+                at: Instant::now(),
+            });
         });
         self.log(format!("📬 {call} has mail for you"));
         let quiet = self.quiet() && self.cq.is_none() && self.search.is_none();
-        if self.away && self.cfg.auto_collect && quiet && self.auto_allowed() && self.cooled(&format!("collect {call}"), 900) {
+        if self.away
+            && self.cfg.auto_collect
+            && quiet
+            && self.auto_allowed()
+            && self.cooled(&format!("collect {call}"), 900)
+        {
             let me = self.mycall();
             self.tnc()?.command(&format!("CONNECT {me} {call}")).await?;
             self.link_auto = Some(false);
             self.set(|g| g.calling = Some(call.clone()));
-            self.log(format!("🤖 Away: connecting to {call} to collect your mail"));
+            self.log(format!(
+                "🤖 Away: connecting to {call} to collect your mail"
+            ));
         }
         Ok(())
     }
@@ -2875,35 +3850,82 @@ impl Station {
         let me = self.mycall();
         let mut mail_for = self.depot.waiting_calls();
         // One modem frame (123 bytes on DATAC3): keep the list short.
-        while (TableFrame { table: 0, from: me.clone(), body: TableBody::Beacon { grid: self.cfg.grid.clone(), away: self.away, mail_for: mail_for.clone() } }).encode().len() > 120 {
+        while (TableFrame {
+            table: 0,
+            from: me.clone(),
+            body: TableBody::Beacon {
+                grid: self.cfg.grid.clone(),
+                away: self.away,
+                mail_for: mail_for.clone(),
+            },
+        })
+        .encode()
+        .len()
+            > 120
+        {
             mail_for.pop();
         }
-        let f = TableFrame { table: 0, from: me, body: TableBody::Beacon { grid: self.cfg.grid.clone(), away: self.away, mail_for: mail_for.clone() } };
+        let f = TableFrame {
+            table: 0,
+            from: me,
+            body: TableBody::Beacon {
+                grid: self.cfg.grid.clone(),
+                away: self.away,
+                mail_for: mail_for.clone(),
+            },
+        };
         self.table_tx(f.encode());
         self.last_beacon = Instant::now();
         self.log(format!(
             "📡 Station ID sent ({why}){}",
-            if mail_for.is_empty() { String::new() } else { format!(": mail waiting for {}", mail_for.join(" ")) }
+            if mail_for.is_empty() {
+                String::new()
+            } else {
+                format!(": mail waiting for {}", mail_for.join(" "))
+            }
         ));
         Ok(())
     }
 
     async fn step_automation(&mut self) -> anyhow::Result<()> {
         // The schedule: where to listen at this time of day (UTC).
-        if self.cfg.schedule_on && self.last_sched.is_none_or(|t| t.elapsed() > Duration::from_secs(20)) {
+        if self.cfg.schedule_on
+            && self
+                .last_sched
+                .is_none_or(|t| t.elapsed() > Duration::from_secs(20))
+        {
             self.last_sched = Some(Instant::now());
             let follow = !self.cfg.schedule_only_away || self.away;
-            let slot = crate::schedule::active(&self.cfg.schedule, crate::depot::now_s()).map(|(i, s)| (i, s.clone()));
-            let idle = self.quiet() && self.cq.is_none() && self.search.is_none() && self.peer.is_none() && self.qsy.is_none();
+            let slot = crate::schedule::active(&self.cfg.schedule, crate::depot::now_s())
+                .map(|(i, s)| (i, s.clone()));
+            let idle = self.quiet()
+                && self.cq.is_none()
+                && self.search.is_none()
+                && self.peer.is_none()
+                && self.qsy.is_none();
             match slot {
                 Some((i, sl)) if follow => {
                     let hz = sl.khz * 1000.0;
                     if idle && (self.dial() - hz).abs() > 50.0 {
                         self.tune(hz).await?;
-                        self.log(format!("🗓 Schedule: listening on {:.3} kHz ({}–{} UTC, {}){}", hz / 1e3, sl.from, sl.to, sl.days.label(), if sl.beacon { ", with Station ID" } else { "" }));
+                        self.log(format!(
+                            "🗓 Schedule: listening on {:.3} kHz ({}–{} UTC, {}){}",
+                            hz / 1e3,
+                            sl.from,
+                            sl.to,
+                            sl.days.label(),
+                            if sl.beacon { ", with Station ID" } else { "" }
+                        ));
                     }
                     self.sched_slot = Some(i);
-                    self.set(|g| g.schedule_now = Some(format!("{:.3} kHz until {} UTC{}", hz / 1e3, sl.to, if sl.beacon { " · Station ID" } else { "" })));
+                    self.set(|g| {
+                        g.schedule_now = Some(format!(
+                            "{:.3} kHz until {} UTC{}",
+                            hz / 1e3,
+                            sl.to,
+                            if sl.beacon { " · Station ID" } else { "" }
+                        ))
+                    });
                 }
                 _ => {
                     self.sched_slot = None;
@@ -2914,10 +3936,14 @@ impl Station {
             self.sched_slot = None;
             self.set(|g| g.schedule_now = None);
         }
-        let sched_beacon = self.sched_slot.and_then(|i| self.cfg.schedule.get(i)).is_some_and(|s| s.beacon);
+        let sched_beacon = self
+            .sched_slot
+            .and_then(|i| self.cfg.schedule.get(i))
+            .is_some_and(|s| s.beacon);
         // Station ID beacon, when due and the band is quiet.
         if (self.cfg.beacon || sched_beacon)
-            && self.last_beacon.elapsed() > Duration::from_secs_f64(self.cfg.beacon_minutes.max(10.0) * 60.0)
+            && self.last_beacon.elapsed()
+                > Duration::from_secs_f64(self.cfg.beacon_minutes.max(10.0) * 60.0)
             && self.quiet()
             && self.cq.is_none()
             && self.search.is_none()
@@ -2991,6 +4017,26 @@ impl Station {
         }
     }
 
+    /// Feed remote listeners the received audio (at most 2 s waiting).
+    fn step_pcm(&mut self) {
+        let mut tap = self.pcm.lock().unwrap();
+        if !tap.on {
+            self.pcm_from = 0;
+            return;
+        }
+        let rx = self.rx.lock().unwrap();
+        if self.pcm_from == 0 || rx.count.saturating_sub(self.pcm_from) > FS as u64 {
+            self.pcm_from = rx.count.saturating_sub((FS / 10) as u64);
+        }
+        let n = (rx.count - self.pcm_from) as usize;
+        if let Some(v) = rx.range(self.pcm_from, n) {
+            tap.samples.extend(v.iter().map(|x| (*x * 3.0) as f32));
+        }
+        self.pcm_from = rx.count;
+        let excess = tap.samples.len().saturating_sub(2 * FS as usize);
+        tap.samples.drain(..excess);
+    }
+
     fn step_waterfall(&mut self) {
         let n = self.spectrum.n;
         let hop = n; // 15.6 rows/s at 8 kHz
@@ -3007,6 +4053,7 @@ impl Station {
         }
         if !rows.is_empty() {
             self.set(|g| {
+                g.audio_seq += rows.len() as u64;
                 g.audio_rows.extend(rows);
                 while g.audio_rows.len() > 64 {
                     g.audio_rows.pop_front();
@@ -3039,17 +4086,35 @@ impl Station {
             on: self.wide_on,
             auto: self.wide_auto,
             note,
-            hits: hits.iter().map(|(at, h)| (h.dial_hz, h.score, at.elapsed().as_secs_f64())).collect(),
+            hits: hits
+                .iter()
+                .map(|(at, h)| (h.dial_hz, h.score, at.elapsed().as_secs_f64()))
+                .collect(),
         };
         self.set(|g| g.wide = view);
-        self.wide_tried.retain(|(_, at)| at.elapsed() < Duration::from_secs(120));
-        let busy = self.search.is_some() || self.cq.is_some() || self.peer.is_some() || self.st.lock().unwrap().calling.is_some();
-        if !self.wide_on || !self.wide_auto || busy {
+        self.wide_tried
+            .retain(|(_, at)| at.elapsed() < Duration::from_secs(120));
+        // A stepping scan that hasn't found anything yet gives way to an
+        // SDR hit (auto-tune or not: searching already means "go to
+        // whistles"). One that is measuring a whistle or waiting for its
+        // CQ is left alone.
+        let scanning = self.search.as_ref().is_some_and(|s| s.interruptible());
+        let busy = (self.search.is_some() && !scanning)
+            || self.cq.is_some()
+            || self.peer.is_some()
+            || self.st.lock().unwrap().calling.is_some();
+        if !self.wide_on || !(self.wide_auto || scanning) || busy {
             return Ok(());
         }
         let fresh = hits
             .iter()
-            .filter(|(at, h)| at.elapsed() < Duration::from_secs(4) && !self.wide_tried.iter().any(|(f, _)| (f - h.dial_hz).abs() < 200.0))
+            .filter(|(at, h)| {
+                at.elapsed() < Duration::from_secs(4)
+                    && !self
+                        .wide_tried
+                        .iter()
+                        .any(|(f, _)| (f - h.dial_hz).abs() < 200.0)
+            })
             .max_by(|a, b| a.1.score.partial_cmp(&b.1.score).unwrap());
         if let Some((_, h)) = fresh {
             let (dial, score) = (h.dial_hz, h.score);
@@ -3060,13 +4125,37 @@ impl Station {
 
     fn wide_handoff(&mut self, dial: f64, score: f64) {
         self.wide_tried.push((dial, Instant::now()));
-        self.log(format!("🚂 SDR whistle at {:.3} kHz; tuning the radio there to fine-lock", dial / 1e3));
         let _ = score;
+        // Pause a stepping scan (or keep the one an earlier hand-off paused).
+        let resume = match self.search.take() {
+            Some(s) if s.scope != WIDE_SCOPE => Some(Box::new(s)),
+            Some(s) => s.resume,
+            None => None,
+        };
+        if let Some(r) = &resume {
+            self.log(format!(
+                "🚂 SDR whistle at {:.3} kHz; pausing the {} search to fine-lock on it",
+                dial / 1e3,
+                r.scope
+            ));
+        } else {
+            self.log(format!(
+                "🚂 SDR whistle at {:.3} kHz; tuning the radio there to fine-lock",
+                dial / 1e3
+            ));
+        }
         self.search = Some(Search {
             channels: vec![dial],
             idx: 0,
-            phase: SearchPhase::Verify { target: dial, from: 0, coarse: 0.0, again: false, hops: 0 },
+            phase: SearchPhase::Verify {
+                target: dial,
+                from: 0,
+                coarse: 0.0,
+                again: false,
+                hops: 0,
+            },
             scope: WIDE_SCOPE.into(),
+            resume,
         });
     }
 
@@ -3091,11 +4180,23 @@ impl Station {
         }
         // Found by the scan detector (unambiguous to ±1100 Hz), measured
         // by the matched filter.
-        let Some(h) = self.tracker.scan(&x).filter(|h| h.z >= TrackDetector::found(secs)) else { return };
+        let Some(h) = self
+            .tracker
+            .scan(&x)
+            .filter(|h| h.z >= TrackDetector::found(secs))
+        else {
+            return;
+        };
         if let Some(mut d) = self.detector.detect(&x) {
             d.offset_hz = self.fine_offset(h.offset_hz, d.offset_hz);
             let dial = self.dial();
-            let fresh = self.st.lock().unwrap().whistle.as_ref().is_none_or(|w| w.at.elapsed() > Duration::from_secs(20));
+            let fresh = self
+                .st
+                .lock()
+                .unwrap()
+                .whistle
+                .as_ref()
+                .is_none_or(|w| w.at.elapsed() > Duration::from_secs(20));
             if fresh {
                 self.log(format!(
                     "🚂 Whistle heard {:+.0} Hz from here (caller at {:.3} kHz)",
@@ -3103,7 +4204,14 @@ impl Station {
                     (dial + d.offset_hz) / 1e3
                 ));
             }
-            self.set(|g| g.whistle = Some(WhistleSeen { at: Instant::now(), dial_hz: dial, offset_hz: d.offset_hz, score: d.score }));
+            self.set(|g| {
+                g.whistle = Some(WhistleSeen {
+                    at: Instant::now(),
+                    dial_hz: dial,
+                    offset_hz: d.offset_hz,
+                    score: d.score,
+                })
+            });
         }
     }
 }
@@ -3114,7 +4222,9 @@ pub fn qsy_verdict(cfg: &Config, home: f64, hz: f64) -> Result<(), String> {
         return Err("QSY requests are turned off here".into());
     }
     let here = bandplan::band_of(home);
-    let Some(there) = bandplan::band_of(hz) else { return Err("not an amateur band I can use".into()) };
+    let Some(there) = bandplan::band_of(hz) else {
+        return Err("not an amateur band I can use".into());
+    };
     if cfg.qsy_same_band {
         if Some(there) != here {
             return Err(format!("I only QSY within {}", here.unwrap_or("this band")));
@@ -3125,7 +4235,12 @@ pub fn qsy_verdict(cfg: &Config, home: f64, hz: f64) -> Result<(), String> {
     if cfg.qsy_max_khz > 0.0 && (hz - home).abs() > cfg.qsy_max_khz * 1000.0 {
         return Err(format!("more than {:.0} kHz from here", cfg.qsy_max_khz));
     }
-    if cfg.qsy_segments_only && !cfg.segments.iter().any(|s| hz + 300.0 >= s.lo_hz && hz + 2700.0 <= s.hi_hz) {
+    if cfg.qsy_segments_only
+        && !cfg
+            .segments
+            .iter()
+            .any(|s| hz + 300.0 >= s.lo_hz && hz + 2700.0 <= s.hi_hz)
+    {
         return Err("outside my digital segments".into());
     }
     Ok(())
@@ -3150,13 +4265,22 @@ pub fn library_answer(cfg: &Config, away: bool, id: u64, path: &str) -> Link {
         },
         Err(n) => (vec![], n),
     };
-    Link::ListAns { id, path: path.to_string(), entries, note }
+    Link::ListAns {
+        id,
+        path: path.to_string(),
+        entries,
+        note,
+    }
 }
 
 /// A library file to send, by the settings (or why not).
 pub fn library_file(cfg: &Config, away: bool, path: &str) -> anyhow::Result<(String, Vec<u8>)> {
     let root = library_root(cfg, away).map_err(|e| anyhow::anyhow!(e))?;
-    crate::library::read(&root, path, (cfg.library_max_mb.max(0.0) * 1_048_576.0) as u64)
+    crate::library::read(
+        &root,
+        path,
+        (cfg.library_max_mb.max(0.0) * 1_048_576.0) as u64,
+    )
 }
 
 /// How to show the modem's VERSION reply.
@@ -3171,7 +4295,10 @@ pub fn version_text(line: &str) -> String {
 
 #[test]
 fn mercury_version_reply() {
-    assert_eq!(version_text("VARA version 4.9.0 registered"), "Mercury (VARA-compatible 4.9.0)");
+    assert_eq!(
+        version_text("VARA version 4.9.0 registered"),
+        "Mercury (VARA-compatible 4.9.0)"
+    );
     assert_eq!(version_text("VERSION Mercury 1.9.23"), "Mercury 1.9.23");
 }
 
@@ -3188,7 +4315,12 @@ mod tests {
             return;
         }
         let h = spawn(|| {});
-        let mut cfg = Config { demo: true, callsign: "N0REAL".into(), auto_answer: true, ..Default::default() };
+        let mut cfg = Config {
+            demo: true,
+            callsign: "N0REAL".into(),
+            auto_answer: true,
+            ..Default::default()
+        };
         cfg.sdr.enabled = false;
         cfg.sdr.wide_search = false;
         h.send(Cmd::Start(cfg));
@@ -3204,15 +4336,24 @@ mod tests {
             let log: Vec<_> = g.log.iter().map(|l| l.1.clone()).collect();
             panic!("timed out waiting for {what}; log:\n{}", log.join("\n"));
         };
-        wait("real Mercury", 30, &|s| s.mercury_ok && s.log.iter().any(|l| l.1.contains("two real Mercury")));
+        wait("real Mercury", 30, &|s| {
+            s.mercury_ok && s.log.iter().any(|l| l.1.contains("two real Mercury"))
+        });
         h.send(Cmd::StartSearch(SearchScope::CurrentBand));
-        wait("link with K7BOT over real Mercury", 240, &|s| s.link.as_ref().is_some_and(|l| l.peer == "K7BOT"));
+        wait("link with K7BOT over real Mercury", 240, &|s| {
+            s.link.as_ref().is_some_and(|l| l.peer == "K7BOT")
+        });
         let f = h.state.lock().unwrap().rig.freq_hz;
         assert!((f - crate::realdemo::BOT_DIAL).abs() <= 55.0, "locked {f}");
-        wait("K7BOT's greeting", 90, &|s| s.chat.iter().any(|c| c.who == Who::Them));
+        wait("K7BOT's greeting", 90, &|s| {
+            s.chat.iter().any(|c| c.who == Who::Them)
+        });
         h.send(Cmd::Chat("hello over real Mercury".into()));
         wait("reply and delivery", 120, &|s| {
-            s.chat.iter().any(|c| c.who == Who::Them && c.text.contains("hello over real Mercury")) && s.chat.iter().any(|c| c.who == Who::Me && c.delivered)
+            s.chat
+                .iter()
+                .any(|c| c.who == Who::Them && c.text.contains("hello over real Mercury"))
+                && s.chat.iter().any(|c| c.who == Who::Me && c.delivered)
         });
         h.send(Cmd::Stop);
         std::thread::sleep(Duration::from_secs(1));
@@ -3225,7 +4366,15 @@ mod tests {
     fn swr_watch_and_optional_autotune() {
         for auto in [false, true] {
             let h = spawn(|| {});
-            let mut cfg = Config { demo: true, demo_real_mercury: false, callsign: "N0SWR".into(), whistle_s: 3.0, cq_cycles: 2, cq_listen_s: 2.0, ..Default::default() };
+            let mut cfg = Config {
+                demo: true,
+                demo_real_mercury: false,
+                callsign: "N0SWR".into(),
+                whistle_s: 3.0,
+                cq_cycles: 2,
+                cq_listen_s: 2.0,
+                ..Default::default()
+            };
             assert!(!cfg.auto_tune, "auto-tune must be off by default");
             cfg.auto_tune = auto;
             cfg.sdr.enabled = false;
@@ -3244,14 +4393,87 @@ mod tests {
             assert!(wait(10, &|s| s.mercury_ok));
             h.send(Cmd::SetFreq(7_100_000.0));
             h.send(Cmd::CallCq { table: None });
-            assert!(wait(30, &|s| s.log.iter().any(|l| l.1.contains("High SWR: 2.8 on 40m"))), "auto={auto}: no SWR warning");
+            assert!(
+                wait(30, &|s| s
+                    .log
+                    .iter()
+                    .any(|l| l.1.contains("High SWR: 2.8 on 40m"))),
+                "auto={auto}: no SWR warning"
+            );
             // Still calling: never tune in the middle of it.
-            assert!(!h.state.lock().unwrap().log.iter().any(|l| l.1.contains("tune started")));
+            assert!(
+                !h.state
+                    .lock()
+                    .unwrap()
+                    .log
+                    .iter()
+                    .any(|l| l.1.contains("tune started"))
+            );
             h.send(Cmd::StopCq);
-            let tuned = wait(8, &|s| s.log.iter().any(|l| l.1.contains("Antenna tuner: tune started (high SWR)")));
+            let tuned = wait(8, &|s| {
+                s.log
+                    .iter()
+                    .any(|l| l.1.contains("Antenna tuner: tune started (high SWR)"))
+            });
             assert_eq!(tuned, auto, "auto-tune {auto}");
             h.send(Cmd::Stop);
         }
+    }
+
+    /// Both methods at once: a stepping search is running (auto-tune off)
+    /// when the SDR spots the demo station. The scan pauses, the radio goes
+    /// straight to the hit and links. (The 20 m segment is only 10
+    /// channels, so stepping may glance at the caller first; that look
+    /// can't hold off the SDR hit for good.)
+    #[test]
+    fn sdr_hit_interrupts_stepping_search() {
+        let h = spawn(|| {});
+        let mut cfg = Config {
+            demo: true,
+            demo_real_mercury: false,
+            callsign: "N0BOTH".into(),
+            auto_answer: true,
+            ..Default::default()
+        };
+        cfg.sdr.wide_search = true;
+        cfg.sdr.wide_auto = false;
+        cfg.download_dir = std::env::temp_dir().join(format!("ws-both-{}", std::process::id()));
+        h.send(Cmd::Start(cfg));
+        let t = Instant::now();
+        while !h.state.lock().unwrap().mercury_ok {
+            assert!(t.elapsed() < Duration::from_secs(20), "no Mercury");
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        h.send(Cmd::StartSearch(SearchScope::CurrentBand));
+        let t = Instant::now();
+        loop {
+            {
+                let g = h.state.lock().unwrap();
+                if g.link.as_ref().is_some_and(|l| l.peer == "K7BOT") {
+                    assert!(
+                        (g.rig.freq_hz - 14_103_150.0).abs() <= 55.0,
+                        "{}",
+                        g.rig.freq_hz
+                    );
+                    assert!(
+                        g.log
+                            .iter()
+                            .any(|l| l.1.contains("pausing the")
+                                && l.1.contains("search to fine-lock")),
+                        "the SDR hit didn't interrupt the scan"
+                    );
+                    break;
+                }
+            }
+            if t.elapsed() > Duration::from_secs(60) {
+                let g = h.state.lock().unwrap();
+                let log: Vec<_> = g.log.iter().map(|l| l.1.clone()).collect();
+                panic!("no link\n{}", log.join("\n"));
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        h.send(Cmd::Stop);
+        std::thread::sleep(Duration::from_millis(500));
     }
 
     /// Wide search: the (simulated) SDR spots the demo station anywhere in
@@ -3260,7 +4482,13 @@ mod tests {
     #[test]
     fn demo_wide_search_finds_and_links() {
         let h = spawn(|| {});
-        let mut cfg = Config { demo: true, demo_real_mercury: false, callsign: "N0WIDE".into(), auto_answer: true, ..Default::default() };
+        let mut cfg = Config {
+            demo: true,
+            demo_real_mercury: false,
+            callsign: "N0WIDE".into(),
+            auto_answer: true,
+            ..Default::default()
+        };
         cfg.sdr.wide_search = true;
         cfg.sdr.wide_auto = true;
         cfg.download_dir = std::env::temp_dir().join(format!("ws-wide-{}", std::process::id()));
@@ -3274,7 +4502,11 @@ mod tests {
                     saw_hit = Some((t.elapsed(), g.wide.hits[0].0));
                 }
                 if g.link.as_ref().is_some_and(|l| l.peer == "K7BOT") {
-                    assert!((g.rig.freq_hz - 14_103_150.0).abs() <= 55.0, "{}", g.rig.freq_hz);
+                    assert!(
+                        (g.rig.freq_hz - 14_103_150.0).abs() <= 55.0,
+                        "{}",
+                        g.rig.freq_hz
+                    );
                     assert!(g.search.scope == WIDE_SCOPE || !g.search.active);
                     break;
                 }
@@ -3292,14 +4524,24 @@ mod tests {
         loop {
             {
                 let g = h.state.lock().unwrap();
-                let reply = g.chat.iter().any(|c| c.who == Who::Them && c.text.contains("wide-search link"));
+                let reply = g
+                    .chat
+                    .iter()
+                    .any(|c| c.who == Who::Them && c.text.contains("wide-search link"));
                 let delivered = g.chat.iter().any(|c| c.who == Who::Me && c.delivered);
                 if reply && delivered {
                     break;
                 }
                 if t2.elapsed() > Duration::from_secs(40) {
                     let log: Vec<_> = g.log.iter().map(|l| l.1.clone()).collect();
-                    panic!("no chat over the link; chat {:?}\n{}", g.chat.iter().map(|c| (&c.who, &c.text, c.delivered)).collect::<Vec<_>>(), log.join("\n"));
+                    panic!(
+                        "no chat over the link; chat {:?}\n{}",
+                        g.chat
+                            .iter()
+                            .map(|c| (&c.who, &c.text, c.delivered))
+                            .collect::<Vec<_>>(),
+                        log.join("\n")
+                    );
                 }
             }
             std::thread::sleep(Duration::from_millis(100));
@@ -3308,7 +4550,11 @@ mod tests {
         // The SDR's reading carries its crystal error (+240 Hz in the demo);
         // the lock above is within Mercury's window anyway.
         assert!((dial - 14_103_390.0).abs() < 5.0, "SDR saw {dial}");
-        eprintln!("SDR hit after {:.1} s at {dial:.1}; linked after {:.1} s", when.as_secs_f64(), t.elapsed().as_secs_f64());
+        eprintln!(
+            "SDR hit after {:.1} s at {dial:.1}; linked after {:.1} s",
+            when.as_secs_f64(),
+            t.elapsed().as_secs_f64()
+        );
         h.send(Cmd::Stop);
     }
 
@@ -3318,7 +4564,13 @@ mod tests {
     #[test]
     fn demo_search_connect_chat_file() {
         let h = spawn(|| {});
-        let mut cfg = Config { demo: true, demo_real_mercury: false, callsign: "N0TEST".into(), auto_answer: true, ..Default::default() };
+        let mut cfg = Config {
+            demo: true,
+            demo_real_mercury: false,
+            callsign: "N0TEST".into(),
+            auto_answer: true,
+            ..Default::default()
+        };
         cfg.download_dir = std::env::temp_dir().join(format!("ws-engine-{}", std::process::id()));
         cfg.sdr.enabled = false;
         h.send(Cmd::Start(cfg.clone()));
@@ -3336,17 +4588,32 @@ mod tests {
         };
         wait("Mercury", 10, &|s| s.mercury_ok);
         h.send(Cmd::StartSearch(SearchScope::CurrentBand));
-        wait("link with K7BOT", 150, &|s| s.link.as_ref().is_some_and(|l| l.peer == "K7BOT"));
+        wait("link with K7BOT", 150, &|s| {
+            s.link.as_ref().is_some_and(|l| l.peer == "K7BOT")
+        });
         let f = h.state.lock().unwrap().rig.freq_hz;
         assert!((f - 14_103_150.0).abs() <= 55.0, "locked {f}");
-        wait("bot greeting", 30, &|s| s.chat.iter().any(|c| c.who == Who::Them));
+        wait("bot greeting", 30, &|s| {
+            s.chat.iter().any(|c| c.who == Who::Them)
+        });
         h.send(Cmd::Chat("hello from the test".into()));
-        wait("bot reply", 30, &|s| s.chat.iter().any(|c| c.who == Who::Them && c.text.contains("hello from the test")));
+        wait("bot reply", 30, &|s| {
+            s.chat
+                .iter()
+                .any(|c| c.who == Who::Them && c.text.contains("hello from the test"))
+        });
         let dir = cfg.download_dir.join("src");
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("log.txt"), "QSO log line\n".repeat(400)).unwrap();
-        h.send(Cmd::SendFiles { paths: vec![dir.clone()], zip: true });
-        wait("file delivered", 60, &|s| s.transfers.iter().any(|t| t.dir == Dir::Out && t.state == XferState::Done(None)));
+        h.send(Cmd::SendFiles {
+            paths: vec![dir.clone()],
+            zip: true,
+        });
+        wait("file delivered", 60, &|s| {
+            s.transfers
+                .iter()
+                .any(|t| t.dir == Dir::Out && t.state == XferState::Done(None))
+        });
         h.send(Cmd::Stop);
         std::fs::remove_dir_all(&cfg.download_dir).ok();
     }
@@ -3357,10 +4624,17 @@ mod tests {
     #[test]
     fn demo_depot_mail_delivered() {
         let h = spawn(|| {});
-        let mut cfg = Config { demo: true, demo_real_mercury: false, callsign: "N0MAIL".into(), ..Default::default() };
+        let mut cfg = Config {
+            demo: true,
+            demo_real_mercury: false,
+            callsign: "N0MAIL".into(),
+            ..Default::default()
+        };
         cfg.sdr.enabled = false;
         cfg.whistle_watch = false;
-        let _ = std::fs::remove_file(std::env::temp_dir().join(format!("ws-depot-{}-N0MAIL.json", std::process::id())));
+        let _ = std::fs::remove_file(
+            std::env::temp_dir().join(format!("ws-depot-{}-N0MAIL.json", std::process::id())),
+        );
         h.send(Cmd::Start(cfg));
         let wait = |what: &str, secs: u64, f: &dyn Fn(&State) -> bool| {
             let t = Instant::now();
@@ -3375,17 +4649,33 @@ mod tests {
             panic!("timed out waiting for {what}; log:\n{}", log.join("\n"));
         };
         wait("Mercury", 10, &|s| s.mercury_ok);
-        h.send(Cmd::DepotPost { to: "k7bot".into(), via: None, text: "See you on 40 m".into() });
-        wait("mail in Departures", 5, &|s| s.depot.departures.len() == 1 && s.depot.departures[0].to == "K7BOT");
+        h.send(Cmd::DepotPost {
+            to: "k7bot".into(),
+            via: None,
+            text: "See you on 40 m".into(),
+        });
+        wait("mail in Departures", 5, &|s| {
+            s.depot.departures.len() == 1 && s.depot.departures[0].to == "K7BOT"
+        });
         h.send(Cmd::SetAway(true));
         wait("away", 5, &|s| s.away);
         h.send(Cmd::DepotConnect("K7BOT".into()));
         wait("link with K7BOT", 40, &|s| s.link.is_some());
-        wait("mail delivered", 40, &|s| s.depot.departures.is_empty() && s.depot.delivered.iter().any(|m| m.to == "K7BOT" && m.handed.as_deref() == Some("K7BOT")));
+        wait("mail delivered", 40, &|s| {
+            s.depot.departures.is_empty()
+                && s.depot
+                    .delivered
+                    .iter()
+                    .any(|m| m.to == "K7BOT" && m.handed.as_deref() == Some("K7BOT"))
+        });
         // While away, K7BOT's chat lands in Arrivals.
-        wait("chat saved to Arrivals", 40, &|s| s.depot.arrivals.iter().any(|m| m.from == "K7BOT"));
+        wait("chat saved to Arrivals", 40, &|s| {
+            s.depot.arrivals.iter().any(|m| m.from == "K7BOT")
+        });
         h.send(Cmd::Stop);
-        let _ = std::fs::remove_file(std::env::temp_dir().join(format!("ws-depot-{}-N0MAIL.json", std::process::id())));
+        let _ = std::fs::remove_file(
+            std::env::temp_dir().join(format!("ws-depot-{}-N0MAIL.json", std::process::id())),
+        );
     }
 
     /// Direct CAT end to end: the engine finds a (simulated) IC-7300 over
@@ -3394,9 +4684,19 @@ mod tests {
     #[test]
     fn direct_cat_controls_and_shares_the_radio() {
         let radio_port = crate::cat::sim::serve_tcp(crate::cat::sim::Kind::Icom(0x94));
-        let share = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+        let share = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
         let h = spawn(|| {});
-        let mut cfg = Config { demo: false, callsign: "N0CAT".into(), mercury_port: 1, mercury_bcast_port: 1, ..Default::default() };
+        let mut cfg = Config {
+            demo: false,
+            callsign: "N0CAT".into(),
+            mercury_port: 1,
+            mercury_bcast_port: 1,
+            ..Default::default()
+        };
         cfg.sdr.enabled = false;
         cfg.rig_mode = crate::rigsetup::RigMode::Direct;
         cfg.cat.port = format!("127.0.0.1:{radio_port}");
@@ -3438,12 +4738,21 @@ mod tests {
     }
 
     #[allow(clippy::type_complexity)]
-    fn demo_station(call: &str, f: impl FnOnce(&mut Config)) -> (Handle, impl Fn(&Handle, &str, u64, &dyn Fn(&State) -> bool)) {
+    fn demo_station(
+        call: &str,
+        f: impl FnOnce(&mut Config),
+    ) -> (Handle, impl Fn(&Handle, &str, u64, &dyn Fn(&State) -> bool)) {
         let h = spawn(|| {});
-        let mut cfg = Config { demo: true, demo_real_mercury: false, callsign: call.into(), ..Default::default() };
+        let mut cfg = Config {
+            demo: true,
+            demo_real_mercury: false,
+            callsign: call.into(),
+            ..Default::default()
+        };
         cfg.sdr.enabled = false;
         cfg.whistle_watch = false;
-        cfg.download_dir = std::env::temp_dir().join(format!("ws-dl-{}-{call}", std::process::id()));
+        cfg.download_dir =
+            std::env::temp_dir().join(format!("ws-dl-{}-{call}", std::process::id()));
         f(&mut cfg);
         h.send(Cmd::Start(cfg));
         let wait = |h: &Handle, what: &str, secs: u64, f: &dyn Fn(&State) -> bool| {
@@ -3471,11 +4780,19 @@ mod tests {
         h.send(Cmd::Connect("K7BOT".into()));
         wait(&h, "link", 30, &|s| s.link.is_some());
         h.send(Cmd::Qsy(7_105_000.0));
-        wait(&h, "refusal", 30, &|s| s.chat.iter().any(|c| c.text.contains("declined the QSY") && c.text.contains("stays on 20 m")));
+        wait(&h, "refusal", 30, &|s| {
+            s.chat
+                .iter()
+                .any(|c| c.text.contains("declined the QSY") && c.text.contains("stays on 20 m"))
+        });
         h.send(Cmd::Qsy(14_106_500.0));
-        wait(&h, "moved", 30, &|s| s.rig.freq_hz == 14_106_500.0 && s.qsy.as_ref().is_some_and(|q| q.home_hz == home));
+        wait(&h, "moved", 30, &|s| {
+            s.rig.freq_hz == 14_106_500.0 && s.qsy.as_ref().is_some_and(|q| q.home_hz == home)
+        });
         h.send(Cmd::Disconnect);
-        wait(&h, "home again", 30, &|s| s.link.is_none() && s.rig.freq_hz == home && s.qsy.is_none());
+        wait(&h, "home again", 30, &|s| {
+            s.link.is_none() && s.rig.freq_hz == home && s.qsy.is_none()
+        });
         h.send(Cmd::Stop);
     }
 
@@ -3488,11 +4805,25 @@ mod tests {
         h.send(Cmd::Connect("K7BOT".into()));
         wait(&h, "link", 30, &|s| s.link.is_some());
         h.send(Cmd::LibList(String::new()));
-        wait(&h, "listing", 30, &|s| s.library.as_ref().is_some_and(|l| l.entries.iter().any(|e| e.name == "k7bot-qsl.txt")));
+        wait(&h, "listing", 30, &|s| {
+            s.library
+                .as_ref()
+                .is_some_and(|l| l.entries.iter().any(|e| e.name == "k7bot-qsl.txt"))
+        });
         h.send(Cmd::LibFetch("k7bot-qsl.txt".into()));
-        wait(&h, "file saved", 60, &|s| s.transfers.iter().any(|t| t.dir == Dir::In && t.name == "k7bot-qsl.txt" && matches!(t.state, XferState::Done(_))));
+        wait(&h, "file saved", 60, &|s| {
+            s.transfers.iter().any(|t| {
+                t.dir == Dir::In
+                    && t.name == "k7bot-qsl.txt"
+                    && matches!(t.state, XferState::Done(_))
+            })
+        });
         h.send(Cmd::LibFetch("nope.bin".into()));
-        wait(&h, "refusal", 30, &|s| s.chat.iter().any(|c| c.text.contains("couldn't send that: no such file")));
+        wait(&h, "refusal", 30, &|s| {
+            s.chat
+                .iter()
+                .any(|c| c.text.contains("couldn't send that: no such file"))
+        });
         h.send(Cmd::Stop);
     }
 
@@ -3504,16 +4835,33 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("small.txt"), "hi").unwrap();
         std::fs::write(dir.join("big.bin"), vec![0u8; 3 * 1_048_576]).unwrap();
-        let mut cfg = Config { share_library: true, library_dir: dir.to_string_lossy().into(), library_max_mb: 1.0, ..Default::default() };
+        let mut cfg = Config {
+            share_library: true,
+            library_dir: dir.to_string_lossy().into(),
+            library_max_mb: 1.0,
+            ..Default::default()
+        };
         match library_answer(&cfg, false, 1, "") {
-            Link::ListAns { entries, note, .. } => assert!(note.is_empty() && entries.len() == 2, "{note} {entries:?}"),
+            Link::ListAns { entries, note, .. } => {
+                assert!(note.is_empty() && entries.len() == 2, "{note} {entries:?}")
+            }
             other => panic!("{other:?}"),
         }
         assert_eq!(library_file(&cfg, false, "small.txt").unwrap().1, b"hi");
-        assert!(library_file(&cfg, false, "big.bin").unwrap_err().to_string().contains("too big"));
+        assert!(
+            library_file(&cfg, false, "big.bin")
+                .unwrap_err()
+                .to_string()
+                .contains("too big")
+        );
         assert!(library_file(&cfg, false, "../etc/passwd").is_err());
         cfg.library_only_away = true;
-        assert!(library_file(&cfg, false, "small.txt").unwrap_err().to_string().contains("only while"));
+        assert!(
+            library_file(&cfg, false, "small.txt")
+                .unwrap_err()
+                .to_string()
+                .contains("only while")
+        );
         assert!(library_file(&cfg, true, "small.txt").is_ok());
         cfg.share_library = false;
         assert!(library_file(&cfg, true, "small.txt").is_err());
@@ -3525,17 +4873,45 @@ mod tests {
     fn qsy_policy() {
         let home = 14_103_000.0;
         let mut c = Config::default();
-        assert!(qsy_verdict(&c, home, 14_105_000.0).unwrap_err().contains("turned off"));
+        assert!(
+            qsy_verdict(&c, home, 14_105_000.0)
+                .unwrap_err()
+                .contains("turned off")
+        );
         c.accept_qsy = true;
         assert!(qsy_verdict(&c, home, 14_105_000.0).is_ok());
-        assert!(qsy_verdict(&c, home, 7_102_000.0).unwrap_err().contains("only QSY within 20m"));
-        assert!(qsy_verdict(&c, home, 14_200_000.0).unwrap_err().contains("kHz from here"));
+        assert!(
+            qsy_verdict(&c, home, 7_102_000.0)
+                .unwrap_err()
+                .contains("only QSY within 20m")
+        );
+        assert!(
+            qsy_verdict(&c, home, 14_200_000.0)
+                .unwrap_err()
+                .contains("kHz from here")
+        );
         c.qsy_same_band = false;
-        assert!(qsy_verdict(&c, home, 7_102_000.0).unwrap_err().contains("kHz from here"));
+        assert!(
+            qsy_verdict(&c, home, 7_102_000.0)
+                .unwrap_err()
+                .contains("kHz from here")
+        );
         c.qsy_max_khz = 0.0;
-        assert!(qsy_verdict(&c, home, 7_102_000.0).is_ok(), "{:?}", qsy_verdict(&c, home, 7_102_000.0));
-        assert!(qsy_verdict(&c, home, 28_120_000.0).unwrap_err().contains("isn't one of my QSY bands"));
-        assert!(qsy_verdict(&c, home, 14_090_000.0).unwrap_err().contains("outside my digital segments"));
+        assert!(
+            qsy_verdict(&c, home, 7_102_000.0).is_ok(),
+            "{:?}",
+            qsy_verdict(&c, home, 7_102_000.0)
+        );
+        assert!(
+            qsy_verdict(&c, home, 28_120_000.0)
+                .unwrap_err()
+                .contains("isn't one of my QSY bands")
+        );
+        assert!(
+            qsy_verdict(&c, home, 14_090_000.0)
+                .unwrap_err()
+                .contains("outside my digital segments")
+        );
     }
 
     /// The schedule tunes the radio to the slot that's on now.
@@ -3544,9 +4920,16 @@ mod tests {
         let (h, wait) = demo_station("N0SKD", |c| {
             c.schedule_on = true;
             c.schedule_only_away = false;
-            c.schedule = vec![crate::schedule::Slot { from: "00:00".into(), to: "00:00".into(), khz: 14_108.5, ..Default::default() }];
+            c.schedule = vec![crate::schedule::Slot {
+                from: "00:00".into(),
+                to: "00:00".into(),
+                khz: 14_108.5,
+                ..Default::default()
+            }];
         });
-        wait(&h, "scheduled frequency", 30, &|s| s.rig.freq_hz == 14_108_500.0 && s.schedule_now.is_some());
+        wait(&h, "scheduled frequency", 30, &|s| {
+            s.rig.freq_hz == 14_108_500.0 && s.schedule_now.is_some()
+        });
         h.send(Cmd::Stop);
     }
 
@@ -3556,7 +4939,13 @@ mod tests {
     #[test]
     fn demo_encrypted_chat_and_file() {
         let h = spawn(|| {});
-        let mut cfg = Config { demo: true, demo_real_mercury: false, callsign: "N0SEC".into(), e2e: e2e::Policy::Require, ..Default::default() };
+        let mut cfg = Config {
+            demo: true,
+            demo_real_mercury: false,
+            callsign: "N0SEC".into(),
+            e2e: e2e::Policy::Require,
+            ..Default::default()
+        };
         cfg.download_dir = std::env::temp_dir().join(format!("ws-e2e-{}", std::process::id()));
         cfg.sdr.enabled = false;
         cfg.whistle_watch = false;
@@ -3582,15 +4971,37 @@ mod tests {
         wait("encrypted link with K7BOT", 40, &|s| sas(s).is_some());
         let first = sas(&h.state.lock().unwrap()).unwrap();
         // The bot reads its code back: same as ours, so no one in the middle.
-        wait("bot's code", 30, &|s| s.chat.iter().any(|c| c.who == Who::Them && c.text.contains(&first)));
-        assert!(h.state.lock().unwrap().chat.iter().any(|c| c.who == Who::System && c.text.contains("🔒")));
+        wait("bot's code", 30, &|s| {
+            s.chat
+                .iter()
+                .any(|c| c.who == Who::Them && c.text.contains(&first))
+        });
+        assert!(
+            h.state
+                .lock()
+                .unwrap()
+                .chat
+                .iter()
+                .any(|c| c.who == Who::System && c.text.contains("🔒"))
+        );
         h.send(Cmd::Chat("hello sealed".into()));
-        wait("bot reply", 30, &|s| s.chat.iter().any(|c| c.who == Who::Them && c.text.contains("hello sealed")));
+        wait("bot reply", 30, &|s| {
+            s.chat
+                .iter()
+                .any(|c| c.who == Who::Them && c.text.contains("hello sealed"))
+        });
         let dir = cfg.download_dir.join("src");
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("log.txt"), "QSO log line\n".repeat(400)).unwrap();
-        h.send(Cmd::SendFiles { paths: vec![dir.clone()], zip: true });
-        wait("file delivered", 60, &|s| s.transfers.iter().any(|t| t.dir == Dir::Out && t.state == XferState::Done(None)));
+        h.send(Cmd::SendFiles {
+            paths: vec![dir.clone()],
+            zip: true,
+        });
+        wait("file delivered", 60, &|s| {
+            s.transfers
+                .iter()
+                .any(|t| t.dir == Dir::Out && t.state == XferState::Done(None))
+        });
 
         h.send(Cmd::Disconnect);
         wait("link down", 30, &|s| s.link.is_none());

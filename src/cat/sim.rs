@@ -57,7 +57,10 @@ impl SimRadio {
         self.log.push(cmd.to_string());
         let yaesu = matches!(self.kind, Kind::Yaesu(_));
         let (head, arg) = cmd.split_at(cmd.len().min(2));
-        let get = arg.is_empty() || (arg.len() == 1 && (matches!(head, "AG" | "SQ" | "SM") || (yaesu && matches!(head, "MD" | "RG" | "NB" | "NR" | "BC" | "PA" | "RA"))));
+        let get = arg.is_empty()
+            || (arg.len() == 1
+                && (matches!(head, "AG" | "SQ" | "SM")
+                    || (yaesu && matches!(head, "MD" | "RG" | "NB" | "NR" | "BC" | "PA" | "RA"))));
         match (head, get) {
             ("ID", true) => {
                 let id = match self.kind {
@@ -77,7 +80,11 @@ impl SimRadio {
             ("FA", false) => self.freq = arg.parse().unwrap_or(self.freq),
             ("MD", true) => {
                 let m = self.mode as char;
-                self.reply(&if yaesu { format!("MD0{m};") } else { format!("MD{m};") });
+                self.reply(&if yaesu {
+                    format!("MD0{m};")
+                } else {
+                    format!("MD{m};")
+                });
             }
             ("MD", false) => self.mode = *arg.as_bytes().last().unwrap(),
             ("DA", true) if self.kind == Kind::Kenwood("023") => {
@@ -94,7 +101,10 @@ impl SimRadio {
             ("IF", true) => {
                 // Kenwood layout: freq 11, 5 spaces, offset ±nnnn, RIT, XIT,
                 // memory 3, TX, mode, VFO, scan, split, tone, tone#, P15.
-                let s = format!("IF{:011}     +000000000{}{}0000000;", self.freq, self.ptt as u8, self.mode as char);
+                let s = format!(
+                    "IF{:011}     +000000000{}{}0000000;",
+                    self.freq, self.ptt as u8, self.mode as char
+                );
                 self.reply(&s);
             }
             ("SM", true) => self.reply(if yaesu { "SM0130;" } else { "SM00015;" }),
@@ -117,7 +127,8 @@ impl SimRadio {
             }
             (_, false) if yaesu && arg.len() > 1 => {
                 // e.g. AG0128 → remember "AG0" = "128"
-                self.vals.insert(format!("{head}{}", &arg[..1]), arg[1..].to_string());
+                self.vals
+                    .insert(format!("{head}{}", &arg[..1]), arg[1..].to_string());
             }
             _ => {
                 if get {
@@ -182,12 +193,19 @@ impl SimRadio {
             [0x15, 0x02] => send(&mut self.out, &[0x15, 0x02, 0x01, 0x20]), // 120 = S9
             [0x15, 0x12] => send(&mut self.out, &[0x15, 0x12, 0x00, 0x80]), // 80 = 2.0
             [0x14, c] => {
-                let v = self.vals.get(&format!("14{c:02X}")).cloned().unwrap_or("0128".into());
+                let v = self
+                    .vals
+                    .get(&format!("14{c:02X}"))
+                    .cloned()
+                    .unwrap_or("0128".into());
                 let b = super::icom::bcd2(v.parse().unwrap_or(128));
                 send(&mut self.out, &[0x14, *c, b[0], b[1]]);
             }
             [0x14, c, a, b] => {
-                self.vals.insert(format!("14{c:02X}"), super::icom::from_bcd2(&[*a, *b]).to_string());
+                self.vals.insert(
+                    format!("14{c:02X}"),
+                    super::icom::from_bcd2(&[*a, *b]).to_string(),
+                );
                 send(&mut self.out, &ok);
             }
             _ => send(&mut self.out, &[0xFA]),
@@ -214,7 +232,9 @@ impl SimRadio {
                 self.out.extend(d);
             }
             0x01 => {
-                self.freq = b[..4].iter().fold(0u64, |a, &x| a * 100 + (x >> 4) as u64 * 10 + (x & 15) as u64) * 10;
+                self.freq = b[..4].iter().fold(0u64, |a, &x| {
+                    a * 100 + (x >> 4) as u64 * 10 + (x & 15) as u64
+                }) * 10;
             }
             0x07 => self.mode = b[0],
             0x08 => {
@@ -237,7 +257,9 @@ impl Wire for SimRadio {
         loop {
             match self.kind {
                 Kind::Icom(_) => {
-                    let Some((f, rest)) = super::icom::take_frame(&self.inb) else { break };
+                    let Some((f, rest)) = super::icom::take_frame(&self.inb) else {
+                        break;
+                    };
                     self.inb = rest;
                     self.civ(&f);
                 }
@@ -249,7 +271,9 @@ impl Wire for SimRadio {
                     self.ft817(&c);
                 }
                 _ => {
-                    let Some(i) = self.inb.iter().position(|&c| c == b';') else { break };
+                    let Some(i) = self.inb.iter().position(|&c| c == b';') else {
+                        break;
+                    };
                     let c: Vec<u8> = self.inb.drain(..=i).collect();
                     let s = String::from_utf8_lossy(&c[..c.len() - 1]).to_string();
                     self.ascii(&s);
@@ -284,7 +308,8 @@ pub fn serve_tcp(kind: Kind) -> u16 {
             let mut radio = SimRadio::new(kind);
             std::thread::spawn(move || {
                 use std::io::{Read, Write};
-                s.set_read_timeout(Some(std::time::Duration::from_millis(5))).ok();
+                s.set_read_timeout(Some(std::time::Duration::from_millis(5)))
+                    .ok();
                 let mut b = [0u8; 256];
                 loop {
                     match s.read(&mut b) {
@@ -292,7 +317,11 @@ pub fn serve_tcp(kind: Kind) -> u16 {
                         Ok(n) => {
                             radio.write_all(&b[..n]).ok();
                         }
-                        Err(e) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) => {}
+                        Err(e)
+                            if matches!(
+                                e.kind(),
+                                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                            ) => {}
                         Err(_) => break,
                     }
                     let mut out = [0u8; 256];
@@ -318,7 +347,11 @@ mod tests {
         assert_eq!(d.freq().unwrap(), 7_074_500.0, "{}", d.describe());
         d.set_mode("PKTUSB", 3000).unwrap();
         let (m, _) = d.mode().unwrap();
-        assert!(m == "PKTUSB" || d.describe().contains("QMX"), "{}: {m}", d.describe());
+        assert!(
+            m == "PKTUSB" || d.describe().contains("QMX"),
+            "{}: {m}",
+            d.describe()
+        );
         d.set_ptt(true).unwrap();
         assert!(d.ptt().unwrap(), "{}", d.describe());
         d.set_ptt(false).unwrap();
@@ -340,7 +373,13 @@ mod tests {
 
     #[test]
     fn kenwood_ts590() {
-        let mut d = Kenwood::new(Box::new(SimRadio::new(Kind::Kenwood("023"))), "023", false, 100.0).unwrap();
+        let mut d = Kenwood::new(
+            Box::new(SimRadio::new(Kind::Kenwood("023"))),
+            "023",
+            false,
+            100.0,
+        )
+        .unwrap();
         assert!(d.describe().contains("TS-590SG"));
         exercise(&mut d);
         assert_eq!(d.get_level("STRENGTH").unwrap(), 0.0);
@@ -351,14 +390,21 @@ mod tests {
     #[test]
     fn plain_kenwood_qmx() {
         // A QMX says ID020 and answers ?; to commands it doesn't have.
-        let mut d = Kenwood::new(Box::new(SimRadio::new(Kind::Kenwood("020"))), "020", false, 5.0).unwrap();
+        let mut d = Kenwood::new(
+            Box::new(SimRadio::new(Kind::Kenwood("020"))),
+            "020",
+            false,
+            5.0,
+        )
+        .unwrap();
         exercise(&mut d);
         assert!(d.get_func("NB").is_err());
     }
 
     #[test]
     fn elecraft() {
-        let mut d = Kenwood::new(Box::new(SimRadio::new(Kind::Elecraft)), "017", false, 100.0).unwrap();
+        let mut d =
+            Kenwood::new(Box::new(SimRadio::new(Kind::Elecraft)), "017", false, 100.0).unwrap();
         assert!(d.describe().contains("Elecraft"), "{}", d.describe());
         exercise(&mut d);
         assert_eq!(d.get_level("SWR").unwrap(), 1.5);
@@ -366,7 +412,8 @@ mod tests {
 
     #[test]
     fn yaesu_newcat() {
-        let mut d = Yaesu::new(Box::new(SimRadio::new(Kind::Yaesu("0670"))), "0670", 100.0).unwrap();
+        let mut d =
+            Yaesu::new(Box::new(SimRadio::new(Kind::Yaesu("0670"))), "0670", 100.0).unwrap();
         assert!(d.describe().contains("FT-991A"));
         exercise(&mut d);
         assert!((d.get_level("SWR").unwrap() - 2.0).abs() < 0.01);
@@ -383,9 +430,19 @@ mod tests {
 
     #[test]
     fn ascii_probe_tells_families_apart() {
-        let d = super::super::probe_ascii(Box::new(SimRadio::new(Kind::Yaesu("0800"))), super::super::Family::Kenwood, 100.0).unwrap();
+        let d = super::super::probe_ascii(
+            Box::new(SimRadio::new(Kind::Yaesu("0800"))),
+            super::super::Family::Kenwood,
+            100.0,
+        )
+        .unwrap();
         assert!(d.describe().contains("FT-710"));
-        let d = super::super::probe_ascii(Box::new(SimRadio::new(Kind::Elecraft)), super::super::Family::Kenwood, 100.0).unwrap();
+        let d = super::super::probe_ascii(
+            Box::new(SimRadio::new(Kind::Elecraft)),
+            super::super::Family::Kenwood,
+            100.0,
+        )
+        .unwrap();
         assert!(d.describe().contains("Elecraft"));
     }
 }

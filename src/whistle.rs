@@ -50,7 +50,14 @@ pub struct WhistleParams {
 
 impl Default for WhistleParams {
     fn default() -> Self {
-        Self { fs: FS, f_lo: 1000.0, f_hi: 2000.0, chirp_s: 0.2, taper_s: 0.01, amplitude: 0.5 }
+        Self {
+            fs: FS,
+            f_lo: 1000.0,
+            f_hi: 2000.0,
+            chirp_s: 0.2,
+            taper_s: 0.01,
+            amplitude: 0.5,
+        }
     }
 }
 
@@ -81,7 +88,11 @@ impl WhistleParams {
     /// the matched filter's unambiguous range for the narrow one (which is
     /// used behind a 500 Hz filter).
     pub fn scan_reach_hz(&self) -> f64 {
-        if self.f_hi - self.f_lo >= 900.0 { 1100.0 } else { self.max_offset_hz() }
+        if self.f_hi - self.f_lo >= 900.0 {
+            1100.0
+        } else {
+            self.max_offset_hz()
+        }
     }
 
     pub fn with_fs(mut self, fs: u32) -> Self {
@@ -97,7 +108,11 @@ impl WhistleParams {
 /// * `narrow` — 1250 -> 1750 Hz, fits a 500 Hz filter, +/-250 Hz capture
 pub fn profile(name: &str) -> WhistleParams {
     match name {
-        "narrow" => WhistleParams { f_lo: 1250.0, f_hi: 1750.0, ..Default::default() },
+        "narrow" => WhistleParams {
+            f_lo: 1250.0,
+            f_hi: 1750.0,
+            ..Default::default()
+        },
         _ => WhistleParams::default(),
     }
 }
@@ -127,13 +142,19 @@ fn chirp_phase(p: &WhistleParams, up: bool) -> impl Iterator<Item = f64> + '_ {
 /// One chirp of real audio, ready for the radio.
 pub fn chirp(p: &WhistleParams, up: bool) -> Vec<f32> {
     let w = taper(p.n_chirp(), (p.taper_s * p.fs as f64) as usize);
-    chirp_phase(p, up).zip(w).map(|(ph, w)| (p.amplitude * w * ph.cos()) as f32).collect()
+    chirp_phase(p, up)
+        .zip(w)
+        .map(|(ph, w)| (p.amplitude * w * ph.cos()) as f32)
+        .collect()
 }
 
 /// The complex (analytic) template the detector correlates against.
 pub fn chirp_template(p: &WhistleParams, up: bool) -> Vec<Complex64> {
     let w = taper(p.n_chirp(), (p.taper_s * p.fs as f64) as usize);
-    chirp_phase(p, up).zip(w).map(|(ph, w)| Complex64::from_polar(w, ph)).collect()
+    chirp_phase(p, up)
+        .zip(w)
+        .map(|(ph, w)| Complex64::from_polar(w, ph))
+        .collect()
 }
 
 /// Audio for a whistle of at least `duration_s`: whole UP/DOWN pairs.
@@ -209,7 +230,11 @@ fn refine(r: &[f64], i: usize) -> f64 {
 fn median(v: &mut [f64]) -> f64 {
     v.sort_by(|a, b| a.partial_cmp(b).unwrap());
     let n = v.len();
-    if n % 2 == 1 { v[n / 2] } else { 0.5 * (v[n / 2 - 1] + v[n / 2]) }
+    if n % 2 == 1 {
+        v[n / 2]
+    } else {
+        0.5 * (v[n / 2 - 1] + v[n / 2])
+    }
 }
 
 pub struct Detector {
@@ -226,7 +251,8 @@ impl Detector {
             params,
             // 0.12 for a 0.5 s chirp; noise correlation grows as the
             // template shortens.
-            threshold: 0.12 * (4000.0 / (params.n_chirp() as f64 * 8000.0 / params.fs as f64)).sqrt(),
+            threshold: 0.12
+                * (4000.0 / (params.n_chirp() as f64 * 8000.0 / params.fs as f64)).sqrt(),
             up: chirp_template(&params, true),
             down: chirp_template(&params, false),
             planner: FftPlanner::new(),
@@ -249,7 +275,10 @@ impl Detector {
         // median level, so they don't swamp the normalisation. Noise and the
         // whistle itself (spread over 1000 Hz) are almost never clipped.
         let fsf = self.params.fs as f64;
-        let (b0, b1) = ((PASSBAND.0 / fsf * nfft as f64) as usize, (PASSBAND.1 / fsf * nfft as f64) as usize);
+        let (b0, b1) = (
+            (PASSBAND.0 / fsf * nfft as f64) as usize,
+            (PASSBAND.1 / fsf * nfft as f64) as usize,
+        );
         let mut mags: Vec<f64> = xa[b0..b1.min(nfft / 2)].iter().map(|c| c.norm()).collect();
         if !mags.is_empty() {
             let cap = 3.0 * median(&mut mags);
@@ -354,7 +383,10 @@ impl Detector {
             return None;
         }
         let med = median(&mut cand.iter().map(|c| c.0).collect::<Vec<_>>());
-        let kept: Vec<_> = cand.into_iter().filter(|c| (c.0 - med).abs() < 25.0).collect();
+        let kept: Vec<_> = cand
+            .into_iter()
+            .filter(|c| (c.0 - med).abs() < 25.0)
+            .collect();
         if kept.is_empty() {
             return None;
         }
@@ -425,15 +457,27 @@ impl TrackDetector {
     pub fn new(params: WhistleParams) -> Self {
         // ~16 ms frames: the chirp moves about one bin per frame.
         let frame = ((0.016 * params.fs as f64) as usize).next_power_of_two();
-        let win = (0..frame).map(|i| 0.5 - 0.5 * (2.0 * PI * i as f64 / frame as f64).cos()).collect();
-        Self { params, reach_hz: params.scan_reach_hz(), frame, win, planner: FftPlanner::new() }
+        let win = (0..frame)
+            .map(|i| 0.5 - 0.5 * (2.0 * PI * i as f64 / frame as f64).cos())
+            .collect();
+        Self {
+            params,
+            reach_hz: params.scan_reach_hz(),
+            frame,
+            win,
+            planner: FftPlanner::new(),
+        }
     }
 
     /// Track frequency (Hz) at time t into the pattern.
     fn track(&self, t: f64) -> f64 {
         let p = &self.params;
         let t = t.rem_euclid(p.period_s());
-        if t < p.chirp_s { p.f_lo + p.k() * t } else { p.f_hi - p.k() * (t - p.chirp_s) }
+        if t < p.chirp_s {
+            p.f_lo + p.k() * t
+        } else {
+            p.f_hi - p.k() * (t - p.chirp_s)
+        }
     }
 
     /// Look for the whistle in a block of audio (real, at `params.fs`).
@@ -442,7 +486,10 @@ impl TrackDetector {
         let hop = l / 2;
         let bw = fs / l as f64;
         let fft = self.planner.plan_fft_forward(l);
-        let (k0, k1) = ((PASSBAND.0 / bw).ceil() as usize, ((PASSBAND.1 / bw).floor() as usize).min(l / 2 - 1));
+        let (k0, k1) = (
+            (PASSBAND.0 / bw).ceil() as usize,
+            ((PASSBAND.1 / bw).floor() as usize).min(l / 2 - 1),
+        );
         let nb = k1 - k0 + 1;
         let mut rows: Vec<Vec<f64>> = vec![];
         let mut buf = vec![Complex64::new(0.0, 0.0); l];
@@ -533,7 +580,14 @@ impl TrackDetector {
                 if let Some(z) = z_at(dt, df)
                     && best.is_none_or(|b| z > b.0.z)
                 {
-                    best = Some((TrackHit { z, offset_hz: df as f64 * bw }, dt, df));
+                    best = Some((
+                        TrackHit {
+                            z,
+                            offset_hz: df as f64 * bw,
+                        },
+                        dt,
+                        df,
+                    ));
                 }
             }
         }
@@ -571,13 +625,22 @@ pub fn ssb_channel(x: &[f64], offset_hz: f64, fs: u32, passband: (f64, f64)) -> 
         .iter()
         .enumerate()
         .map(|(i, c)| {
-            let v = if i < n { c / nfft as f64 * Complex64::from_polar(1.0, 2.0 * PI * offset_hz * i as f64 / fsf) } else { Complex64::new(0.0, 0.0) };
+            let v = if i < n {
+                c / nfft as f64 * Complex64::from_polar(1.0, 2.0 * PI * offset_hz * i as f64 / fsf)
+            } else {
+                Complex64::new(0.0, 0.0)
+            };
             Complex64::new(v.re, 0.0)
         })
         .collect();
     fwd.process(&mut y);
     for (i, c) in y.iter_mut().enumerate() {
-        let f = if i <= nfft / 2 { i as f64 } else { (nfft - i) as f64 } * fsf / nfft as f64;
+        let f = if i <= nfft / 2 {
+            i as f64
+        } else {
+            (nfft - i) as f64
+        } * fsf
+            / nfft as f64;
         if f < passband.0 || f > passband.1 {
             *c = Complex64::new(0.0, 0.0);
         }
@@ -615,8 +678,14 @@ mod tests {
             for &snr in &[10.0, -5.0] {
                 for trial in 0..3 {
                     let x = received(off, snr, 1000 + trial * 2500, 17600, &mut rng);
-                    let det = d.detect(&x).unwrap_or_else(|| panic!("missed off={off} snr={snr}"));
-                    assert!((det.offset_hz - off).abs() < 2.0, "off={off} snr={snr} got {}", det.offset_hz);
+                    let det = d
+                        .detect(&x)
+                        .unwrap_or_else(|| panic!("missed off={off} snr={snr}"));
+                    assert!(
+                        (det.offset_hz - off).abs() < 2.0,
+                        "off={off} snr={snr} got {}",
+                        det.offset_hz
+                    );
                 }
             }
         }
@@ -631,8 +700,14 @@ mod tests {
         for &off in &[0.0, 23.0, -41.0, 60.0] {
             for trial in 0..5 {
                 let x = received(off, -10.0, 700 + trial * 900, 9600, &mut rng);
-                let det = d.detect_near(&x, 150.0).unwrap_or_else(|| panic!("missed off={off} trial {trial}"));
-                assert!((det.offset_hz - off).abs() < 3.0, "off={off} got {}", det.offset_hz);
+                let det = d
+                    .detect_near(&x, 150.0)
+                    .unwrap_or_else(|| panic!("missed off={off} trial {trial}"));
+                assert!(
+                    (det.offset_hz - off).abs() < 3.0,
+                    "off={off} got {}",
+                    det.offset_hz
+                );
             }
         }
     }
@@ -645,7 +720,8 @@ mod tests {
         let hits = (0..200)
             .filter(|_| {
                 let n: Vec<f64> = (0..9600).map(|_| nd.sample(&mut rng)).collect();
-                d.detect_near(&ssb_channel(&n, 0.0, FS, PASSBAND), 150.0).is_some()
+                d.detect_near(&ssb_channel(&n, 0.0, FS, PASSBAND), 150.0)
+                    .is_some()
             })
             .count();
         assert!(hits <= 2, "{hits} of 200 noise windows confirmed");
@@ -667,7 +743,9 @@ mod tests {
     fn ignores_a_steady_tone_and_noise() {
         // A carrier (e.g. someone tuning up) must not look like a whistle.
         let mut d = Detector::new(WhistleParams::default());
-        let x: Vec<f64> = (0..17600).map(|i| (2.0 * PI * 1500.0 * i as f64 / 8000.0).sin()).collect();
+        let x: Vec<f64> = (0..17600)
+            .map(|i| (2.0 * PI * 1500.0 * i as f64 / 8000.0).sin())
+            .collect();
         assert!(d.detect(&x).is_none());
     }
 
@@ -694,7 +772,11 @@ mod tests {
                 let x = received(off, -5.0, 700 + trial * 1100, 4000, &mut rng);
                 let h = t.scan(&x).unwrap();
                 assert!(h.z > TrackDetector::found(0.5), "off={off}: z={:.1}", h.z);
-                assert!((h.offset_hz - off).abs() < 80.0, "off={off}: got {}", h.offset_hz);
+                assert!(
+                    (h.offset_hz - off).abs() < 80.0,
+                    "off={off}: got {}",
+                    h.offset_hz
+                );
             }
         }
     }
@@ -720,7 +802,11 @@ mod tests {
                     }
                 }
                 let tt = i as f64 / 8000.0;
-                x[i] += ph.iter().enumerate().map(|(k, p)| 0.15 * (2.0 * PI * (500.0 + 62.5 * k as f64) * tt + p).cos()).sum::<f64>();
+                x[i] += ph
+                    .iter()
+                    .enumerate()
+                    .map(|(k, p)| 0.15 * (2.0 * PI * (500.0 + 62.5 * k as f64) * tt + p).cos())
+                    .sum::<f64>();
             }
             let x = ssb_channel(&x, 0.0, FS, PASSBAND);
             if t.scan(&x).is_some_and(|h| h.z > TrackDetector::found(1.6)) {
@@ -742,7 +828,10 @@ mod tests {
                 // A strong carrier and an RTTY-like pair.
                 for (j, v) in x.iter_mut().enumerate() {
                     let tt = j as f64 / 8000.0;
-                    *v += (2.0 * PI * 1234.0 * tt).sin() + 0.5 * (2.0 * PI * if (j / 176) % 2 == 0 { 2125.0 } else { 2295.0 } * tt).sin();
+                    *v += (2.0 * PI * 1234.0 * tt).sin()
+                        + 0.5
+                            * (2.0 * PI * if (j / 176) % 2 == 0 { 2125.0 } else { 2295.0 } * tt)
+                                .sin();
                 }
             }
             let x = ssb_channel(&x, 0.0, FS, PASSBAND);

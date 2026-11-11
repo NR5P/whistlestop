@@ -46,7 +46,13 @@ pub struct Slot {
 
 impl Default for Slot {
     fn default() -> Self {
-        Slot { from: "13:00".into(), to: "17:00".into(), days: Days::Every, khz: 14_103.0, beacon: false }
+        Slot {
+            from: "13:00".into(),
+            to: "17:00".into(),
+            days: Days::Every,
+            khz: 14_103.0,
+            beacon: false,
+        }
     }
 }
 
@@ -59,12 +65,17 @@ pub fn minutes(hhmm: &str) -> Option<u32> {
 
 impl Slot {
     pub fn valid(&self) -> bool {
-        minutes(&self.from).is_some() && minutes(&self.to).is_some() && self.khz > 1_800.0 && self.khz < 30_000.0
+        minutes(&self.from).is_some()
+            && minutes(&self.to).is_some()
+            && self.khz > 1_800.0
+            && self.khz < 30_000.0
     }
 
     /// Is the slot on at unix time `t` (seconds, UTC)?
     pub fn on_at(&self, t: u64) -> bool {
-        let (Some(a), Some(b)) = (minutes(&self.from), minutes(&self.to)) else { return false };
+        let (Some(a), Some(b)) = (minutes(&self.from), minutes(&self.to)) else {
+            return false;
+        };
         let day = t / 86_400;
         let now = ((t % 86_400) / 60) as u32;
         let wd = (day + 3) % 7; // 1970-01-01 was a Thursday (Mon = 0)
@@ -83,7 +94,10 @@ impl Slot {
 
 /// The slot in charge at `t`: the first listed that is on.
 pub fn active(slots: &[Slot], t: u64) -> Option<(usize, &Slot)> {
-    slots.iter().enumerate().find(|(_, s)| s.valid() && s.on_at(t))
+    slots
+        .iter()
+        .enumerate()
+        .find(|(_, s)| s.valid() && s.on_at(t))
 }
 
 #[cfg(test)]
@@ -99,11 +113,22 @@ mod tests {
 
     #[test]
     fn slots_follow_the_clock() {
-        let day = Slot { from: "13:00".into(), to: "17:00".into(), khz: 14_103.0, ..Default::default() };
+        let day = Slot {
+            from: "13:00".into(),
+            to: "17:00".into(),
+            khz: 14_103.0,
+            ..Default::default()
+        };
         assert!(!day.on_at(at(WED, 12, 59)));
         assert!(day.on_at(at(WED, 13, 0)) && day.on_at(at(WED, 16, 59)));
         assert!(!day.on_at(at(WED, 17, 0)));
-        let night = Slot { from: "22:00".into(), to: "02:00".into(), khz: 7_103.0, days: Days::Weekdays, ..Default::default() };
+        let night = Slot {
+            from: "22:00".into(),
+            to: "02:00".into(),
+            khz: 7_103.0,
+            days: Days::Weekdays,
+            ..Default::default()
+        };
         assert!(night.on_at(at(WED, 23, 0)) && night.on_at(at(WED + 86_400, 1, 0)));
         // Friday night runs into Saturday morning; Saturday night doesn't run.
         let fri = WED + 2 * 86_400;
