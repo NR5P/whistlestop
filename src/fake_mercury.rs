@@ -276,6 +276,8 @@ impl Session {
                 }
             }
             "SN" => self.reply("SN 12.4"),
+            // What real Mercury 1.9 answers (it imitates VARA here).
+            "VERSION" => self.reply("VARA version 4.9.0 registered"),
             "BITRATE" => self.reply("BITRATE (25) 3100 BPS"),
             "CQFRAME" => {
                 self.reply("OK");

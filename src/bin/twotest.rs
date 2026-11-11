@@ -82,6 +82,7 @@ fn cfg_for(call: &str, port: u16, bport: u16, rig: u16, audio: u16, work: &Path)
         cq_listen_s: 20.0,
         auto_answer: call == B,
         download_dir: work.join(format!("{call}-downloads")),
+        depot_file: work.join(format!("{call}-depot.json")).to_string_lossy().to_string(),
         ..Default::default()
     };
     c.sdr.enabled = false;
@@ -117,6 +118,9 @@ impl Bench {
         }
         for p in [8300, 8310, 8100, 8110] {
             anyhow::ensure!(wait_port(p, 20), "Mercury did not open port {p} (see mercury-*.log)");
+        }
+        for c in [A, B] {
+            let _ = std::fs::remove_file(work.join(format!("{c}-depot.json")));
         }
         let a = engine::spawn(|| {});
         let b = engine::spawn(|| {});
@@ -502,6 +506,43 @@ impl Bench {
         }
     }
 
+    /// The Depot over real Mercury: mail handed over when linked, the away
+    /// greeting and chat saved while away, then the Station ID beacon
+    /// telling an away station there's mail, which it collects by itself.
+    fn s_depot(&mut self) {
+        self.disconnect_both();
+        self.b.send(Cmd::DepotPost { to: A.into(), via: None, text: "Depot test: see you on 40 m".into() });
+        self.a.send(Cmd::SetAway(true));
+        std::thread::sleep(Duration::from_secs(1));
+        if !self.direct_link("depot") {
+            return;
+        }
+        let got = self.wait(180.0, |a, b| a.depot.arrivals.iter().any(|m| m.text.contains("see you on 40 m")) && b.depot.delivered.iter().any(|m| m.to == A));
+        self.record("depot: mail handed over and confirmed", got.is_some(), format!("{:.0} s after linking", got.map(|d| d.as_secs_f64()).unwrap_or(-1.0)));
+        let greet = self.wait(120.0, |_, b| b.chat.iter().any(|c| c.who == Who::Them && c.text.contains("Away from the radio")));
+        self.record("depot: away greeting reaches the caller", greet.is_some(), format!("{:.0} s", greet.map(|d| d.as_secs_f64()).unwrap_or(-1.0)));
+        self.b.send(Cmd::Chat("Left you a note while you were out".into()));
+        let saved = self.wait(120.0, |a, _| a.depot.arrivals.iter().any(|m| m.from == B && m.text.contains("Left you a note")));
+        self.record("depot: chat while away saved to Arrivals", saved.is_some(), format!("{:.0} s", saved.map(|d| d.as_secs_f64()).unwrap_or(-1.0)));
+        self.disconnect_both();
+
+        // Station ID: B holds mail for A and says so; A (away, automatic
+        // collection on) connects and collects it with no one at the keys.
+        self.update(&self.a, |c| c.auto_collect = true);
+        self.b.send(Cmd::DepotPost { to: A.into(), via: None, text: "Second note, collected automatically".into() });
+        std::thread::sleep(Duration::from_secs(2));
+        self.b.send(Cmd::BeaconNow);
+        let heard = self.wait(90.0, |a, _| a.mail_alerts.iter().any(|m| m.call == B && !m.ours));
+        self.record("depot: Station ID heard, mail waiting shown", heard.is_some(), format!("{:.0} s", heard.map(|d| d.as_secs_f64()).unwrap_or(-1.0)));
+        let col = self.wait(300.0, |a, b| a.depot.arrivals.iter().any(|m| m.text.contains("collected automatically")) && b.depot.departures.is_empty());
+        self.record("depot: away station collects its mail by itself", col.is_some(), format!("{:.0} s", col.map(|d| d.as_secs_f64()).unwrap_or(-1.0)));
+        let hung = self.wait(120.0, |a, b| a.link.is_none() && b.link.is_none());
+        self.record("depot: automatic link hangs up when done", hung.is_some(), format!("{:.0} s", hung.map(|d| d.as_secs_f64()).unwrap_or(-1.0)));
+        self.disconnect_both();
+        self.a.send(Cmd::SetAway(false));
+        self.update(&self.a, |c| c.auto_collect = false);
+    }
+
     fn report(&self) -> String {
         let mut s = String::from("# Whistlestop two-station bench (real Mercury 1.9.23 ×2)\n\n");
         s += &format!("Run time {:.0} s. {}\n\n| Result | Test | Details |\n|---|---|---|\n", self.started.elapsed().as_secs_f64(), self.snr_note());
@@ -559,6 +600,9 @@ pub fn main() -> anyhow::Result<()> {
     }
     if run("e2e") {
         b.s_e2e();
+    }
+    if run("depot") {
+        b.s_depot();
     }
     b.dump_logs();
     let rep = b.report();

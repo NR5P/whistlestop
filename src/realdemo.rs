@@ -108,7 +108,10 @@ async fn wait_port(port: u16, secs: u64) -> bool {
 
 #[cfg(unix)]
 pub async fn start(mercury: &std::path::Path) -> Result<RealDemo> {
-    let dir = std::env::temp_dir().join(format!("whistlestop-demo-{}", std::process::id()));
+    // Unix socket paths must stay under ~104 bytes; some temp folders are long.
+    let base = std::env::temp_dir();
+    let base = if base.as_os_str().len() > 60 { PathBuf::from("/tmp") } else { base };
+    let dir = base.join(format!("whistlestop-demo-{}", std::process::id()));
     std::fs::create_dir_all(&dir)?;
     let (sa, sb) = (dir.join("you.sock"), dir.join("k7bot.sock"));
     let ether = Ether::start(

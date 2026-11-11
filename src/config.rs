@@ -56,6 +56,8 @@ pub struct Config {
     pub managed_rig: crate::rigsetup::ManagedRig,
     /// Direct CAT settings (rig_mode Direct).
     pub cat: crate::cat::CatConfig,
+    /// Where Depot mail is kept; empty = depot.json beside the settings.
+    pub depot_file: String,
     /// Ask the antenna tuner to tune when a transmission's SWR is above
     /// `swr_limit` (off by default; tuning transmits a carrier).
     pub auto_tune: bool,
@@ -124,6 +126,7 @@ impl Default for Config {
             rig_mode: crate::rigsetup::RigMode::External,
             managed_rig: crate::rigsetup::ManagedRig::default(),
             cat: crate::cat::CatConfig::default(),
+            depot_file: String::new(),
             auto_tune: false,
             swr_limit: 2.0,
             monitor: false,
@@ -145,6 +148,10 @@ impl Default for Config {
 }
 
 pub fn path() -> PathBuf {
+    // Tests (and portable setups) can keep settings elsewhere.
+    if let Some(p) = std::env::var_os("WHISTLESTOP_CONFIG") {
+        return PathBuf::from(p);
+    }
     dirs::config_dir().unwrap_or_else(std::env::temp_dir).join("Whistlestop").join("whistlestop.toml")
 }
 

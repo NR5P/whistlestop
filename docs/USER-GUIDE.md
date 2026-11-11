@@ -537,6 +537,7 @@ Settings are saved to `~/Library/Application Support/Whistlestop/whistlestop.tom
 | Collect automatically while away | Connect and collect mail waiting for you | off |
 | Carry mail for other stations | Store and forward (In Transit) | off |
 | Automatic only in the segments | Automatic transmissions only inside the automatic-control segments | on |
+| depot_file (settings file only) | Where Depot mail is kept | depot.json beside the settings |
 
 The **Whistle** length and **Answer automatically** are set on the main screen and saved too.
 

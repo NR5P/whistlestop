@@ -577,7 +577,7 @@ impl Station {
             mon_from: 0,
             real_demo: None,
             // Demo keeps its own mailbox; tests can point anywhere.
-            depot: crate::depot::Depot::load(std::env::var_os("WHISTLESTOP_DEPOT").map(PathBuf::from).unwrap_or_else(|| {
+            depot: crate::depot::Depot::load(std::env::var_os("WHISTLESTOP_DEPOT").map(PathBuf::from).or_else(|| (!cfg.depot_file.is_empty()).then(|| PathBuf::from(&cfg.depot_file))).unwrap_or_else(|| {
                 if cfg!(test) {
                     std::env::temp_dir().join(format!("ws-depot-{}-{}.json", std::process::id(), cfg.callsign))
                 } else if cfg.demo {
@@ -1776,8 +1776,10 @@ impl Station {
                 let v = self.est.snr_db;
                 self.set(|g| g.snr_db = v);
             }
-            _ if l.to_ascii_lowercase().contains("mercury") || word == "VERSION" => {
-                let v = l.trim_start_matches("VERSION").trim().to_string();
+            // Mercury answers VERSION as VARA does ("VARA version 4.9.0
+            // registered") so VARA programs accept it.
+            _ if l.to_ascii_lowercase().contains("mercury") || word == "VERSION" || (word == "VARA" && l.to_ascii_lowercase().contains("version")) => {
+                let v = version_text(&l);
                 self.set(|g| g.modem_version = Some(v));
             }
             _ => {}
@@ -2764,6 +2766,22 @@ impl Station {
             self.set(|g| g.whistle = Some(WhistleSeen { at: Instant::now(), dial_hz: dial, offset_hz: d.offset_hz, score: d.score }));
         }
     }
+}
+
+/// How to show the modem's VERSION reply.
+pub fn version_text(line: &str) -> String {
+    let l = line.trim().trim_start_matches("VERSION").trim();
+    if let Some(rest) = l.strip_prefix("VARA version") {
+        let v = rest.split_whitespace().next().unwrap_or("");
+        return format!("Mercury (VARA-compatible {v})");
+    }
+    l.to_string()
+}
+
+#[test]
+fn mercury_version_reply() {
+    assert_eq!(version_text("VARA version 4.9.0 registered"), "Mercury (VARA-compatible 4.9.0)");
+    assert_eq!(version_text("VERSION Mercury 1.9.23"), "Mercury 1.9.23");
 }
 
 #[cfg(test)]

@@ -29,3 +29,6 @@ walkdir = "2.5.0"
 x25519-dalek = { version = "3.0.0", features = ["getrandom"] }
 zeroize = "1.9.1"
 zip = { version = "9.5.1", default-features = false, features = ["deflate"] }
+
+[dev-dependencies]
+egui_kittest = { version = "0.37", features = ["eframe"] }

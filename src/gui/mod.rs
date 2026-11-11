@@ -707,7 +707,9 @@ impl App {
                     for b in bands {
                         ui.selectable_value(&mut self.search_band, b.clone(), b);
                     }
-                });
+                })
+                .response
+                .help(&help::S_BAND);
                 if ui.button("Search band").help(&help::S_BAND).clicked() {
                     self.send(Cmd::StartSearch(SearchScope::Band(self.search_band.clone())));
                 }
@@ -2087,3 +2089,6 @@ impl eframe::App for App {
         self.send(Cmd::Stop);
     }
 }
+
+#[cfg(test)]
+mod tests;

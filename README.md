@@ -125,6 +125,7 @@ per packet. Details: [docs/PROTOCOL.md](docs/PROTOCOL.md#encryption-optional).
 | `src/gui/` | the egui interface |
 | `prototype-python/` | first Python prototype of the whistle maths (reference only) |
 
-Tests: `cargo test --release` (76, including a full headless demo: search →
+Tests: `cargo test --release` (82, including click tests that drive the real
+window through its accessibility tree, a full headless demo: search →
 lock → CQ → connect → chat → zipped file, and the same over an encrypted
 link).

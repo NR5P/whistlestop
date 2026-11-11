@@ -26,13 +26,16 @@ cargo run --release --bin twotest -- ~/Desktop/mercury/source/mercury bench-run
 ```
 
 Add scenario names to run only some of them: `watch link chat files table
-narrow weak`. Results go to `bench-run/REPORT.md`; Mercury and Whistlestop
+narrow weak e2e depot`. Results go to `bench-run/REPORT.md`; Mercury and Whistlestop
 logs are written beside it.
 
-## Results (Mercury 1.9.23 ×2, 2026-11-10): 14/14 passed
+## Results (Mercury 1.9.23 ×2, 2026-11-10): 18/18 passed, plus Depot 7/7
 
 | Test | Result |
 |---|---|
+| Depot: mail handed over when linked | confirmed 32 s after linking |
+| Depot: away greeting, chat saved to Arrivals | greeting at once; note saved in 4 s |
+| Depot: Station ID → away station collects by itself | beacon heard in 4 s; mail collected in 33 s; link hung up when done |
 | Whistle watch, B parked 600 Hz off | measured +600.0 Hz |
 | Search → whistle → CQFRAME → link | linked in ~90 s (incl. search); B tuned **+0.0 Hz** from A; Mercury decoded the CQFRAME |
 | Chat both ways + delivered | 9–14 s per message |

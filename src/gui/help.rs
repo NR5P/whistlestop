@@ -24,10 +24,18 @@ pub trait Help {
 
 impl Help for Response {
     fn help(self, topic: &(&str, &str, &str)) -> Self {
+        let (title, body, guide) = *topic;
+        // Sliders, number boxes and dropdowns sit beside a separate text
+        // label; give them the topic's name so screen readers can say what
+        // they are.
+        self.ctx.accesskit_node_builder(self.id, |n| {
+            if n.label().is_none() {
+                n.set_label(title);
+            }
+        });
         if !on() {
             return self;
         }
-        let (title, body, guide) = *topic;
         self.on_hover_ui(|ui| {
             ui.set_max_width(400.0);
             ui.label(RichText::new(title).strong().size(15.0).color(BRASS));
