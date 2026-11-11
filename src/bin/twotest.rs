@@ -84,8 +84,8 @@ impl Bench {
         let sb = work.join("b.sock");
         let ether = Ether::start(
             vec![
-                StationCfg { name: A.into(), sock_path: sa.clone(), rig_port: 4632, audio_port: 7300, dial_hz: A_DIAL },
-                StationCfg { name: B.into(), sock_path: sb.clone(), rig_port: 4642, audio_port: 7310, dial_hz: 14_100_200.0 },
+                StationCfg { name: A.into(), sock_path: sa.clone(), rig_port: 4632, audio_port: 7300, dial_hz: A_DIAL, hear_own_tx: false },
+                StationCfg { name: B.into(), sock_path: sb.clone(), rig_port: 4642, audio_port: 7310, dial_hz: 14_100_200.0, hear_own_tx: false },
             ],
             Channel::default(),
         )?;

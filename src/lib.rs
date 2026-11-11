@@ -1,12 +1,14 @@
 pub mod audio;
 pub mod bandplan;
 pub mod config;
+pub mod demo_bot;
 pub mod e2e;
 pub mod engine;
 pub mod ether;
 pub mod fake_mercury;
 pub mod modes;
 pub mod protocol;
+pub mod realdemo;
 pub mod rig;
 pub mod rigsetup;
 pub mod sdr;

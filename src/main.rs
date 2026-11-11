@@ -77,7 +77,7 @@ fn main() -> anyhow::Result<()> {
         Command::IconPng { path } => {
             let d = gui::icon::icon_data();
             let img = eframe::egui::ColorImage::from_rgba_unmultiplied([d.width as usize, d.height as usize], &d.rgba);
-            write_png(&path, d.width, d.height, &img.as_raw().to_vec())?;
+            write_png(&path, d.width, d.height, img.as_raw())?;
             println!("Wrote {path}");
             Ok(())
         }

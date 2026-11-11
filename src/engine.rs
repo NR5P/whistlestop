@@ -424,6 +424,8 @@ struct Station {
     last_autotune: Option<(Instant, Option<&'static str>)>,
     monitor: Option<Arc<Mutex<audio::Monitor>>>,
     mon_from: u64,
+    /// The real-Mercury demo (its modems, band and K7BOT), while running.
+    real_demo: Option<crate::realdemo::RealDemo>,
     /// Roundtable host: the speed to switch to once the announcement is out.
     pending_speed: Option<(&'static Mode, Instant)>,
     last_query: Instant,
@@ -539,6 +541,7 @@ impl Station {
             last_autotune: None,
             monitor: None,
             mon_from: 0,
+            real_demo: None,
             pending_speed: None,
             last_query: Instant::now(),
         };
@@ -546,17 +549,37 @@ impl Station {
             let mut g = st.lock().unwrap();
             *g = State { running: true, demo: cfg.demo, mycall: cfg.callsign.to_uppercase(), bandwidth: Some(bw), ..Default::default() };
         }
-        s.log(format!("Whistlestop starting{}", if cfg.demo { " in Demo mode (simulated radio, band and Mercury)" } else { "" }));
+        // Demo on real Mercury when it's installed; otherwise all simulated.
+        let real = if cfg.demo && cfg.demo_real_mercury {
+            match crate::realdemo::find_mercury(&cfg.mercury_bin) {
+                Some(bin) => match crate::realdemo::start(&bin).await {
+                    Ok(d) => Some(d),
+                    Err(e) => {
+                        s.log(format!("⚠ Demo couldn't start real Mercury ({e}); using the simulated modem"));
+                        None
+                    }
+                },
+                None => None,
+            }
+        } else {
+            None
+        };
+        let real_ports = real.as_ref().map(|d| (d.rig_addr.clone(), d.audio_addr.clone(), d.mercury_port, d.bcast_port));
+        s.log(match (&real, cfg.demo) {
+            (Some(_), _) => "Whistlestop starting in Demo mode: two real Mercury modems on a simulated 20 m band, you and K7BOT".to_string(),
+            (None, true) => "Whistlestop starting in Demo mode (simulated radio, band and Mercury; install Mercury for a real-Mercury demo)".to_string(),
+            _ => "Whistlestop starting".to_string(),
+        });
 
         // Radio.
-        if cfg.demo {
+        if cfg.demo && real.is_none() {
             s.rig = Some(Rig::sim(14_096_000.0, vfo.clone()));
             s.set(|g| g.rig_ok = true);
             s.set(|g| g.rig_desc = "Demo transceiver (simulated)".into());
         } else {
-            let mut addr = cfg.rigctld.clone();
-            let mut desc = format!("rigctld at {addr}");
-            if cfg.rig_mode == crate::rigsetup::RigMode::Managed {
+            let mut addr = real_ports.as_ref().map(|p| p.0.clone()).unwrap_or(cfg.rigctld.clone());
+            let mut desc = if real_ports.is_some() { "Demo radio on the simulated band".to_string() } else { format!("rigctld at {addr}") };
+            if cfg.rig_mode == crate::rigsetup::RigMode::Managed && !cfg.demo {
                 match crate::rigsetup::start_rigctld(&cfg.managed_rig) {
                     Ok(p) => {
                         addr = p.addr.clone();
@@ -602,7 +625,8 @@ impl Station {
         }
 
         // Audio.
-        if cfg.demo {
+        let audio_in = real_ports.as_ref().map(|p| format!("ether:{}", p.1)).unwrap_or(cfg.audio_in.clone());
+        if cfg.demo && real.is_none() {
             let band = SimBand::new(
                 vfo.clone(),
                 vec![
@@ -614,7 +638,7 @@ impl Station {
             audio::run_sim(band, rx.clone(), sim_stop.clone());
             s.set(|g| g.audio_ok = true);
         } else {
-            if let Some(addr) = cfg.audio_in.strip_prefix("ether:") {
+            if let Some(addr) = audio_in.strip_prefix("ether:") {
                 // Test bench: audio to and from the ether over TCP.
                 match std::net::TcpStream::connect(addr) {
                     Ok(t) => {
@@ -642,7 +666,9 @@ impl Station {
         }
 
         // Mercury.
-        let (host, port, bport) = if cfg.demo {
+        let (host, port, bport) = if let Some(p) = &real_ports {
+            ("127.0.0.1".to_string(), p.2, p.3)
+        } else if cfg.demo {
             match FakeMercury::start(FakeOptions { rig_freq: Some(vfo.clone()), ..Default::default() }).await {
                 Ok(f) => ("127.0.0.1".to_string(), f.port, f.bcast_port),
                 Err(e) => {
@@ -672,6 +698,7 @@ impl Station {
             Err(e) => s.log(format!("⚠ {e}")),
         }
 
+        s.real_demo = real;
         if cfg.monitor {
             s.set_monitor(true);
         }
@@ -1360,13 +1387,12 @@ impl Station {
                 let me = self.mycall();
                 let arq_bw = self.bw.mercury_arq_bw();
                 self.tnc()?.command(&format!("CQFRAME {me} {arq_bw}")).await?;
-                if self.cfg.demo {
-                    if let Some(m) = &self.monitor {
+                if self.cfg.demo && self.real_demo.is_none()
+                    && let Some(m) = &self.monitor {
                         let m = m.lock().unwrap();
                         let mut seed = 0x5eed_u64 ^ Instant::now().elapsed().as_nanos() as u64 ^ 0x9e37;
                         m.push_tx(&audio::ofdm_burst(m.rate as f64, 3.1, &mut seed));
                     }
-                }
                 let kind = if table.is_some() { CALL_TABLE } else { CALL_CHAT };
                 let call = TableFrame {
                     table: table.as_deref().map(table_id).unwrap_or(0),
@@ -2392,6 +2418,45 @@ impl Station {
 mod tests {
     use super::*;
 
+    /// Demo on two real Mercury modems (skipped when Mercury isn't
+    /// installed): search finds K7BOT's real whistle, Mercury decodes its
+    /// real CQFRAME, and the stations link and chat over real ARQ.
+    #[test]
+    fn real_mercury_demo_search_link_chat() {
+        if crate::realdemo::find_mercury("").is_none() {
+            return;
+        }
+        let h = spawn(|| {});
+        let mut cfg = Config { demo: true, callsign: "N0REAL".into(), auto_answer: true, ..Default::default() };
+        cfg.sdr.enabled = false;
+        cfg.sdr.wide_search = false;
+        h.send(Cmd::Start(cfg));
+        let wait = |what: &str, secs: u64, f: &dyn Fn(&State) -> bool| {
+            let t = Instant::now();
+            while t.elapsed() < Duration::from_secs(secs) {
+                if f(&h.state.lock().unwrap()) {
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(200));
+            }
+            let g = h.state.lock().unwrap();
+            let log: Vec<_> = g.log.iter().map(|l| l.1.clone()).collect();
+            panic!("timed out waiting for {what}; log:\n{}", log.join("\n"));
+        };
+        wait("real Mercury", 30, &|s| s.mercury_ok && s.log.iter().any(|l| l.1.contains("two real Mercury")));
+        h.send(Cmd::StartSearch(SearchScope::CurrentBand));
+        wait("link with K7BOT over real Mercury", 240, &|s| s.link.as_ref().is_some_and(|l| l.peer == "K7BOT"));
+        let f = h.state.lock().unwrap().rig.freq_hz;
+        assert!((f - crate::realdemo::BOT_DIAL).abs() <= 55.0, "locked {f}");
+        wait("K7BOT's greeting", 90, &|s| s.chat.iter().any(|c| c.who == Who::Them));
+        h.send(Cmd::Chat("hello over real Mercury".into()));
+        wait("reply and delivery", 120, &|s| {
+            s.chat.iter().any(|c| c.who == Who::Them && c.text.contains("hello over real Mercury")) && s.chat.iter().any(|c| c.who == Who::Me && c.delivered)
+        });
+        h.send(Cmd::Stop);
+        std::thread::sleep(Duration::from_secs(1));
+    }
+
     /// SWR watch: on 40 m the demo antenna shows SWR 2.8. With auto-tune
     /// off (the default) Whistlestop only warns; with it on, it tunes, but
     /// only once the CQ is over.
@@ -2399,7 +2464,7 @@ mod tests {
     fn swr_watch_and_optional_autotune() {
         for auto in [false, true] {
             let h = spawn(|| {});
-            let mut cfg = Config { demo: true, callsign: "N0SWR".into(), whistle_s: 3.0, cq_cycles: 2, cq_listen_s: 2.0, ..Default::default() };
+            let mut cfg = Config { demo: true, demo_real_mercury: false, callsign: "N0SWR".into(), whistle_s: 3.0, cq_cycles: 2, cq_listen_s: 2.0, ..Default::default() };
             assert!(!cfg.auto_tune, "auto-tune must be off by default");
             cfg.auto_tune = auto;
             cfg.sdr.enabled = false;
@@ -2434,7 +2499,7 @@ mod tests {
     #[test]
     fn demo_wide_search_finds_and_links() {
         let h = spawn(|| {});
-        let mut cfg = Config { demo: true, callsign: "N0WIDE".into(), auto_answer: true, ..Default::default() };
+        let mut cfg = Config { demo: true, demo_real_mercury: false, callsign: "N0WIDE".into(), auto_answer: true, ..Default::default() };
         cfg.sdr.wide_search = true;
         cfg.sdr.wide_auto = true;
         cfg.download_dir = std::env::temp_dir().join(format!("ws-wide-{}", std::process::id()));
@@ -2492,7 +2557,7 @@ mod tests {
     #[test]
     fn demo_search_connect_chat_file() {
         let h = spawn(|| {});
-        let mut cfg = Config { demo: true, callsign: "N0TEST".into(), auto_answer: true, ..Default::default() };
+        let mut cfg = Config { demo: true, demo_real_mercury: false, callsign: "N0TEST".into(), auto_answer: true, ..Default::default() };
         cfg.download_dir = std::env::temp_dir().join(format!("ws-engine-{}", std::process::id()));
         cfg.sdr.enabled = false;
         h.send(Cmd::Start(cfg.clone()));
@@ -2531,7 +2596,7 @@ mod tests {
     #[test]
     fn demo_encrypted_chat_and_file() {
         let h = spawn(|| {});
-        let mut cfg = Config { demo: true, callsign: "N0SEC".into(), e2e: e2e::Policy::Require, ..Default::default() };
+        let mut cfg = Config { demo: true, demo_real_mercury: false, callsign: "N0SEC".into(), e2e: e2e::Policy::Require, ..Default::default() };
         cfg.download_dir = std::env::temp_dir().join(format!("ws-e2e-{}", std::process::id()));
         cfg.sdr.enabled = false;
         cfg.whistle_watch = false;

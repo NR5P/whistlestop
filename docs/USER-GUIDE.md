@@ -17,7 +17,13 @@ Whistlestop is an HF keyboard chat, file transfer and group conversation program
 
 ## Quick start: Demo mode
 
-The first time you open Whistlestop it starts in **Demo mode**: a simulated radio, a simulated 20 m band, a simulated Mercury modem and a demo station, **K7BOT**, who calls CQ every 45 seconds. Nothing is transmitted. Try this:
+The first time you open Whistlestop it starts in **Demo mode**: a simulated radio on a simulated 20 m band, and a demo station, **K7BOT**, who calls CQ every 45 seconds. Nothing is transmitted.
+
+- **With Mercury installed** (the `mercury` engine in `~/.local/bin`, `/opt/homebrew/bin` or `/usr/local/bin`), Demo runs **two real Mercury modems**: one for you, one for K7BOT, joined by the simulated band. Everything in the modem strip, and everything you hear with **🔈 Listen**, is real Mercury: its CQ burst, its speed ladder, its acknowledgements.
+- **Without it**, Demo simulates the modem too, and the CQ burst you hear is an imitation.
+- **Settings → Mode → Demo on real Mercury** switches between the two; **Mercury engine** sets the path if Mercury lives somewhere else.
+
+Try this:
 
 1. Press **🔈 Listen** in the top bar to hear the band on your speakers. Look at the **Radio audio** waterfall at the bottom left: every so often you'll see (and hear) K7BOT's whistle as slanted strokes.
 2. In **Search for whistles**, press **Current band**. Your radio steps through the 20 m digital segment. Within about one pass it stops, says "Whistle! measuring", retunes, and waits for the CQ.
@@ -404,7 +410,9 @@ Settings are saved to `~/Library/Application Support/Whistlestop/whistlestop.tom
 |---|---|---|
 | Callsign | Your call, sent in Mercury's CQFRAME and CALL frames | N0CALL |
 | Name, Grid | Sent to the other station at connect (HELLO) | empty |
-| Demo mode | Simulated radio, band, Mercury and demo station | on |
+| Demo mode | Simulated radio and band, with the K7BOT demo station | on |
+| Demo on real Mercury | Demo runs two real Mercury modems when Mercury is installed | on |
+| Mercury engine | Path to the Mercury engine (empty: look in the usual places) | automatic |
 | Mercury host / TNC port / Broadcast port | Where Mercury listens | 127.0.0.1 / 8300 / 8100 |
 | Radio connection | Use a running rigctld / RigHelm, or let Whistlestop run rigctld | running rigctld |
 | rigctld address | The running server's address | 127.0.0.1:4532 |

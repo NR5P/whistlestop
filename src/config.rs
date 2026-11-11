@@ -64,6 +64,10 @@ pub struct Config {
     pub monitor_volume: f32,
     /// Speaker device; empty = the system's default output.
     pub monitor_device: String,
+    /// Demo mode on two real Mercury modems when Mercury is installed.
+    pub demo_real_mercury: bool,
+    /// Path to the Mercury engine; empty = look in the usual places.
+    pub mercury_bin: String,
 }
 
 impl Default for Config {
@@ -100,6 +104,8 @@ impl Default for Config {
             monitor: false,
             monitor_volume: 0.7,
             monitor_device: String::new(),
+            demo_real_mercury: true,
+            mercury_bin: String::new(),
         }
     }
 }

@@ -33,6 +33,9 @@ pub struct StationCfg {
     pub rig_port: u16,
     pub audio_port: u16,
     pub dial_hz: f64,
+    /// While this station transmits, send its own transmitted audio to its
+    /// app instead of silence (so a listener hears their own signal).
+    pub hear_own_tx: bool,
 }
 
 /// Knobs a test can turn while the ether runs.
@@ -74,6 +77,9 @@ struct Station {
 
 pub struct Ether {
     pub channel: Arc<Mutex<Channel>>,
+    /// (rigctld port, app audio port) per station, as actually bound (a
+    /// port of 0 in the config picks a free one).
+    pub ports: Vec<(u16, u16)>,
     stations: Arc<Vec<Mutex<Station>>>,
     stop: Arc<AtomicBool>,
 }
@@ -103,19 +109,23 @@ impl Ether {
         );
         let channel = Arc::new(Mutex::new(channel));
         let mut mercury_listeners = vec![];
+        let mut ports = vec![];
         for (i, c) in cfgs.iter().enumerate() {
             let _ = std::fs::remove_file(&c.sock_path);
             let ul = UnixListener::bind(&c.sock_path)?;
             ul.set_nonblocking(true)?;
             mercury_listeners.push(ul);
-            spawn_rig(TcpListener::bind(("127.0.0.1", c.rig_port))?, stations.clone(), i, stop.clone());
-            spawn_app_audio(TcpListener::bind(("127.0.0.1", c.audio_port))?, stations.clone(), i, stop.clone());
+            let rl = TcpListener::bind(("127.0.0.1", c.rig_port))?;
+            let al = TcpListener::bind(("127.0.0.1", c.audio_port))?;
+            ports.push((rl.local_addr()?.port(), al.local_addr()?.port()));
+            spawn_rig(rl, stations.clone(), i, stop.clone());
+            spawn_app_audio(al, stations.clone(), i, stop.clone());
         }
         {
             let (stations, channel, stop) = (stations.clone(), channel.clone(), stop.clone());
             std::thread::Builder::new().name("ether".into()).spawn(move || run(stations, channel, mercury_listeners, stop))?;
         }
-        Ok(Ether { channel, stations, stop })
+        Ok(Ether { channel, ports, stations, stop })
     }
 }
 
@@ -352,6 +362,15 @@ fn run(stations: Arc<Vec<Mutex<Station>>>, channel: Arc<Mutex<Channel>>, listene
                 rx[r].iter_mut().for_each(|v| *v = 0.0); // muted on TX
             }
         }
+        // Stations that want to hear themselves get last block's TX on
+        // their app link (never on Mercury's: its receiver stays muted).
+        let mut app_rx = rx.clone();
+        for r in 0..n {
+            let own = stations[r].lock().unwrap()._cfg.hear_own_tx;
+            if own && keyed[r] {
+                app_rx[r] = tx_prev[r].iter().map(|v| v * 0.6).collect();
+            }
+        }
 
         // Exchange with each station: RX out, TX in.
         let vnow = start.elapsed().as_millis() as u64;
@@ -398,7 +417,7 @@ fn run(stations: Arc<Vec<Mutex<Station>>>, channel: Arc<Mutex<Channel>>, listene
             // while the virtual radio is keyed.
             let mut g = stations[i].lock().unwrap();
             if let Some(o) = g.app_out.as_mut() {
-                let bytes: Vec<u8> = rx[i].iter().flat_map(|v| (*v as f32).to_le_bytes()).collect();
+                let bytes: Vec<u8> = app_rx[i].iter().flat_map(|v| (*v as f32).to_le_bytes()).collect();
                 if o.write_all(&bytes).is_err() {
                     g.app_out = None;
                 }

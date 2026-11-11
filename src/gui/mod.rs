@@ -1453,7 +1453,21 @@ impl App {
                     });
                     ui.add_space(6.0);
                     card(ui, "Mode", |ui| {
-                        ui.checkbox(&mut c.demo, "Demo mode (simulated radio, band, Mercury and a demo station)").help(&help::ST_DEMO);
+                        ui.checkbox(&mut c.demo, "Demo mode (simulated radio and band, and a demo station)").help(&help::ST_DEMO);
+                        ui.add_enabled_ui(c.demo, |ui| {
+                            ui.horizontal(|ui| {
+                                ui.checkbox(&mut c.demo_real_mercury, "Demo on real Mercury").help(&help::ST_DEMO_REAL);
+                                let found = whistlestop::realdemo::find_mercury(&c.mercury_bin);
+                                ui.label(RichText::new(match &found {
+                                    Some(p) => format!("found {}", p.display()),
+                                    None => "Mercury not found: install it, or set the path".into(),
+                                }).small().color(if found.is_some() { GREEN } else { AMBER }));
+                            });
+                            ui.horizontal(|ui| {
+                                ui.label("Mercury engine");
+                                ui.add(egui::TextEdit::singleline(&mut c.mercury_bin).hint_text("automatic").desired_width(300.0)).help(&help::ST_MERCURY_BIN);
+                            });
+                        });
                         ui.label(RichText::new("Turn off to use your radio: start Mercury, and rigctld (Hamlib) or RigHelm's rigctld server.").small().color(DIM));
                     });
                     ui.add_space(6.0);
