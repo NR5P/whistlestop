@@ -451,6 +451,44 @@ impl Bench {
         let _ = before;
     }
 
+    /// Encryption over real Mercury ARQ: both stations on Prefer.
+    fn s_e2e(&mut self) {
+        self.disconnect_both();
+        for h in [&self.a, &self.b] {
+            self.update(h, |c| c.e2e = whistlestop::e2e::Policy::Prefer);
+        }
+        std::thread::sleep(Duration::from_secs(1));
+        if !self.direct_link("encrypted link") {
+            return;
+        }
+        let sec = self.wait(120.0, |a, b| {
+            let enc = |s: &State| s.link.as_ref().is_some_and(|l| matches!(l.e2e, engine::E2eView::Encrypted { .. }));
+            enc(a) && enc(b)
+        });
+        let codes = {
+            let code = |h: &Handle| match h.state.lock().unwrap().link.as_ref().map(|l| l.e2e.clone()) {
+                Some(engine::E2eView::Encrypted { sas }) => sas,
+                _ => String::new(),
+            };
+            (code(&self.a), code(&self.b))
+        };
+        self.record(
+            "encryption: key exchange over real Mercury",
+            sec.is_some() && !codes.0.is_empty() && codes.0 == codes.1,
+            format!("encrypted after {:.0} s; check codes ALPHA '{}' / BRAVO '{}'", sec.map(|d| d.as_secs_f64()).unwrap_or(-1.0), codes.0, codes.1),
+        );
+        self.b.send(Cmd::Chat("secret test message".into()));
+        let got = self.wait(120.0, |a, b| a.chat.iter().any(|c| c.text == "secret test message") && b.chat.iter().any(|c| c.who == Who::Me && c.delivered));
+        self.record("encryption: chat delivered", got.is_some(), format!("{:.1} s", got.map(|d| d.as_secs_f64()).unwrap_or(-1.0)));
+        let p = self.work.join("to-send/sealed.bin");
+        std::fs::write(&p, (0..6000u32).map(|i| (i * 31 % 251) as u8).collect::<Vec<u8>>()).unwrap();
+        self.transfer("encryption: file A→B byte-exact", true, vec![p], false, 300.0);
+        self.disconnect_both();
+        for h in [&self.a, &self.b] {
+            self.update(h, |c| c.e2e = whistlestop::e2e::Policy::Off);
+        }
+    }
+
     fn report(&self) -> String {
         let mut s = String::from("# Whistlestop two-station bench (real Mercury 1.9.23 ×2)\n\n");
         s += &format!("Run time {:.0} s. {}\n\n| Result | Test | Details |\n|---|---|---|\n", self.started.elapsed().as_secs_f64(), self.snr_note());
@@ -505,6 +543,9 @@ fn main() -> anyhow::Result<()> {
     }
     if run("weak") {
         b.s_weak();
+    }
+    if run("e2e") {
+        b.s_e2e();
     }
     b.dump_logs();
     let rep = b.report();

@@ -1,0 +1,130 @@
+//! Help mode: when switched on (the "? Help" toggle in the top bar),
+//! hovering over a control shows what it does. Off by default and not saved,
+//! so it never gets in the way.
+
+use super::{BRASS, DIM, TEXT};
+use eframe::egui::{Response, RichText};
+use std::sync::atomic::{AtomicBool, Ordering};
+
+static ON: AtomicBool = AtomicBool::new(false);
+
+pub fn on() -> bool {
+    ON.load(Ordering::Relaxed)
+}
+
+pub fn set(v: bool) {
+    ON.store(v, Ordering::Relaxed);
+}
+
+pub trait Help {
+    /// In help mode, explain this control on hover: a title, the
+    /// explanation, and where to read more in the Guide.
+    fn help(self, topic: &(&str, &str, &str)) -> Self;
+}
+
+impl Help for Response {
+    fn help(self, topic: &(&str, &str, &str)) -> Self {
+        if !on() {
+            return self;
+        }
+        let (title, body, guide) = *topic;
+        self.on_hover_ui(|ui| {
+            ui.set_max_width(400.0);
+            ui.label(RichText::new(title).strong().size(15.0).color(BRASS));
+            ui.add_space(2.0);
+            ui.label(RichText::new(body).size(13.5).color(TEXT));
+            if !guide.is_empty() {
+                ui.add_space(4.0);
+                ui.label(RichText::new(format!("📖 Guide: {guide}")).size(11.5).color(DIM));
+            }
+        })
+    }
+}
+
+/// (title, explanation, Guide section)
+pub type Topic = (&'static str, &'static str, &'static str);
+
+pub const HELP_TOGGLE: Topic = ("Help mode", "When on, hovering over any control explains it, like this. Turn it off when you know your way around: it's off every time Whistlestop starts.", "A tour of the screen");
+pub const FREQ: Topic = ("Frequency display", "The radio's dial frequency (USB), band and mode, read from the radio about once a second, including changes you make on the radio itself. The lamp is green when receiving and red when transmitting.", "Rig controls");
+pub const S_METER: Topic = ("S-meter", "The radio's signal strength reading (rigctld STRENGTH), shown as an S-unit. Not all radios report it.", "Rig controls");
+pub const SNR_METER: Topic = ("SNR", "Mercury's signal-to-noise measurement of the last signal it decoded, in dB. Mercury uses it to choose its speed. Above about +15 dB it can reach its fastest mode; near 0 dB it slows to DATAC3 or below.", "Bandwidth and speed");
+pub const PILLS: Topic = ("Connections", "Green means connected. Radio: the rigctld server (Hamlib or RigHelm). Mercury: the modem's TNC port. Audio: the radio's sound card input. SDR: the optional wide receiver. Red: open Settings, or see Troubleshooting.", "Troubleshooting");
+pub const SETTINGS: Topic = ("Settings", "Callsign, Demo mode, Mercury and radio addresses, audio devices, the wide receiver, search and CQ timing, encryption and the download folder. Save & connect applies them.", "Settings reference");
+pub const DEMO: Topic = ("Demo mode", "Everything is simulated: radio, band, Mercury and the K7BOT demo station. Nothing is transmitted. Untick Demo mode in Settings to use your radio.", "Quick start: Demo mode");
+
+pub const M_STATE: Topic = ("Modem state", "Whether Mercury is transmitting (red) or receiving (green), and what for: a 1:1 link, a Roundtable, or idle and listening for calls.", "The modem strip");
+pub const M_MODE: Topic = ("Mode and modulation", "The mode on the air now. During a link it's the step Mercury reports on its speed ladder; otherwise the mode it listens on (DATAC3 by default; a Roundtable's mode at a table). OFDM QPSK and 16-QAM use many carriers at once; 32-MFSK sends one of 32 tones at a time for the weakest signals.", "Bandwidth and speed");
+pub const M_CARRIERS: Topic = ("Carriers", "How many OFDM carriers (or MFSK tones) the mode uses, and their spacing. More carriers in the same spacing means a wider, faster signal.", "Bandwidth and speed");
+pub const M_BW: Topic = ("Bandwidth", "How wide the signal on the air is now; your limit (set in the Bandwidth card); and the width both stations agreed when the link came up (the narrower of the two limits wins).", "Bandwidth and speed");
+pub const M_SPEED: Topic = ("Speed", "The current mode's raw data rate (from Mercury during a link) and the speed actually measured from what got through. Measured speed is lower because of acknowledgements and turnarounds.", "Bandwidth and speed");
+pub const M_FEC: Topic = ("Error correction", "The LDPC code Mercury uses in this mode, and the size and duration of one frame. Lower code rates (1/3, 1/2) add more protection; 0.6 carries more data per frame.", "Bandwidth and speed");
+pub const M_LADDER: Topic = ("Speed ladder", "The steps Mercury can use on this link, slowest (most robust) on the left. Mercury climbs and descends by itself from what actually gets through. You control the limit (Bandwidth), not the step.", "Bandwidth and speed");
+
+pub const CQ_KIND: Topic = ("What the CQ is for", "Chat (1:1): someone answers and you have a private link for chat and files. Roundtable: a group conversation on your frequency; give it a name, and others join.", "Calling CQ");
+pub const CQ_TABLE_NAME: Topic = ("Roundtable name", "Sent in your CALL packet so others can join the right table. Stations at a table with a different name ignore each other.", "Roundtables");
+pub const CQ_WHISTLE: Topic = ("Whistle length", "How long the chirp whistle lasts before your digital CQ. Searching stations need to hear it during their pass, so make it at least one search pass: about 24 s for the 20 m segment. Longer reaches more searchers but holds the frequency longer.", "The whistle");
+pub const CQ_CALL: Topic = ("Call CQ", "Starts the cycle: key up and whistle, then Mercury's CQFRAME with your callsign, a CALL packet, then listen for answers. Repeats (5 cycles by default) until someone answers or you press Stop.", "Calling CQ");
+pub const CQ_STOP: Topic = ("Stop CQ", "Stops calling at once, mid-whistle if necessary, and unkeys.", "Calling CQ");
+
+pub const S_CURRENT: Topic = ("Search current band", "Steps your radio through the digital segment(s) of the band you're on: 2.2 s per channel, 1.8 kHz apart (about 24 s per pass on 20 m). Stops on a whistle, retunes onto it to within a few Hz, and waits for the CQ.", "Finding stations");
+pub const S_ALL: Topic = ("Search all bands", "Every configured segment, band after band. A pass is long, so callers would need very long whistles; mostly for monitoring.", "Finding stations");
+pub const S_BAND: Topic = ("Search one band", "Pick a band and search only its digital segment, without changing band first.", "Finding stations");
+pub const S_STOP: Topic = ("Stop search", "Stops stepping; the radio stays where it is.", "Finding stations");
+pub const S_WIDE: Topic = ("Wide search (SDR)", "With an RTL-SDR second receiver, watch the whole digital segment at once: the SDR's view is split into virtual receivers every 1.8 kHz and every one is checked each second. Finds a whistle within about 1.5 s without moving your radio.", "Finding stations");
+pub const S_AUTOTUNE: Topic = ("Auto-tune", "Tune the radio to whistles the SDR finds, and fine-lock on the radio's own audio (SDR crystals are often hundreds of Hz off). Only when you're not linked, calling or searching.", "Finding stations");
+pub const S_AUTOANSWER: Topic = ("Answer automatically", "When a search locks onto a whistle and Mercury decodes the caller's CQ, connect at once instead of waiting for you to press Answer.", "Finding stations");
+
+pub const H_TUNE_TO: Topic = ("Tune to the whistle", "A whistle was heard near your frequency (whistle watch). This retunes by the measured offset so you're right on the caller.", "Finding stations");
+pub const H_ANSWER: Topic = ("Answer", "Connect to this station: Mercury places the call, and the Chat tab opens when the link is up.", "Chat");
+pub const H_JOIN: Topic = ("Join", "Join this Roundtable on the current frequency. The host hears your report and may adjust the table's speed.", "Roundtables");
+pub const H_LOCK: Topic = ("Lock on", "Tune the radio to this SDR hit and fine-lock using the radio's own audio, then wait for the CQ.", "Finding stations");
+
+pub const BW_BUTTONS: Topic = ("Bandwidth limit", "How wide Whistlestop may go, from 250 Hz to 2750 Hz. 1:1 links use Mercury's narrow ladder below 2300 Hz and the full ladder at 2300/2750; the narrower of the two stations' limits wins. Roundtables use any mode inside the limit. Below 1700 Hz the whistle switches to its narrow profile.", "Bandwidth and speed");
+
+pub const R_BANDS: Topic = ("Band buttons", "Jump to that band's digital segment, where whistles and Whistlestop stations are searched for.", "Band plan");
+pub const R_NUDGE: Topic = ("Nudge", "Move the dial down or up by 1 kHz or 100 Hz.", "Rig controls");
+pub const R_FREQ: Topic = ("Frequency entry", "Type a frequency in kHz (14103.15) or Hz and press Enter or Tune.", "Rig controls");
+pub const R_MODE: Topic = ("Radio mode", "PKTUSB (data USB) or USB for Whistlestop. LSB is there for completeness: Whistlestop's signals are upper sideband.", "Rig controls");
+pub const R_POWER: Topic = ("RF power", "The radio's transmit power, if it supports remote setting. Data and the whistle are full duty cycle while transmitting: run the radio cool.", "Rig controls");
+pub const R_TUNE: Topic = ("Tune carrier", "Mercury sends a steady 1 kHz tone for your antenna tuner. It always stops by itself after 60 s; Stop ends it sooner.", "Rig controls");
+
+pub const TABS: Topic = ("Tabs", "Chat: 1:1 conversation. Roundtable: group conversation. Files: send and receive files. Log: everything that happened. Guide: this manual.", "A tour of the screen");
+pub const L_CONNECT: Topic = ("Connect", "Call a station by callsign. Mercury places the call; when it answers, the link header shows their name, grid and signal report.", "Chat");
+pub const L_DISCONNECT: Topic = ("Disconnect (73)", "Says goodbye, lets Mercury deliver anything still queued, then hangs up.", "Chat");
+pub const C_INPUT: Topic = ("Message", "Type and press Enter. The line below shows how many bytes go on the air and about how long that takes at the current speed. Messages show '… sending' until the other station confirms, then '✓ delivered'.", "Chat");
+
+pub const F_FILES: Topic = ("Send files", "Pick files to send. They're offered first: the other station sees the name, size and time and accepts. You can also drop files on the window.", "Files");
+pub const F_FOLDER: Topic = ("Send a folder", "Pick a folder: it's zipped with everything inside and offered as one file.", "Files");
+pub const F_ZIP: Topic = ("Zip before sending", "Pack files into one zip at maximum compression. Text and logs often shrink to a few percent; photos don't shrink.", "Files");
+pub const F_ESTIMATE: Topic = ("Estimate", "Pick any file to see how long it would take at every bandwidth and several signal levels, plus at the current SNR.", "Files");
+pub const F_ACCEPT: Topic = ("Accept", "Receive this file. If part of it arrived before (a dropped link), the transfer resumes from there.", "Files");
+pub const F_DECLINE: Topic = ("Decline", "Refuse this file; the sender is told.", "Files");
+pub const F_CANCEL: Topic = ("Cancel", "Stop this transfer on both sides. A partly received file is kept so it can resume later.", "Files");
+
+pub const T_JOIN: Topic = ("Join here", "Join the named Roundtable on the frequency you're on (the host's frequency).", "Roundtables");
+pub const T_LEAVE: Topic = ("Leave", "Say goodbye to the table and stop listening to it.", "Roundtables");
+pub const T_MEMBER: Topic = ("Pass the floor", "Click a member to pass them the floor (the talking stick): a courtesy so people take turns. The number is how well they hear the host.", "Roundtables");
+pub const T_INPUT: Topic = ("Roundtable message", "Goes to everyone at the table as broadcast frames. The line below shows exactly how many frames and how long on the air.", "Roundtables");
+
+pub const W_AUDIO: Topic = ("Radio audio waterfall", "What your radio hears, 0 to 3 kHz, newest at the top. The brass bar on top marks where the whistle sweeps. A whistle shows as slanted strokes.", "A tour of the screen");
+pub const W_WIDE: Topic = ("Wide receiver waterfall", "The band around your dial from the RTL-SDR. Teal bars: digital segments. Brass line: your dial; shaded: your receive passband. 🚂 boxes: whistles the wide search found. Hover to read a frequency, click to tune there.", "Wide receiver (RTL-SDR)");
+pub const W_SPAN: Topic = ("Span", "Zoom the wide waterfall: 25 kHz to 1.2 MHz across.", "Wide receiver (RTL-SDR)");
+
+// ----------------------------------------------------------------- Settings
+pub const ST_CALL: Topic = ("Callsign", "Your call. Mercury sends it in every CQFRAME (your identification) and in connection requests; Whistlestop puts it in CALL and Roundtable frames.", "Settings reference");
+pub const ST_NAMEGRID: Topic = ("Name and grid", "Sent to the other station when a link comes up (HELLO), and shown in their link header. Optional.", "Settings reference");
+pub const ST_DEMO: Topic = ("Demo mode", "Simulated radio, band, Mercury and the K7BOT demo station. Nothing is transmitted. Untick to use your radio, Mercury and rigctld.", "Quick start: Demo mode");
+pub const ST_MERCURY: Topic = ("Mercury address and ports", "Where Mercury listens: TNC control port (data is the next port up) and the broadcast port used by Roundtables. Defaults 8300 and 8100 match Mercury's own.", "Setting up your station");
+pub const ST_RIGCTLD: Topic = ("rigctld address", "The rig control server that owns your radio's CAT port: Hamlib rigctld or RigHelm's built-in server. Mercury should use the same one (Hamlib model 2, NET rigctl).", "Setting up your station");
+pub const ST_AUDIO: Topic = ("Audio devices", "The radio's sound card. Whistlestop listens (whistle detector, waterfall) and plays the whistle through it; Mercury uses the same device for data.", "Setting up your station");
+pub const ST_SDR: Topic = ("Wide receiver", "Use an RTL-SDR dongle for the wide waterfall and the wide whistle search. RX OUT: the antenna signal (the dongle follows your VFO). IF OUT: your radio's first IF (set its frequency and whether it is inverted).", "Wide receiver (RTL-SDR)");
+pub const ST_PPM: Topic = ("Crystal ppm", "Corrects the dongle's frequency error for the waterfall picture. The wide search doesn't depend on it: hits are fine-locked with the main radio.", "Wide receiver (RTL-SDR)");
+pub const ST_DWELL: Topic = ("Dwell per channel", "How long a search listens on each channel. 2.2 s always contains one whole UP/DOWN whistle pair; longer is more sensitive but makes each pass slower.", "Finding stations");
+pub const ST_STEP: Topic = ("Channel step", "Distance between search channels. It is capped so every caller is within the whistle's capture range of some channel (1800 Hz for the wide whistle).", "Finding stations");
+pub const ST_CYCLES: Topic = ("CQ cycles", "How many whistle → CQFRAME → listen cycles before giving up.", "Calling CQ");
+pub const ST_LISTEN: Topic = ("Listen after CQ", "How long to wait for answers after each CQ before whistling again.", "Calling CQ");
+pub const ST_WATCH: Topic = ("Whistle watch", "Report whistles heard near the frequency you're parked on (with a Tune to it button). Paused while transmitting and during a link.", "Finding stations");
+pub const ST_RAMP: Topic = ("Roundtable speed ramp-up", "As host, speed the table up to the fastest mode every member can copy (3 dB margin) and slow it down when someone fades.", "Roundtables");
+pub const ST_E2E: Topic = ("Encryption", "Off (default), Prefer (encrypt when the other station also wants to) or Require (encrypt or hang up). Fresh keys every link, never saved. Not legal on amateur bands.", "Encryption (optional)");
+pub const ST_DOWNLOAD: Topic = ("Download folder", "Where received files are saved. Partial files (for resuming) are kept in a .partial folder inside it.", "Files");
+pub const ST_SAVE: Topic = ("Save & connect", "Save settings to whistlestop.toml and reconnect to the radio, Mercury and audio with them.", "Settings reference");
