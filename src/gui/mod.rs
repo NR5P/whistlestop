@@ -329,8 +329,9 @@ impl App {
     }
 
     fn wordmark(&mut self, ui: &mut Ui) {
-        let (r, _) = ui.allocate_exact_size(vec2(44.0, 44.0), Sense::hover());
-        icon::paint(ui.painter(), r, BRASS);
+        let (r, _) = ui.allocate_exact_size(vec2(46.0, 46.0), Sense::hover());
+        let tex = self.logo.get_or_insert_with(|| icon::texture(ui.ctx()));
+        ui.painter().image(tex.id(), r, Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), Color32::WHITE);
         ui.vertical(|ui| {
             ui.add_space(2.0);
             ui.label(RichText::new("WHISTLESTOP").size(21.0).strong().color(TEXT).extra_letter_spacing(2.5));
