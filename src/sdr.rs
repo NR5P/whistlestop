@@ -206,7 +206,7 @@ impl WideFront {
             // real dongle, this one's crystal is off (17 ppm: +240 Hz here),
             // which the main radio's fine lock has to take out.
             const CRYSTAL_ERR_HZ: f64 = 240.0;
-            let (bot, start, whistle_s, cycle) = (14_103_150.0 + CRYSTAL_ERR_HZ, 4.0, 25.0, 45.0);
+            let (bot, start, whistle_s, cycle) = (14_103_150.0 + CRYSTAL_ERR_HZ, 4.0, 10.0, 30.0);
             let ph = (t0 - start).rem_euclid(cycle);
             if t0 >= start && ph < whistle_s {
                 let w = crate::widesearch::complex_whistle(fs as f64, n, bot - center, ph, &p, &mut self.sim_phase[i]);

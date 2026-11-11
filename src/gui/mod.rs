@@ -648,7 +648,7 @@ impl App {
             }
             ui.horizontal(|ui| {
                 ui.label(RichText::new("Whistle").color(DIM));
-                if ui.add(egui::Slider::new(&mut self.cfg.whistle_s, 6.0..=60.0).suffix(" s").integer()).help(&help::CQ_WHISTLE).changed() {
+                if ui.add(egui::Slider::new(&mut self.cfg.whistle_s, 4.0..=60.0).suffix(" s").integer()).help(&help::CQ_WHISTLE).changed() {
                     let _ = self.cfg.save();
                 }
             });
@@ -1783,10 +1783,10 @@ impl App {
                     card(ui, "Search & CQ", |ui| {
                         egui::Grid::new("sc").num_columns(2).spacing(vec2(10.0, 8.0)).show(ui, |ui| {
                             ui.label("Dwell per channel");
-                            ui.add(egui::Slider::new(&mut c.dwell_s, 2.0..=6.0).suffix(" s")).help(&help::ST_DWELL);
+                            ui.add(egui::Slider::new(&mut c.dwell_s, 0.3..=4.0).suffix(" s")).help(&help::ST_DWELL);
                             ui.end_row();
                             ui.label("Channel step");
-                            ui.add(egui::Slider::new(&mut c.step_hz, 400.0..=1800.0).suffix(" Hz")).help(&help::ST_STEP);
+                            ui.add(egui::Slider::new(&mut c.step_hz, 400.0..=2000.0).suffix(" Hz")).help(&help::ST_STEP);
                             ui.end_row();
                             ui.label("CQ cycles");
                             ui.add(egui::Slider::new(&mut c.cq_cycles, 1..=20)).help(&help::ST_CYCLES);

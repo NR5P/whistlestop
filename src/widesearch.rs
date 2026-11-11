@@ -273,7 +273,7 @@ mod tests {
     #[test]
     fn finds_callers_anywhere_in_the_segment_without_aliases() {
         let p = WhistleParams::default();
-        let mut w = WideWatch::new(seg20(), p, 1800.0);
+        let mut w = WideWatch::new(seg20(), p, 900.0);
         let fs = w.fs as f64;
         let mut rng = StdRng::seed_from_u64(3);
         // Two callers: one between channels, at an offset that aliases from
@@ -302,7 +302,7 @@ mod tests {
 
     #[test]
     fn quiet_band_has_no_hits() {
-        let mut w = WideWatch::new(seg20(), WhistleParams::default(), 1800.0);
+        let mut w = WideWatch::new(seg20(), WhistleParams::default(), 900.0);
         let mut rng = StdRng::seed_from_u64(4);
         for _ in 0..4 {
             w.push(&noise((2.2 * w.fs as f64) as usize, 0.05, &mut rng));
@@ -315,7 +315,7 @@ mod tests {
         // 2.048 MS/s from a dongle tuned to 14.2 MHz; caller at 14.1037 MHz.
         let p = WhistleParams::default();
         let seg = seg20();
-        let mut w = WideWatch::new(seg, p, 1800.0);
+        let mut w = WideWatch::new(seg, p, 900.0);
         let fs_in = 2_048_000.0;
         let dongle = 14_200_000.0;
         let mut dec = Decimator::new(fs_in, (fs_in / w.fs as f64) as usize, w.center_rf - dongle);

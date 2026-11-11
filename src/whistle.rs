@@ -1,9 +1,20 @@
 //! The Whistlestop "whistle": a chirp calling signal that scanners can find
 //! far off frequency, and that tells them exactly how far off they are.
 //!
-//! The signal is a train of linear chirp pairs, UP (f_lo -> f_hi) then DOWN
-//! (f_hi -> f_lo), each `chirp_s` long, so the pattern repeats every
-//! P = 2 * chirp_s.
+//! The signal (whistle v2) is a train of linear chirp pairs, UP
+//! (1000 -> 2000 Hz) then DOWN (2000 -> 1000 Hz), each 0.2 s, so the pattern
+//! repeats every P = 0.4 s. A short repeat lets a scanner catch a whole
+//! pattern in a half-second dwell; docs/WHISTLE-LAB.md has the study that
+//! chose it.
+//!
+//! Two detectors:
+//!
+//! * `TrackDetector`, for scanning: non-coherent, it adds up energy along
+//!   the whistle's sweep in a short-frame spectrogram for every timing and
+//!   offset (±1200 Hz), so it decides in one short dwell, survives fading,
+//!   and gives a coarse offset that is never ambiguous.
+//! * `Detector`, for the fine lock: coherent matched filters on the UP and
+//!   DOWN chirps, accurate to about a hertz (below).
 //!
 //! When the receiver is mistuned so the audio arrives `df` Hz higher than
 //! sent, the matched-filter peak of an up-chirp moves *earlier* by df/k and
@@ -39,7 +50,7 @@ pub struct WhistleParams {
 
 impl Default for WhistleParams {
     fn default() -> Self {
-        Self { fs: FS, f_lo: 500.0, f_hi: 2500.0, chirp_s: 0.5, taper_s: 0.01, amplitude: 0.5 }
+        Self { fs: FS, f_lo: 1000.0, f_hi: 2000.0, chirp_s: 0.2, taper_s: 0.01, amplitude: 0.5 }
     }
 }
 
@@ -65,6 +76,14 @@ impl WhistleParams {
         offset_hz - offset_hz.signum() * 2.0 * self.max_offset_hz()
     }
 
+    /// How far off a scanner can be and still catch the whistle in a
+    /// dwell: up to most of the receiver's passband for the wide whistle,
+    /// the matched filter's unambiguous range for the narrow one (which is
+    /// used behind a 500 Hz filter).
+    pub fn scan_reach_hz(&self) -> f64 {
+        if self.f_hi - self.f_lo >= 900.0 { 1100.0 } else { self.max_offset_hz() }
+    }
+
     pub fn with_fs(mut self, fs: u32) -> Self {
         self.fs = fs;
         self
@@ -73,7 +92,8 @@ impl WhistleParams {
 
 /// Named whistle profiles. Callers and searchers must use the same one.
 ///
-/// * `wide`   — 500 -> 2500 Hz, finds callers up to +/-1000 Hz off (default)
+/// * `wide`   — 1000 -> 2000 Hz, scanners find callers up to +/-1100 Hz off
+///   (default)
 /// * `narrow` — 1250 -> 1750 Hz, fits a 500 Hz filter, +/-250 Hz capture
 pub fn profile(name: &str) -> WhistleParams {
     match name {
@@ -204,7 +224,9 @@ impl Detector {
     pub fn new(params: WhistleParams) -> Self {
         Self {
             params,
-            threshold: 0.12,
+            // 0.12 for a 0.5 s chirp; noise correlation grows as the
+            // template shortens.
+            threshold: 0.12 * (4000.0 / (params.n_chirp() as f64 * 8000.0 / params.fs as f64)).sqrt(),
             up: chirp_template(&params, true),
             down: chirp_template(&params, false),
             planner: FftPlanner::new(),
@@ -222,12 +244,35 @@ impl Detector {
         let nfft = next_pow2(x.len() + l);
         let fwd = self.planner.plan_fft_forward(nfft);
         let inv = self.planner.plan_fft_inverse(nfft);
-        let xa = analytic_spectrum(x, &fwd, nfft);
-
-        // Sliding window energy (analytic energy = 2x real energy).
+        let mut xa = analytic_spectrum(x, &fwd, nfft);
+        // Clip strong narrow peaks (carriers, RTTY, FT8) to 3x the band's
+        // median level, so they don't swamp the normalisation. Noise and the
+        // whistle itself (spread over 1000 Hz) are almost never clipped.
+        let fsf = self.params.fs as f64;
+        let (b0, b1) = ((PASSBAND.0 / fsf * nfft as f64) as usize, (PASSBAND.1 / fsf * nfft as f64) as usize);
+        let mut mags: Vec<f64> = xa[b0..b1.min(nfft / 2)].iter().map(|c| c.norm()).collect();
+        if !mags.is_empty() {
+            let cap = 3.0 * median(&mut mags);
+            // Only when a few bins stand out (a carrier in noise); if many
+            // do, there's no noise floor to judge by, so leave it alone.
+            let over = mags.iter().filter(|m| **m > cap).count();
+            // (A carrier in noise lifts ~5 % of bins; a lone tone with no
+            // noise at all, ~15 %.)
+            if cap > 0.0 && over * 10 < mags.len() {
+                for c in xa.iter_mut().take(nfft / 2) {
+                    let m = c.norm();
+                    if m > cap {
+                        *c *= cap / m;
+                    }
+                }
+            }
+        }
+        // The clipped signal in time, for the window energies.
+        let mut xw = xa.clone();
+        inv.process(&mut xw);
         let mut cum = vec![0.0f64; x.len() + 1];
-        for (i, v) in x.iter().enumerate() {
-            cum[i + 1] = cum[i] + v * v;
+        for i in 0..x.len() {
+            cum[i + 1] = cum[i] + (xw[i] / nfft as f64).norm_sqr() / 2.0;
         }
         let n_out = x.len() - l + 1;
 
@@ -256,6 +301,16 @@ impl Detector {
     pub fn peak_level(&mut self, x: &[f64]) -> f64 {
         let (ru, rd) = self.correlate(x);
         ru.iter().chain(&rd).cloned().fold(0.0, f64::max)
+    }
+
+    /// Measure a whistle already found and tuned to (by the scan): only
+    /// offsets within ±`within` Hz count, so a lower threshold is safe.
+    pub fn detect_near(&mut self, x: &[f64], within: f64) -> Option<Detection> {
+        let saved = self.threshold;
+        self.threshold = saved * 0.75;
+        let d = self.detect(x).filter(|d| d.offset_hz.abs() <= within);
+        self.threshold = saved;
+        d
     }
 
     pub fn detect(&mut self, x: &[f64]) -> Option<Detection> {
@@ -316,6 +371,157 @@ impl Detector {
             score: wsum / kept.len() as f64,
             n_pairs: ups_used.len(),
             spread_hz: hi_o - lo_o,
+        })
+    }
+}
+
+// ------------------------------------------------------- scan detection
+
+/// What a scan dwell found: how sure, and roughly where.
+#[derive(Clone, Copy, Debug)]
+pub struct TrackHit {
+    /// Strength of the best match, as a z-score over the busy-band noise
+    /// floor (see `TrackDetector::found`).
+    pub z: f64,
+    /// Coarse offset (Hz, audio higher than sent), good to about ±30 Hz and
+    /// never ambiguous: the UP and DOWN legs only line up at the true one.
+    pub offset_hz: f64,
+}
+
+/// The scanning detector: a short-frame spectrogram, each frequency bin
+/// whitened by its own median (so steady carriers vanish), then for every
+/// pattern timing and every offset within reach, the cells along the
+/// whistle's UP/DOWN track are added up. The best sum, as a z-score, says
+/// whether a whistle is there; its offset says where.
+///
+/// Non-coherent, so it doesn't care about fading phase, and it needs only
+/// as much signal as the dwell holds, not a whole chirp at the right moment.
+pub struct TrackDetector {
+    pub params: WhistleParams,
+    /// Offsets searched, ± Hz.
+    pub reach_hz: f64,
+    frame: usize,
+    win: Vec<f64>,
+    planner: FftPlanner<f64>,
+}
+
+impl TrackDetector {
+    /// "Worth listening longer" after a 0.5 s dwell: 15 % of busy-band
+    /// dwells with no whistle score this high; 86–88 % of whistles at
+    /// −10 dB do (calibrated with `whistlelab calibrate`).
+    pub const MAYBE: f64 = 5.07;
+
+    /// "Whistle found" for a block of `secs` seconds: 1 % of busy-band
+    /// dwells with no whistle score above it (6.43 at 0.5 s, 5.64 at 2 s;
+    /// longer blocks give steadier scores). Calibrated with
+    /// `whistlelab calibrate`.
+    pub fn found(secs: f64) -> f64 {
+        let r = (secs.clamp(0.5, 2.0) / 0.5).log2() / 2.0; // 0 at 0.5 s, 1 at 2 s
+        6.43 + (5.64 - 6.43) * r
+    }
+    /// Largest value one whitened cell may add.
+    const CAP: f64 = 16.0;
+
+    pub fn new(params: WhistleParams) -> Self {
+        // ~16 ms frames: the chirp moves about one bin per frame.
+        let frame = ((0.016 * params.fs as f64) as usize).next_power_of_two();
+        let win = (0..frame).map(|i| 0.5 - 0.5 * (2.0 * PI * i as f64 / frame as f64).cos()).collect();
+        Self { params, reach_hz: params.scan_reach_hz() + 100.0, frame, win, planner: FftPlanner::new() }
+    }
+
+    /// Track frequency (Hz) at time t into the pattern.
+    fn track(&self, t: f64) -> f64 {
+        let p = &self.params;
+        let t = t.rem_euclid(p.period_s());
+        if t < p.chirp_s { p.f_lo + p.k() * t } else { p.f_hi - p.k() * (t - p.chirp_s) }
+    }
+
+    /// Look for the whistle in a block of audio (real, at `params.fs`).
+    pub fn scan(&mut self, x: &[f64]) -> Option<TrackHit> {
+        let (l, fs) = (self.frame, self.params.fs as f64);
+        let hop = l / 2;
+        let bw = fs / l as f64;
+        let fft = self.planner.plan_fft_forward(l);
+        let (k0, k1) = ((PASSBAND.0 / bw).ceil() as usize, ((PASSBAND.1 / bw).floor() as usize).min(l / 2 - 1));
+        let nb = k1 - k0 + 1;
+        let mut rows: Vec<Vec<f64>> = vec![];
+        let mut buf = vec![Complex64::new(0.0, 0.0); l];
+        let mut start = 0;
+        while start + l <= x.len() {
+            for i in 0..l {
+                buf[i] = Complex64::new(x[start + i] * self.win[i], 0.0);
+            }
+            fft.process(&mut buf);
+            rows.push((k0..=k1).map(|k| buf[k].norm_sqr()).collect());
+            start += hop;
+        }
+        let nt = rows.len();
+        if nt < 5 {
+            return None;
+        }
+        // Whiten each bin by its 75th percentile (noise: ln 4 for a mean-1
+        // exponential). Anything in a bin more than a quarter of the time
+        // (carriers, RTTY, FT8, a modem) is levelled away; the whistle
+        // visits each bin only a few percent of the time. Then cap single
+        // cells, so a click or a burst can't fake a whole track.
+        for b in 0..nb {
+            let mut col: Vec<f64> = rows.iter().map(|r| r[b]).collect();
+            col.sort_by(|a, c| a.partial_cmp(c).unwrap());
+            let q = (col[(col.len() * 3) / 4] / 4f64.ln()).max(1e-30);
+            rows.iter_mut().for_each(|r| r[b] = (r[b] / q).min(Self::CAP));
+        }
+        let pre: Vec<Vec<f64>> = rows
+            .iter()
+            .map(|r| {
+                let mut p = vec![0.0; nb + 1];
+                for (i, c) in r.iter().enumerate() {
+                    p[i + 1] = p[i] + c;
+                }
+                p
+            })
+            .collect();
+        let hop_s = hop as f64 / fs;
+        let frame_s = l as f64 / fs;
+        let period_frames = (self.params.period_s() / hop_s).round().max(1.0) as usize;
+        let nd = (self.reach_hz / bw).ceil() as i64;
+        let e = (-Self::CAP).exp();
+        let (mu, var) = (1.0 - e, 1.0 - 2.0 * Self::CAP * e - e * e);
+        let z_at = |dt: usize, df: i64| -> Option<f64> {
+            let (mut s, mut n) = (0.0, 0.0);
+            for (t, p) in pre.iter().enumerate() {
+                let tc = (t + dt) as f64 * hop_s;
+                let (fa, fb) = (self.track(tc), self.track(tc + frame_s));
+                let (lo, hi) = (fa.min(fb), fa.max(fb));
+                let blo = (lo / bw).round() as i64 + df - k0 as i64;
+                let bhi = (hi / bw).round() as i64 + df - k0 as i64;
+                let (blo, bhi) = (blo.max(0), bhi.min(nb as i64 - 1));
+                if blo > bhi {
+                    continue;
+                }
+                s += p[bhi as usize + 1] - p[blo as usize];
+                n += (bhi - blo + 1) as f64;
+            }
+            (n >= 0.3 * nt as f64).then(|| (s - n * mu) / (n * var).sqrt())
+        };
+        let mut best: Option<(TrackHit, usize, i64)> = None;
+        for dt in 0..period_frames {
+            for df in -nd..=nd {
+                if let Some(z) = z_at(dt, df)
+                    && best.is_none_or(|b| z > b.0.z)
+                {
+                    best = Some((TrackHit { z, offset_hz: df as f64 * bw }, dt, df));
+                }
+            }
+        }
+        // Sub-bin offset from the neighbouring hypotheses (parabola).
+        best.map(|(mut h, dt, df)| {
+            if let (Some(a), Some(c)) = (z_at(dt, df - 1), z_at(dt, df + 1)) {
+                let d = a - 2.0 * h.z + c;
+                if d < 0.0 {
+                    h.offset_hz += (0.5 * (a - c) / d).clamp(-0.5, 0.5) * bw;
+                }
+            }
+            h
         })
     }
 }
@@ -381,8 +587,8 @@ mod tests {
     fn measures_offset_accurately() {
         let mut rng = StdRng::seed_from_u64(1);
         let mut d = Detector::new(WhistleParams::default());
-        for &off in &[0.0, 37.3, -250.0, 480.0, -730.0, 900.0] {
-            for &snr in &[10.0, -5.0, -10.0] {
+        for &off in &[0.0, 37.3, -250.0, 400.0, -380.0] {
+            for &snr in &[10.0, -5.0] {
                 for trial in 0..3 {
                     let x = received(off, snr, 1000 + trial * 2500, 17600, &mut rng);
                     let det = d.detect(&x).unwrap_or_else(|| panic!("missed off={off} snr={snr}"));
@@ -390,6 +596,35 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn confirms_weak_whistles_near_centre() {
+        // After the scan has retuned onto a weak whistle: three patterns
+        // (1.2 s) at −10 dB, a few tens of hertz off.
+        let mut rng = StdRng::seed_from_u64(31);
+        let mut d = Detector::new(WhistleParams::default());
+        for &off in &[0.0, 23.0, -41.0, 60.0] {
+            for trial in 0..5 {
+                let x = received(off, -10.0, 700 + trial * 900, 9600, &mut rng);
+                let det = d.detect_near(&x, 150.0).unwrap_or_else(|| panic!("missed off={off} trial {trial}"));
+                assert!((det.offset_hz - off).abs() < 3.0, "off={off} got {}", det.offset_hz);
+            }
+        }
+    }
+
+    #[test]
+    fn confirmation_is_quiet_on_noise() {
+        let mut rng = StdRng::seed_from_u64(32);
+        let nd = Normal::new(0.0, 0.1).unwrap();
+        let mut d = Detector::new(WhistleParams::default());
+        let hits = (0..200)
+            .filter(|_| {
+                let n: Vec<f64> = (0..9600).map(|_| nd.sample(&mut rng)).collect();
+                d.detect_near(&ssb_channel(&n, 0.0, FS, PASSBAND), 150.0).is_some()
+            })
+            .count();
+        assert!(hits <= 2, "{hits} of 200 noise windows confirmed");
     }
 
     #[test]
@@ -414,14 +649,53 @@ mod tests {
 
     #[test]
     fn far_caller_aliases_and_alias_of_recovers_it() {
-        // Seen from 1450 Hz away (outside +/-1000), the whistle measures
-        // about -550 Hz; the alias candidate is the true +1450.
+        // Seen from 700 Hz away (outside +/-500), the matched filter
+        // measures about -300 Hz; the alias candidate is the true +700.
         let p = WhistleParams::default();
         let mut rng = StdRng::seed_from_u64(9);
-        let x = received(1450.0, 5.0, 1000, 17600, &mut rng);
-        let d = Detector::new(p).detect(&x).expect("partial whistle still detected");
-        assert!((d.offset_hz + 550.0).abs() < 3.0, "{}", d.offset_hz);
-        assert!((p.alias_of(d.offset_hz) - 1450.0).abs() < 3.0);
+        let x = received(700.0, 5.0, 1000, 17600, &mut rng);
+        let d = Detector::new(p).detect(&x).expect("whistle detected");
+        assert!((d.offset_hz + 300.0).abs() < 3.0, "{}", d.offset_hz);
+        assert!((p.alias_of(d.offset_hz) - 700.0).abs() < 3.0);
+    }
+
+    #[test]
+    fn track_detector_finds_far_callers_in_half_a_second() {
+        // One 0.5 s dwell, callers anywhere within ±1100 Hz: found, with
+        // an unambiguous coarse offset.
+        let mut rng = StdRng::seed_from_u64(21);
+        let mut t = TrackDetector::new(WhistleParams::default());
+        for &off in &[0.0, 180.0, -420.0, 650.0, -900.0, 1050.0] {
+            for trial in 0..3 {
+                let x = received(off, -5.0, 700 + trial * 1100, 4000, &mut rng);
+                let h = t.scan(&x).unwrap();
+                assert!(h.z > TrackDetector::found(0.5), "off={off}: z={:.1}", h.z);
+                assert!((h.offset_hz - off).abs() < 80.0, "off={off}: got {}", h.offset_hz);
+            }
+        }
+    }
+
+    #[test]
+    fn track_detector_quiet_on_noise_and_carriers() {
+        let mut rng = StdRng::seed_from_u64(22);
+        let nd = Normal::new(0.0, 0.1).unwrap();
+        let mut t = TrackDetector::new(WhistleParams::default());
+        let mut over = 0;
+        for i in 0..200 {
+            let mut x: Vec<f64> = (0..4000).map(|_| nd.sample(&mut rng)).collect();
+            if i % 2 == 0 {
+                // A strong carrier and an RTTY-like pair.
+                for (j, v) in x.iter_mut().enumerate() {
+                    let tt = j as f64 / 8000.0;
+                    *v += (2.0 * PI * 1234.0 * tt).sin() + 0.5 * (2.0 * PI * if (j / 176) % 2 == 0 { 2125.0 } else { 2295.0 } * tt).sin();
+                }
+            }
+            let x = ssb_channel(&x, 0.0, FS, PASSBAND);
+            if t.scan(&x).is_some_and(|h| h.z > TrackDetector::found(0.5)) {
+                over += 1;
+            }
+        }
+        assert!(over <= 4, "{over} false stops in 200 dwells");
     }
 
     #[test]
@@ -450,7 +724,8 @@ mod tests {
     #[test]
     fn whistle_is_whole_pairs() {
         let p = WhistleParams::default();
-        assert_eq!(whistle(2.5, &p).len(), 3 * 2 * p.n_chirp());
-        assert!((p.max_offset_hz() - 1000.0).abs() < 1e-9);
+        assert_eq!(whistle(2.5, &p).len(), 7 * 2 * p.n_chirp());
+        assert!((p.max_offset_hz() - 500.0).abs() < 1e-9);
+        assert_eq!(p.period_s(), 0.4);
     }
 }

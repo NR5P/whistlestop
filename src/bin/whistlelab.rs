@@ -434,7 +434,50 @@ fn par_map<T: Sync, R: Send>(items: &[T], f: impl Fn(&T, &mut FftPlanner<f64>) -
     })
 }
 
+/// Busy-band dwells through the app's own scan detector (whistle v2), for
+/// setting its thresholds: score quantiles with no whistle, and how often
+/// a whistle is found at each threshold.
+fn calibrate() {
+    use whistlestop::whistle::{TrackDetector, WhistleParams};
+    let p = WhistleParams::default();
+    let v2 = Design { key: "V2", name: "whistle v2", shape: Shape::UpDown { span: p.f_hi - p.f_lo, leg: p.chirp_s }, frame: 128, per_bin: true, production: false };
+    let score = |d: &Design, dwell: f64, snr: f64, off: f64, signal: bool, seed: u64, planner: &mut FftPlanner<f64>| -> f64 {
+        let mut rng = Rng(seed.wrapping_mul(0x9E3779B97F4A7C15) | 1);
+        let n = (dwell * FS) as usize;
+        let mut x = clutter(n, &mut rng);
+        if signal {
+            let t0 = rng.range(0.0, d.shape.period());
+            let s = channel(&transmit(d, n, off, t0, &mut rng), Path::Moderate, &mut rng);
+            x.iter_mut().zip(s).for_each(|(a, b)| *a += b);
+        }
+        let y = receive(x, snr, &mut rng, planner);
+        let real: Vec<f64> = y.iter().map(|c| c.re * 2f64.sqrt()).collect();
+        TrackDetector::new(p).scan(&real).map(|h| h.z).unwrap_or(0.0)
+    };
+    for dwell in [0.5, 2.0] {
+        let seeds: Vec<u64> = (0..2000).collect();
+        let mut h0 = par_map(&seeds, |&i, pl| score(&v2, dwell, -10.0, 0.0, false, 7_000_000 + i, pl));
+        h0.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let q = |f: f64| h0[((h0.len() as f64 * f) as usize).min(h0.len() - 1)];
+        println!("dwell {dwell} s, busy band, no whistle: z50 {:.2}  z90 {:.2}  z99 {:.2}  z99.5 {:.2}  z99.9 {:.2}", q(0.5), q(0.9), q(0.99), q(0.995), q(0.999));
+        for snr in [-15.0, -10.0, -5.0] {
+            for off in [0.0, 1000.0] {
+                let seeds: Vec<u64> = (0..300).collect();
+                let z = par_map(&seeds, |&i, pl| score(&v2, dwell, snr, if i % 2 == 0 { off } else { -off }, true, (i << 16) ^ off as u64, pl));
+                let at = |t: f64| z.iter().filter(|v| **v > t).count() as f64 / z.len() as f64 * 100.0;
+                println!(
+                    "   snr {snr:>5} off ±{off:>4}: z>{:.2}(25% empty) {:5.1} %   z>{:.2}(15%) {:5.1} %   z>{:.2}(10%) {:5.1} %   z>{:.2}(1%) {:5.1} %",
+                    q(0.75), at(q(0.75)), q(0.85), at(q(0.85)), q(0.9), at(q(0.9)), q(0.99), at(q(0.99))
+                );
+            }
+        }
+    }
+}
+
 fn main() {
+    if std::env::args().any(|a| a == "calibrate") {
+        return calibrate();
+    }
     let quick = std::env::args().any(|a| a == "quick");
     let ds = Arc::new(designs());
     let dwells = [0.15, 0.25, 0.5, 1.0, 2.0];

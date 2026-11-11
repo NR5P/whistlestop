@@ -14,7 +14,7 @@ use crate::protocol::*;
 use crate::rig::{Rig, RigStatus, RigctldClient};
 use crate::sdr;
 use crate::tnc::{Tnc, TncEvent, parse_connected};
-use crate::whistle::{Detector, FS, WhistleParams, whistle};
+use crate::whistle::{Detector, FS, TrackDetector, WhistleParams, whistle};
 use crate::ziputil;
 use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
@@ -356,8 +356,9 @@ enum SearchPhase {
     Settle { until: Instant },
     Dwell { from: u64 },
     Hold { from: u64 },
-    /// `alt`: already trying the alias candidate (see WhistleParams::alias_of).
-    Verify { target: f64, from: u64, first: crate::whistle::Detection, alt: bool },
+    /// Retuned onto a whistle the scan found (`coarse` Hz off the channel):
+    /// measure it finely. `again`: this is the second listen.
+    Verify { target: f64, from: u64, coarse: f64, again: bool },
     WaitCq { until: Instant },
 }
 
@@ -396,6 +397,8 @@ struct Station {
     vfo: Arc<Mutex<f64>>,
     sdr_span: Arc<Mutex<f64>>,
     detector: Detector,
+    /// The fast scanning detector (see whistle::TrackDetector).
+    tracker: TrackDetector,
     spectrum: AudioSpectrum,
     spec_from: u64,
     bw: Bandwidth,
@@ -519,6 +522,7 @@ impl Station {
         let bw = cfg.bandwidth;
         let mut s = Station {
             detector: Detector::new(bw.whistle_profile()),
+            tracker: TrackDetector::new(bw.whistle_profile()),
             spectrum: AudioSpectrum::new(512),
             spec_from: 0,
             bw,
@@ -704,7 +708,7 @@ impl Station {
             let band = SimBand::new(
                 vfo.clone(),
                 vec![
-                    SimSignal::Whistler { rf_hz: 14_103_150.0, snr_db: -2.0, whistle_s: 25.0, cycle_s: 45.0, start_s: 4.0 },
+                    SimSignal::Whistler { rf_hz: 14_103_150.0, snr_db: -2.0, whistle_s: 10.0, cycle_s: 30.0, start_s: 4.0 },
                     SimSignal::Carrier { rf_hz: 14_101_900.0, snr_db: 8.0 },
                     SimSignal::Ft8 { rf_hz: 14_097_350.0, snr_db: 0.0 },
                 ],
@@ -1032,6 +1036,7 @@ impl Station {
             Cmd::SetBandwidth(bw) => {
                 self.bw = bw;
                 self.detector = Detector::new(bw.whistle_profile());
+                self.tracker = TrackDetector::new(bw.whistle_profile());
                 if let Some(t) = self.tnc.as_mut() {
                     t.command(&format!("BW{}", bw.mercury_arq_bw())).await?;
                 }
@@ -1282,8 +1287,15 @@ impl Station {
     }
 
     fn step_hz(&self) -> f64 {
-        // Neighbouring channels overlap so every caller is within capture.
-        self.cfg.step_hz.min(1.8 * self.whistle_params().max_offset_hz())
+        // Neighbouring channels overlap so every caller is within reach.
+        self.cfg.step_hz.min(1.8 * self.whistle_params().scan_reach_hz())
+    }
+
+    /// The fine offset from a matched-filter measurement, choosing between
+    /// it and its alias the one that agrees with the scan's coarse offset.
+    fn fine_offset(&self, coarse: f64, measured: f64) -> f64 {
+        let alias = self.whistle_params().alias_of(measured);
+        if (alias - coarse).abs() < (measured - coarse).abs() { alias } else { measured }
     }
 
     async fn start_search(&mut self, scope: SearchScope) -> anyhow::Result<()> {
@@ -1327,10 +1339,16 @@ impl Station {
 
     async fn step_search(&mut self) -> anyhow::Result<()> {
         let Some(mut s) = self.search.take() else { return Ok(()) };
-        let n_dwell = (self.cfg.dwell_s * FS as f64) as usize;
-        let n_hold = (1.5 * FS as f64) as usize;
+        // A short dwell on every channel; a promising one gets up to 2 s;
+        // a found whistle is measured over three of its 0.4 s patterns.
+        let dwell = self.cfg.dwell_s;
+        let n_dwell = (dwell * FS as f64) as usize;
+        let hold_s = dwell.max(2.0);
+        let n_hold = (hold_s * FS as f64) as usize;
+        let n_verify = (3.0 * self.whistle_params().period_s() * FS as f64) as usize;
         let ch = s.channels[s.idx];
         let mut next_channel = false;
+        let found = |z: f64, secs: f64| z >= TrackDetector::found(secs);
         match &s.phase {
             SearchPhase::Settle { until } => {
                 if Instant::now() >= *until {
@@ -1341,78 +1359,72 @@ impl Station {
                 let from = *from;
                 let got = self.rx.lock().unwrap().range(from, n_dwell);
                 if let Some(x) = got {
-                    match self.detector.detect(&x) {
-                        Some(d) => {
-                            self.log(format!(
-                                "🚂 Whistle on {:.1} kHz, {:+.0} Hz off (score {:.2}). Retuning onto it.",
-                                ch / 1e3,
-                                d.offset_hz,
-                                d.score
-                            ));
-                            let target = ch + d.offset_hz;
-                            s.phase = SearchPhase::Verify { target, from: 0, first: d, alt: false };
+                    match self.tracker.scan(&x) {
+                        Some(h) if found(h.z, dwell) => {
+                            self.log(format!("🚂 Whistle on {:.1} kHz, {:+.0} Hz off (score {:.1}). Retuning onto it.", ch / 1e3, h.offset_hz, h.z));
+                            s.phase = SearchPhase::Verify { target: ch + h.offset_hz, from: 0, coarse: h.offset_hz, again: false };
                         }
-                        None if self.detector.peak_level(&x) >= self.detector.threshold => {
-                            s.phase = SearchPhase::Hold { from };
-                        }
-                        None => next_channel = true,
+                        Some(h) if h.z >= TrackDetector::MAYBE && hold_s > dwell => s.phase = SearchPhase::Hold { from },
+                        _ => next_channel = true,
                     }
                 }
             }
             SearchPhase::Hold { from } => {
-                let got = self.rx.lock().unwrap().range(*from, n_dwell + n_hold);
+                let got = self.rx.lock().unwrap().range(*from, n_hold);
                 if let Some(x) = got {
-                    match self.detector.detect(&x) {
-                        Some(d) => {
-                            let target = ch + d.offset_hz;
-                            s.phase = SearchPhase::Verify { target, from: 0, first: d, alt: false };
+                    match self.tracker.scan(&x) {
+                        Some(h) if found(h.z, hold_s) => {
+                            self.log(format!("🚂 Whistle on {:.1} kHz, {:+.0} Hz off (score {:.1}, after listening longer). Retuning onto it.", ch / 1e3, h.offset_hz, h.z));
+                            s.phase = SearchPhase::Verify { target: ch + h.offset_hz, from: 0, coarse: h.offset_hz, again: false };
                         }
-                        None => next_channel = true,
+                        _ => next_channel = true,
                     }
                 }
             }
-            SearchPhase::Verify { target, from, first, alt } => {
-                let (target, first, from, alt) = (*target, first.clone(), *from, *alt);
-                let got = if from == 0 { None } else { self.rx.lock().unwrap().range(from, n_dwell) };
+            SearchPhase::Verify { target, from, coarse, again } => {
+                let (target, from, coarse, again) = (*target, *from, *coarse, *again);
+                let got = if from == 0 { None } else { self.rx.lock().unwrap().range(from, n_verify) };
                 if from == 0 {
                     self.tune(target).await?;
                     tokio::time::sleep(Duration::from_millis(150)).await;
-                    s.phase = SearchPhase::Verify { target, from: audio::now_count(&self.rx).max(1), first, alt };
+                    s.phase = SearchPhase::Verify { target, from: audio::now_count(&self.rx).max(1), coarse, again };
                 } else if let Some(x) = got {
-                    let p = self.whistle_params();
-                    match self.detector.detect(&x) {
-                        Some(v) if v.offset_hz.abs() > 50.0 && s.scope != WIDE_SCOPE => {
-                            self.log(format!("Verify found {:+.0} Hz (aliased); resuming search", v.offset_hz));
-                            next_channel = true;
-                        }
-                        // Nothing where the whistle should be: the caller may
-                        // be beyond the unambiguous range. Try the alias.
-                        None if !alt => {
-                            let alias = p.alias_of(first.offset_hz);
-                            self.log(format!(
-                                "Nothing at {:+.0} Hz; checking the alias at {alias:+.0} Hz",
-                                first.offset_hz
-                            ));
-                            let mut f = first.clone();
-                            f.offset_hz = alias;
-                            s.phase = SearchPhase::Verify { target: ch + alias, from: 0, first: f, alt: true };
-                        }
-                        None => {
-                            self.log("Whistle not confirmed at either candidate; resuming search".into());
-                            next_channel = true;
-                        }
-                        v => {
-                            let fine = target + v.as_ref().map(|v| v.offset_hz).unwrap_or(0.0);
+                    // Now within a few tens of hertz: the matched filter
+                    // measures the rest to about a hertz.
+                    let wide = s.scope == WIDE_SCOPE;
+                    let v = self.detector.detect_near(&x, 150.0).map(|v| v.offset_hz).or_else(|| {
+                        // The scan detector, unambiguous: it also copes with
+                        // a strong signal inside the sweep (it levels
+                        // carriers away) and with an SDR hand-off's crystal
+                        // error. Refined by the matched filter if it can.
+                        let secs = x.len() as f64 / FS as f64;
+                        let h = self.tracker.scan(&x).filter(|h| h.z >= TrackDetector::found(secs))?;
+                        let reach = if wide { self.whistle_params().scan_reach_hz() } else { 120.0 };
+                        (h.offset_hz.abs() <= reach).then(|| match self.detector.detect(&x) {
+                            Some(d) => self.fine_offset(h.offset_hz, d.offset_hz),
+                            None => h.offset_hz,
+                        })
+                    });
+                    match v {
+                        Some(off) => {
+                            let fine = target + off;
                             if (fine - target).abs() >= 2.0 {
                                 self.tune(fine).await?;
                             }
                             self.log(format!(
-                                "Locked on {:.3} kHz (first estimate {:+.1} Hz{}). Waiting for the CQ…",
+                                "Locked on {:.3} kHz (first estimate {coarse:+.0} Hz, fine {:+.1} Hz). Waiting for the CQ…",
                                 fine / 1e3,
-                                first.offset_hz,
-                                v.map(|v| format!(", fine {:+.1} Hz", v.offset_hz)).unwrap_or_default()
+                                fine - target
                             ));
                             s.phase = SearchPhase::WaitCq { until: Instant::now() + Duration::from_secs(45) };
+                        }
+                        _ if !again => {
+                            // Faded, or the pattern straddled the window: listen once more.
+                            s.phase = SearchPhase::Verify { target, from: audio::now_count(&self.rx).max(1), coarse, again: true };
+                        }
+                        _ => {
+                            self.log("Whistle not confirmed after retuning; resuming search".into());
+                            next_channel = true;
                         }
                     }
                 }
@@ -2687,7 +2699,9 @@ impl Station {
         let wide = self.wide_on.then(|| sdr::WideCfg {
             segments: self.cfg.segments.clone(),
             params: self.whistle_params(),
-            step_hz: self.step_hz(),
+            // The SDR's channels use the matched filter: keep each caller
+            // inside its unambiguous range.
+            step_hz: 1.8 * self.whistle_params().max_offset_hz(),
         });
         self.sdr.lock().unwrap().wide = wide;
     }
@@ -2726,11 +2740,11 @@ impl Station {
     fn wide_handoff(&mut self, dial: f64, score: f64) {
         self.wide_tried.push((dial, Instant::now()));
         self.log(format!("🚂 SDR whistle at {:.3} kHz; tuning the radio there to fine-lock", dial / 1e3));
-        let first = crate::whistle::Detection { offset_hz: 0.0, score, n_pairs: 0, spread_hz: 0.0 };
+        let _ = score;
         self.search = Some(Search {
             channels: vec![dial],
             idx: 0,
-            phase: SearchPhase::Verify { target: dial, from: 0, first, alt: true },
+            phase: SearchPhase::Verify { target: dial, from: 0, coarse: 0.0, again: false },
             scope: WIDE_SCOPE.into(),
         });
     }
@@ -2740,20 +2754,25 @@ impl Station {
         if !self.cfg.whistle_watch || self.last_watch.elapsed() < Duration::from_millis(1000) {
             return;
         }
-        // The window must hold only audio heard on this frequency.
-        if self.last_tune.elapsed() < Duration::from_secs_f64(self.cfg.dwell_s + 0.3) {
+        // Four whistle patterns, all heard on this frequency.
+        let secs = 4.0 * self.whistle_params().period_s();
+        if self.last_tune.elapsed() < Duration::from_secs_f64(secs + 0.3) {
             return;
         }
         self.last_watch = Instant::now();
         if self.st.lock().unwrap().tx || self.peer.is_some() {
             return;
         }
-        let n = (self.cfg.dwell_s * FS as f64) as usize;
+        let n = (secs * FS as f64) as usize;
         let x = self.rx.lock().unwrap().last(n);
         if x.len() < n {
             return;
         }
-        if let Some(d) = self.detector.detect(&x) {
+        // Found by the scan detector (unambiguous to ±1100 Hz), measured
+        // by the matched filter.
+        let Some(h) = self.tracker.scan(&x).filter(|h| h.z >= TrackDetector::found(secs)) else { return };
+        if let Some(mut d) = self.detector.detect(&x) {
+            d.offset_hz = self.fine_offset(h.offset_hz, d.offset_hz);
             let dial = self.dial();
             let fresh = self.st.lock().unwrap().whistle.as_ref().is_none_or(|w| w.at.elapsed() > Duration::from_secs(20));
             if fresh {

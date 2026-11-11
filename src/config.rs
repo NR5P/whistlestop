@@ -33,6 +33,10 @@ pub struct Config {
 
     /// Length of the CQ whistle, seconds. Should cover searchers' cycle.
     pub whistle_s: f64,
+    /// Which whistle these scan settings were made for (2 = whistle v2:
+    /// 1000–2000 Hz, 0.2 s chirps). Older files get the new defaults once.
+    #[serde(default = "whistle_v1")]
+    pub whistle_version: u32,
     pub cq_cycles: u32,
     pub cq_listen_s: f64,
     pub dwell_s: f64,
@@ -112,11 +116,12 @@ impl Default for Config {
             bandwidth: Bandwidth::Hz2300,
             ramp_margin_db: 3.0,
             auto_ramp: true,
-            whistle_s: 24.0,
+            whistle_s: 10.0,
+            whistle_version: 2,
             cq_cycles: 5,
             cq_listen_s: 20.0,
-            dwell_s: 2.2,
-            step_hz: 1800.0,
+            dwell_s: 0.5,
+            step_hz: 2000.0,
             auto_answer: false,
             whistle_watch: true,
             e2e: Policy::Off,
@@ -157,7 +162,26 @@ pub fn path() -> PathBuf {
 
 impl Config {
     pub fn load() -> Self {
-        std::fs::read_to_string(path()).ok().and_then(|s| toml::from_str(&s).ok()).unwrap_or_default()
+        let mut c: Config = std::fs::read_to_string(path()).ok().and_then(|s| toml::from_str(&s).ok()).unwrap_or_default();
+        c.upgrade();
+        c
+    }
+
+    /// Settings saved for the first whistle: move scan settings still at
+    /// the old defaults to whistle v2's (ones you changed are kept).
+    pub fn upgrade(&mut self) {
+        if self.whistle_version < 2 {
+            if self.dwell_s == 2.2 {
+                self.dwell_s = 0.5;
+            }
+            if self.step_hz == 1800.0 {
+                self.step_hz = 2000.0;
+            }
+            if self.whistle_s == 24.0 {
+                self.whistle_s = 10.0;
+            }
+            self.whistle_version = 2;
+        }
     }
 
     pub fn save(&self) -> anyhow::Result<()> {
@@ -183,5 +207,20 @@ mod tests {
         // Old config files without the key load as Off too.
         let c: super::Config = toml::from_str("callsign = \"N0CALL\"").unwrap();
         assert_eq!(c.e2e, crate::e2e::Policy::Off);
+    }
+}
+
+fn whistle_v1() -> u32 {
+    1
+}
+
+#[cfg(test)]
+mod upgrade_tests {
+    #[test]
+    fn old_scan_defaults_move_to_whistle_v2() {
+        let mut c: super::Config = toml::from_str("callsign = \"N0OLD\"\ndwell_s = 2.2\nstep_hz = 1800.0\nwhistle_s = 30.0\n").unwrap();
+        assert_eq!(c.whistle_version, 1);
+        c.upgrade();
+        assert_eq!((c.dwell_s, c.step_hz, c.whistle_s, c.whistle_version), (0.5, 2000.0, 30.0, 2), "custom whistle length kept");
     }
 }

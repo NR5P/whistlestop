@@ -643,12 +643,20 @@ mod tests {
         let mut band = SimBand::new(
             rf.clone(),
             vec![
-                SimSignal::Whistler { rf_hz: 14_100_000.0 + 640.0, snr_db: 0.0, whistle_s: 25.0, cycle_s: 40.0, start_s: 0.0 },
-                SimSignal::Carrier { rf_hz: 14_101_900.0, snr_db: 10.0 },
+                SimSignal::Whistler { rf_hz: 14_100_000.0 + 340.0, snr_db: 0.0, whistle_s: 25.0, cycle_s: 40.0, start_s: 0.0 },
+                SimSignal::Whistler { rf_hz: 14_100_000.0 - 640.0 + 50_000.0, snr_db: 0.0, whistle_s: 25.0, cycle_s: 40.0, start_s: 0.0 },
+                SimSignal::Carrier { rf_hz: 14_102_400.0, snr_db: 10.0 },
             ],
         );
-        let x: Vec<f64> = band.next(17600).iter().map(|&v| v as f64).collect();
+        let x: Vec<f64> = band.next(9600).iter().map(|&v| v as f64).collect();
         let det = Detector::new(WhistleParams::default()).detect(&x).expect("whistle");
-        assert!((det.offset_hz - 640.0).abs() < 3.0, "{}", det.offset_hz);
+        assert!((det.offset_hz - 340.0).abs() < 3.0, "{}", det.offset_hz);
+        let hit = crate::whistle::TrackDetector::new(WhistleParams::default()).scan(&x[..4000]).unwrap();
+        assert!((hit.offset_hz - 340.0).abs() < 70.0 && hit.z > crate::whistle::TrackDetector::found(0.5), "{hit:?}");
+        // 640 Hz off: beyond the matched filter's ±500, still found by the scan.
+        *rf.lock().unwrap() = 14_150_000.0;
+        let x: Vec<f64> = band.next(4000).iter().map(|&v| v as f64).collect();
+        let hit = crate::whistle::TrackDetector::new(WhistleParams::default()).scan(&x).unwrap();
+        assert!((hit.offset_hz + 640.0).abs() < 70.0 && hit.z > crate::whistle::TrackDetector::found(0.5), "{hit:?}");
     }
 }
