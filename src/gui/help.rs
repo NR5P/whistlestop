@@ -163,7 +163,7 @@ pub const RC_XIT: Topic = ("XIT", "Transmit offset. Keep it at 0 for data, or yo
 
 // ---------------------------------------------------------- Radio connection
 pub const ST_RIGMODE: Topic = ("Radio connection", "Use a rig control server that's already running (Hamlib rigctld, or RigHelm's server), let Whistlestop run rigctld for your radio, or use Whistlestop's own built-in CAT (no Hamlib). Mercury shares the radio through the same address.", "Setting up your station");
-pub const ST_DETECT: Topic = ("Detect radios", "Looks at the USB devices macOS already knows about (it never opens a port, which could key a radio) and recognises Icom, Yaesu, Kenwood, QRP Labs and others. Use fills in the model and port.", "Setting up your station");
+pub const ST_DETECT: Topic = ("Detect radios", "Looks at the USB devices your computer already knows about (it never opens a port, which could key a radio) and recognises Icom, Yaesu, Kenwood, QRP Labs and others. Use fills in the model and port.", "Setting up your station");
 pub const ST_MODEL: Topic = ("Radio model", "Hamlib's model for your radio. Automatic detects it at start from the USB description.", "Setting up your station");
 pub const ST_PORT: Topic = ("Serial port", "The radio's CAT port. On Yaesu radios with two ports, the first (Enhanced) carries CAT. Automatic uses the detected radio.", "Setting up your station");
 pub const ST_BAUD: Topic = ("Speed", "Serial speed, matching the radio's CAT setting. Automatic uses Hamlib's default for the model.", "Setting up your station");
@@ -174,7 +174,7 @@ pub const LISTEN: Topic = ("Listen on the speakers", "Plays what the radio hears
 pub const ST_MON_DEV: Topic = ("Speaker", "Where Listen plays: the computer's speakers or headphones (System default). Don't pick the radio's own USB audio here, or you'd send the band back into the radio.", "Listening on your speakers");
 pub const ST_MON_VOL: Topic = ("Listen volume", "How loud Listen plays. Changes take effect at once.", "Listening on your speakers");
 pub const ST_DEMO_REAL: Topic = ("Demo on real Mercury", "When Mercury is installed, Demo mode runs two real Mercury modems on a simulated band: one for you, one for K7BOT. Everything you see and hear is then real Mercury. Off: everything simulated, including the modem.", "Quick start: Demo mode");
-pub const ST_MERCURY_BIN: Topic = ("Mercury engine", "Where the Mercury engine program is. Empty looks in ~/.local/bin, /opt/homebrew/bin and /usr/local/bin.", "Quick start: Demo mode");
+pub const ST_MERCURY_BIN: Topic = ("Mercury engine", "Where the Mercury engine program is. Empty looks in the usual install places (~/.local/bin, /opt/homebrew/bin, /usr/local/bin, Program Files\\Mercury on Windows) and on PATH.", "Quick start: Demo mode");
 
 // ------------------------------------------------------------------- Depot
 pub const DEPOT_TAB: Topic = ("Depot", "Whistlestop's mailbox: Arrivals (mail for you), Departures (mail you wrote, waiting for its station), In Transit (mail you're carrying for others) and Delivered.", "The Depot");

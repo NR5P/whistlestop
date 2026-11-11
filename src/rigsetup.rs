@@ -34,15 +34,32 @@ impl HamlibModel {
     }
 }
 
-/// Where rigctld and rigctl live (Homebrew, MacPorts, Linux, or PATH).
+/// Where rigctld and rigctl live (Homebrew, MacPorts, Linux, the Windows
+/// Hamlib installer, or PATH).
 pub fn hamlib_bin(name: &str) -> Option<String> {
-    for dir in ["/opt/homebrew/bin", "/usr/local/bin", "/opt/local/bin", "/usr/bin"] {
-        let p = format!("{dir}/{name}");
-        if std::path::Path::new(&p).exists() {
-            return Some(p);
+    let mut dirs: Vec<std::path::PathBuf> = ["/opt/homebrew/bin", "/usr/local/bin", "/opt/local/bin", "/usr/bin"].iter().map(std::path::PathBuf::from).collect();
+    if cfg!(windows) {
+        // The Hamlib installer uses C:\Program Files\hamlib-w64-<version>\bin.
+        for var in ["ProgramFiles", "ProgramFiles(x86)"] {
+            if let Some(pf) = std::env::var_os(var)
+                && let Ok(rd) = std::fs::read_dir(pf)
+            {
+                for e in rd.flatten() {
+                    if e.file_name().to_string_lossy().to_lowercase().starts_with("hamlib") {
+                        dirs.push(e.path().join("bin"));
+                    }
+                }
+            }
         }
     }
-    Command::new("which").arg(name).output().ok().filter(|o| o.status.success()).map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+    let exe = format!("{name}{}", std::env::consts::EXE_SUFFIX);
+    dirs.into_iter().map(|d| d.join(&exe)).find(|p| p.is_file()).or_else(|| on_path(name)).map(|p| p.to_string_lossy().to_string())
+}
+
+/// A program on PATH (with `.exe` on Windows).
+pub fn on_path(name: &str) -> Option<std::path::PathBuf> {
+    let exe = format!("{name}{}", std::env::consts::EXE_SUFFIX);
+    std::env::split_paths(&std::env::var_os("PATH")?).map(|d| d.join(&exe)).find(|p| p.is_file())
 }
 
 /// Parse `rigctl -l`.

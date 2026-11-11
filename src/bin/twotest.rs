@@ -5,6 +5,19 @@
 //!
 //! Scenarios run in order; name some to run only those.
 
+#[cfg(unix)]
+fn main() -> anyhow::Result<()> {
+    bench::main()
+}
+
+#[cfg(not(unix))]
+fn main() {
+    eprintln!("twotest needs Mercury's simulated-audio link (a Unix socket), which Mercury offers only on macOS and Linux.");
+}
+
+#[cfg(unix)]
+mod bench {
+
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
@@ -509,7 +522,7 @@ impl Bench {
     }
 }
 
-fn main() -> anyhow::Result<()> {
+pub fn main() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().collect();
     let mercury = PathBuf::from(args.get(1).cloned().unwrap_or_else(|| "mercury".into()));
     let work = PathBuf::from(args.get(2).cloned().unwrap_or_else(|| "bench-run".into()));
@@ -552,4 +565,6 @@ fn main() -> anyhow::Result<()> {
     std::fs::write(b.work.join("REPORT.md"), &rep)?;
     println!("\n{rep}");
     Ok(())
+}
+
 }

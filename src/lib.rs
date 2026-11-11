@@ -5,6 +5,7 @@ pub mod demo_bot;
 pub mod depot;
 pub mod e2e;
 pub mod engine;
+#[cfg(unix)]
 pub mod ether;
 pub mod fake_mercury;
 pub mod modes;

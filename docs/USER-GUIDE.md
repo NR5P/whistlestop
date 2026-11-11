@@ -36,6 +36,8 @@ When you're ready for the air, open **Settings**, enter your callsign, untick **
 
 ## Setting up your station
 
+Whistlestop runs on **macOS, Windows and Linux**. Radios show up as `/dev/cu.…` ports on macOS, `COM3`-style ports on Windows and `/dev/ttyUSB0` / `/dev/ttyACM0` on Linux (on Linux, add yourself to the `dialout` group to open them). Demo on real Mercury needs Mercury's simulated-audio link, which Mercury offers on macOS and Linux only; on Windows, Demo uses the simulated modem.
+
 You need four things: a radio with CAT control, an audio interface to it (most modern radios have USB audio built in), the **Mercury** modem, and a way for both Mercury and Whistlestop to control the radio.
 
 ### 1. Rig control
@@ -46,8 +48,8 @@ Only one program can open the radio's CAT (serial/USB) port. So one program owns
 
 **Let Whistlestop run rigctld**. Whistlestop starts Hamlib's `rigctld` for your radio and stops it when you quit.
 
-- Install Hamlib once (macOS: `brew install hamlib`).
-- Press **🔍 Detect radios**. Whistlestop looks at the USB devices macOS already knows about and recognises:
+- Install Hamlib once (macOS: `brew install hamlib`; Linux: your distribution's `hamlib` or `libhamlib-utils` package; Windows: the installer from hamlib.github.io, which Whistlestop finds in Program Files).
+- Press **🔍 Detect radios**. Whistlestop looks at the USB devices your computer already knows about and recognises:
   - Icom radios by name (an IC-7300 names itself in its USB serial number), plus the IC-705 and IC-905 by Icom's own USB IDs;
   - Yaesu radios by their two-port USB chip (CAT is on the first port);
   - Kenwood, Elecraft, QRP Labs (QMX/QDX, which speak Kenwood TS-480), Xiegu and others by their USB names.

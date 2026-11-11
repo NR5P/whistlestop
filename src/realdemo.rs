@@ -3,33 +3,54 @@
 //! one for K7BOT, the demo station. What you see in the modem strip and hear
 //! on the speakers is then real Mercury.
 
+#[cfg(unix)]
 use crate::demo_bot::{self, BotPorts};
+#[cfg(unix)]
 use crate::ether::{Channel, Ether, StationCfg};
-use anyhow::{Context, Result, anyhow};
+use anyhow::Result;
+#[cfg(unix)]
+use anyhow::{Context, anyhow};
 use std::path::PathBuf;
+#[cfg(unix)]
 use std::process::{Child, Command, Stdio};
+#[cfg(unix)]
 use std::sync::Arc;
+#[cfg(unix)]
 use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(unix)]
 use std::time::Duration;
 
-/// Where the Mercury engine is: the configured path, or the usual places.
+/// Where the Mercury engine is: the configured path, the usual install
+/// places for this system, or anywhere on PATH.
 pub fn find_mercury(configured: &str) -> Option<PathBuf> {
     let home = dirs::home_dir().unwrap_or_default();
+    let exe = if cfg!(windows) { "mercury.exe" } else { "mercury" };
     let mut c: Vec<PathBuf> = vec![];
     if !configured.is_empty() {
         c.push(PathBuf::from(configured));
     }
-    c.push(home.join(".local/bin/mercury"));
-    c.push(PathBuf::from("/opt/homebrew/bin/mercury"));
-    c.push(PathBuf::from("/usr/local/bin/mercury"));
-    c.push(PathBuf::from("/usr/bin/mercury"));
-    c.push(home.join("Desktop/mercury/source/mercury"));
-    c.into_iter().find(|p| p.is_file())
+    if cfg!(windows) {
+        for var in ["ProgramFiles", "ProgramFiles(x86)", "LOCALAPPDATA"] {
+            if let Some(d) = std::env::var_os(var) {
+                c.push(PathBuf::from(&d).join("Mercury").join(exe));
+                c.push(PathBuf::from(&d).join("Mercury").join("bin").join(exe));
+            }
+        }
+    } else {
+        c.push(home.join(".local/bin/mercury"));
+        c.push(PathBuf::from("/opt/homebrew/bin/mercury"));
+        c.push(PathBuf::from("/usr/local/bin/mercury"));
+        c.push(PathBuf::from("/usr/bin/mercury"));
+        c.push(PathBuf::from("/Applications/Mercury.app/Contents/MacOS/mercury"));
+    }
+    c.push(home.join("Desktop").join("mercury").join("source").join(exe));
+    c.into_iter().find(|p| p.is_file()).or_else(|| crate::rigsetup::on_path("mercury"))
 }
 
 pub const YOUR_DIAL: f64 = 14_096_000.0;
 pub const BOT_DIAL: f64 = 14_103_150.0;
 
+#[cfg(unix)]
 pub struct RealDemo {
     pub ether: Ether,
     mercs: Vec<Child>,
@@ -41,6 +62,7 @@ pub struct RealDemo {
     pub dir: PathBuf,
 }
 
+#[cfg(unix)]
 impl Drop for RealDemo {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
@@ -52,6 +74,7 @@ impl Drop for RealDemo {
     }
 }
 
+#[cfg(unix)]
 /// Free ports for both Mercurys: two base ports (Mercury also uses
 /// base + 1) and two broadcast ports, all six distinct.
 fn pick_ports() -> Result<(u16, u16, u16, u16)> {
@@ -71,6 +94,7 @@ fn pick_ports() -> Result<(u16, u16, u16, u16)> {
     Ok((pick(true)?, pick(true)?, pick(false)?, pick(false)?))
 }
 
+#[cfg(unix)]
 async fn wait_port(port: u16, secs: u64) -> bool {
     let t = std::time::Instant::now();
     while t.elapsed() < Duration::from_secs(secs) {
@@ -82,6 +106,7 @@ async fn wait_port(port: u16, secs: u64) -> bool {
     false
 }
 
+#[cfg(unix)]
 pub async fn start(mercury: &std::path::Path) -> Result<RealDemo> {
     let dir = std::env::temp_dir().join(format!("whistlestop-demo-{}", std::process::id()));
     std::fs::create_dir_all(&dir)?;
@@ -130,4 +155,19 @@ pub async fn start(mercury: &std::path::Path) -> Result<RealDemo> {
         }
     });
     Ok(demo)
+}
+
+/// Mercury's simulated-audio link is a Unix socket, which Mercury doesn't
+/// offer on Windows; Demo uses the simulated modem there.
+#[cfg(not(unix))]
+pub struct RealDemo {
+    pub rig_addr: String,
+    pub audio_addr: String,
+    pub mercury_port: u16,
+    pub bcast_port: u16,
+}
+
+#[cfg(not(unix))]
+pub async fn start(_mercury: &std::path::Path) -> Result<RealDemo> {
+    anyhow::bail!("Mercury's simulated-audio link isn't available on Windows")
 }

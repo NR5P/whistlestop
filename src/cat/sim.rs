@@ -273,6 +273,40 @@ impl Wire for SimRadio {
     }
 }
 
+/// Serve a simulated radio on a local TCP port (like a serial-over-network
+/// bridge), for whole-program tests. Returns the port.
+pub fn serve_tcp(kind: Kind) -> u16 {
+    let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = l.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        for s in l.incoming() {
+            let Ok(mut s) = s else { break };
+            let mut radio = SimRadio::new(kind);
+            std::thread::spawn(move || {
+                use std::io::{Read, Write};
+                s.set_read_timeout(Some(std::time::Duration::from_millis(5))).ok();
+                let mut b = [0u8; 256];
+                loop {
+                    match s.read(&mut b) {
+                        Ok(0) => break,
+                        Ok(n) => {
+                            radio.write_all(&b[..n]).ok();
+                        }
+                        Err(e) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) => {}
+                        Err(_) => break,
+                    }
+                    let mut out = [0u8; 256];
+                    let n = radio.read_some(&mut out).unwrap_or(0);
+                    if n > 0 && s.write_all(&out[..n]).is_err() {
+                        break;
+                    }
+                }
+            });
+        }
+    });
+    port
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::{Driver, icom::Icom, kenwood::Kenwood, poll, yaesu::Ft817, yaesu::Yaesu};
@@ -354,38 +388,4 @@ mod tests {
         let d = super::super::probe_ascii(Box::new(SimRadio::new(Kind::Elecraft)), super::super::Family::Kenwood, 100.0).unwrap();
         assert!(d.describe().contains("Elecraft"));
     }
-}
-
-/// Serve a simulated radio on a local TCP port (like a serial-over-network
-/// bridge), for whole-program tests. Returns the port.
-pub fn serve_tcp(kind: Kind) -> u16 {
-    let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = l.local_addr().unwrap().port();
-    std::thread::spawn(move || {
-        for s in l.incoming() {
-            let Ok(mut s) = s else { break };
-            let mut radio = SimRadio::new(kind);
-            std::thread::spawn(move || {
-                use std::io::{Read, Write};
-                s.set_read_timeout(Some(std::time::Duration::from_millis(5))).ok();
-                let mut b = [0u8; 256];
-                loop {
-                    match s.read(&mut b) {
-                        Ok(0) => break,
-                        Ok(n) => {
-                            radio.write_all(&b[..n]).ok();
-                        }
-                        Err(e) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) => {}
-                        Err(_) => break,
-                    }
-                    let mut out = [0u8; 256];
-                    let n = radio.read_some(&mut out).unwrap_or(0);
-                    if n > 0 && s.write_all(&out[..n]).is_err() {
-                        break;
-                    }
-                }
-            });
-        }
-    });
-    port
 }

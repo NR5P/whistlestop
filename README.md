@@ -48,6 +48,21 @@ nearby and can tune to them with one click.
 cargo run --release
 ```
 
+Whistlestop builds on **macOS, Windows and Linux** (Rust stable; CI builds
+and tests all three, see `.github/workflows/build.yml`):
+
+- **macOS**: nothing extra.
+- **Windows**: nothing extra (the MSVC toolchain from rustup). Radios appear as
+  `COM` ports; Hamlib's Windows installer is found in Program Files.
+- **Linux**: `sudo apt install pkg-config libasound2-dev libudev-dev
+  libxkbcommon-dev libwayland-dev libx11-dev libxcursor-dev libxrandr-dev
+  libxi-dev libgl1-mesa-dev` (Debian/Ubuntu names). Add yourself to the
+  `dialout` group for serial ports.
+
+Demo on real Mercury needs Mercury's simulated-audio link, a Unix socket,
+which Mercury only offers on macOS and Linux; on Windows, Demo uses the
+simulated modem.
+
 It opens in Demo mode. Click **Search → Current band** and watch it find
 K7BOT, or **Call CQ**. Then open **Settings** to enter your callsign and turn
 Demo off.
@@ -110,6 +125,6 @@ per packet. Details: [docs/PROTOCOL.md](docs/PROTOCOL.md#encryption-optional).
 | `src/gui/` | the egui interface |
 | `prototype-python/` | first Python prototype of the whistle maths (reference only) |
 
-Tests: `cargo test --release` (47, including a full headless demo: search →
+Tests: `cargo test --release` (76, including a full headless demo: search →
 lock → CQ → connect → chat → zipped file, and the same over an encrypted
 link).

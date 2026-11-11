@@ -94,6 +94,17 @@ fn card<R>(ui: &mut Ui, title: &str, add: impl FnOnce(&mut Ui) -> R) -> R {
         .inner
 }
 
+/// Show a file in Finder / Explorer / the Linux file manager.
+fn reveal(p: &std::path::Path) {
+    #[cfg(target_os = "macos")]
+    let r = std::process::Command::new("open").arg("-R").arg(p).spawn();
+    #[cfg(windows)]
+    let r = std::process::Command::new("explorer").arg(format!("/select,{}", p.display())).spawn();
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let r = std::process::Command::new("xdg-open").arg(p.parent().unwrap_or(p)).spawn();
+    let _ = r;
+}
+
 fn pill(ui: &mut Ui, label: &str, ok: bool) -> egui::Response {
     let color = if ok { GREEN } else { RED };
     Frame::NONE
@@ -1151,7 +1162,7 @@ impl App {
                             }
                             XferState::Done(Some(p)) => {
                                 if ui.small_button("Show").clicked() {
-                                    let _ = std::process::Command::new("open").arg("-R").arg(p).spawn();
+                                    reveal(p);
                                 }
                                 ui.label(RichText::new("✓ received").color(GREEN));
                             }
