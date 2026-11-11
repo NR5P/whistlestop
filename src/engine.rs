@@ -4422,9 +4422,10 @@ mod tests {
 
     /// Both methods at once: a stepping search is running (auto-tune off)
     /// when the SDR spots the demo station. The scan pauses, the radio goes
-    /// straight to the hit and links. (The 20 m segment is only 10
-    /// channels, so stepping may glance at the caller first; that look
-    /// can't hold off the SDR hit for good.)
+    /// straight to the hit and links. The search steps 40 m, where K7BOT
+    /// can't be heard, while the simulated dongle stays on 20 m: only the
+    /// SDR hit can bring the radio to him, so there is no race with
+    /// stepping (on 20 m a slow runner let stepping lock on first).
     #[test]
     fn sdr_hit_interrupts_stepping_search() {
         let h = spawn(|| {});
@@ -4444,11 +4445,15 @@ mod tests {
             assert!(t.elapsed() < Duration::from_secs(20), "no Mercury");
             std::thread::sleep(Duration::from_millis(100));
         }
-        h.send(Cmd::StartSearch(SearchScope::CurrentBand));
+        h.send(Cmd::StartSearch(SearchScope::Band("40m".into())));
         let t = Instant::now();
         loop {
             {
                 let g = h.state.lock().unwrap();
+                assert!(
+                    !g.log.iter().any(|l| l.1.contains("Whistle on ")),
+                    "stepping 40 m heard a whistle"
+                );
                 if g.link.as_ref().is_some_and(|l| l.peer == "K7BOT") {
                     assert!(
                         (g.rig.freq_hz - 14_103_150.0).abs() <= 55.0,
