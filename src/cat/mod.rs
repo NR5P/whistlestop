@@ -141,8 +141,10 @@ pub trait Wire: Send {
     fn clear_input(&mut self);
 }
 
+#[cfg(not(any(target_os = "ios", target_os = "android")))]
 struct SerialWire(Box<dyn serialport::SerialPort>);
 
+#[cfg(not(any(target_os = "ios", target_os = "android")))]
 impl Wire for SerialWire {
     fn write_all(&mut self, b: &[u8]) -> std::io::Result<()> {
         use std::io::Write;
@@ -222,6 +224,17 @@ pub fn open_wire(port: &str, baud: u32) -> Result<Box<dyn Wire>> {
         s.set_nodelay(true)?;
         return Ok(Box::new(TcpWire(s)));
     }
+    #[cfg(any(target_os = "ios", target_os = "android"))]
+    {
+        let _ = baud;
+        bail!("{port}: phones reach the radio through a TCP bridge (host:port)")
+    }
+    #[cfg(not(any(target_os = "ios", target_os = "android")))]
+    open_serial(port, baud)
+}
+
+#[cfg(not(any(target_os = "ios", target_os = "android")))]
+fn open_serial(port: &str, baud: u32) -> Result<Box<dyn Wire>> {
     let mut p = serialport::new(port, baud)
         .timeout(Duration::from_millis(40))
         .dtr_on_open(false)

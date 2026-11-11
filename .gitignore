@@ -8,3 +8,13 @@ __pycache__/
 /intro/3d/render.log
 *.blend1
 /intro/whistlestop-intro-3d.mp4
+
+# Phone builds: Mercury checkouts and objects, Xcode and Gradle output
+/mobile/build
+/mobile/ios/build
+/mobile/ios/WhistlestopCore.xcframework
+/mobile/android/.gradle
+/mobile/android/app/build
+/mobile/android/build
+/mobile/android/local.properties
+/mobile/android/app/src/main/jniLibs

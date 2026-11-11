@@ -11,6 +11,12 @@
 //! Nothing here ever transmits. The simulator draws a band picture for Demo
 //! mode.
 
+// Phones have no RTL-SDR support yet, so the dongle code is unused there.
+#![cfg_attr(
+    any(target_os = "ios", target_os = "android"),
+    allow(dead_code, unused_imports)
+)]
+
 use num_complex::Complex32;
 use rustfft::FftPlanner;
 use serde::{Deserialize, Serialize};
@@ -334,6 +340,23 @@ fn to_row(bins_db: &[f32], center_rf: f64, inverted: bool, lo: f64, span: f64) -
 }
 
 fn run_dongle(
+    cfg: &SdrConfig,
+    vfo: &Arc<Mutex<f64>>,
+    span: &Arc<Mutex<f64>>,
+    out: &Shared,
+    stop: &AtomicBool,
+) -> anyhow::Result<()> {
+    #[cfg(any(target_os = "ios", target_os = "android"))]
+    {
+        let _ = (cfg, vfo, span, out, stop);
+        anyhow::bail!("the RTL-SDR isn't supported on phones yet")
+    }
+    #[cfg(not(any(target_os = "ios", target_os = "android")))]
+    run_dongle_usb(cfg, vfo, span, out, stop)
+}
+
+#[cfg(not(any(target_os = "ios", target_os = "android")))]
+fn run_dongle_usb(
     cfg: &SdrConfig,
     vfo: &Arc<Mutex<f64>>,
     span: &Arc<Mutex<f64>>,

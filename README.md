@@ -101,6 +101,16 @@ middle; if not, disconnect. Each link makes new keys, and they are wiped
 from memory when it ends. Nothing is written to disk. Sealing costs 17 bytes
 per packet. Details: [docs/PROTOCOL.md](docs/PROTOCOL.md#encryption-optional).
 
+## Phone apps
+
+Native iPhone (SwiftUI) and Android (Jetpack Compose) apps in `mobile/`,
+running the same Rust engine through a small C/JNI bridge
+(`mobile/core`), with Rhizomatica's Mercury modem built in. Search, CQ,
+link, chat, the Depot, QSY, Away and Help mode work on both; tap tests
+drive each app against the demo station. See
+[docs/USER-GUIDE.md](docs/USER-GUIDE.md#phone-apps-iphone-and-android) and
+[mobile/README.md](mobile/README.md).
+
 ## Docs
 
 - [docs/DESIGN.md](docs/DESIGN.md): the whistle, search, CQ cycle, station
@@ -126,6 +136,7 @@ per packet. Details: [docs/PROTOCOL.md](docs/PROTOCOL.md#encryption-optional).
 | `src/modes.rs` | Mercury modes, bandwidths, speed ramp, time predictions |
 | `src/fake_mercury.rs` | Mercury stand-in + demo station |
 | `src/gui/` | the egui interface |
+| `mobile/` | the iPhone and Android apps, their engine bridge and Mercury build |
 | `prototype-python/` | first Python prototype of the whistle maths (reference only) |
 
 Tests: `cargo test --release` (82, including click tests that drive the real

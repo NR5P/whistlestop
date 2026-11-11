@@ -1,0 +1,23 @@
+[package]
+name = "whistlestop-mobile"
+version = "0.1.0"
+edition = "2024"
+publish = false
+license = "GPL-3.0-or-later"
+description = "Whistlestop's engine for the iPhone and Android apps: a C interface (Swift) and JNI (Kotlin) over JSON"
+
+[lib]
+name = "whistlestop_mobile"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[features]
+# Link Mercury's engine (libmercury_core.a) in and start it in-process.
+mercury = []
+
+[dependencies]
+whistlestop = { path = "../..", default-features = false }
+serde_json = "1.0.154"
+anyhow = "1.0.104"
+
+[target.'cfg(target_os = "android")'.dependencies]
+jni = "0.21.1"

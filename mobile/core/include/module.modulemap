@@ -1,0 +1,4 @@
+module WhistlestopCore {
+    header "whistlestop.h"
+    export *
+}

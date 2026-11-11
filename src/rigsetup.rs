@@ -132,6 +132,14 @@ pub struct UsbSerial {
 
 /// USB serial ports, without opening any of them.
 pub fn usb_serial_ports() -> Vec<UsbSerial> {
+    #[cfg(any(target_os = "ios", target_os = "android"))]
+    return vec![];
+    #[cfg(not(any(target_os = "ios", target_os = "android")))]
+    usb_serial_ports_desktop()
+}
+
+#[cfg(not(any(target_os = "ios", target_os = "android")))]
+fn usb_serial_ports_desktop() -> Vec<UsbSerial> {
     let Ok(ports) = serialport::available_ports() else {
         return vec![];
     };
@@ -158,6 +166,14 @@ pub fn usb_serial_ports() -> Vec<UsbSerial> {
 
 /// Every serial port path (for choosing by hand), USB or not.
 pub fn all_serial_paths() -> Vec<String> {
+    #[cfg(any(target_os = "ios", target_os = "android"))]
+    return vec![];
+    #[cfg(not(any(target_os = "ios", target_os = "android")))]
+    all_serial_paths_desktop()
+}
+
+#[cfg(not(any(target_os = "ios", target_os = "android")))]
+fn all_serial_paths_desktop() -> Vec<String> {
     let mut v: Vec<String> = serialport::available_ports()
         .map(|ps| {
             ps.into_iter()

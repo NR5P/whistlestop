@@ -396,6 +396,32 @@ The window then shows the address to connect to, for example `192.168.1.20:7373`
 
 **Security.** Only computers with private (home network) addresses can connect: 192.168.x.x, 10.x.x.x, 172.16–31.x.x, link-local and IPv6 unique-local. The password is never sent: the radio computer sends a fresh challenge and the other computer answers with an HMAC-SHA256 of it. A wrong password is refused, slowly. The stream itself isn't encrypted, so **don't forward the port to the internet**; use a VPN to reach home from outside. Anyone who knows the password can transmit with your station, under your callsign: choose it accordingly. On macOS, allow incoming connections for Whistlestop when the firewall asks.
 
+## Phone apps (iPhone and Android)
+
+Whistlestop also comes as native phone apps: SwiftUI on the iPhone and iPad (iOS 17 or newer), Jetpack Compose on Android (8.0 or newer). The screens are the phone's own, but underneath they run **the same Whistlestop engine** as the desktop, so a phone finds, calls and talks to a desktop station exactly as two desktops do: the same whistle, search, CQ, link, chat and Depot.
+
+**Mercury is built into the apps.** The phone runs Rhizomatica's Mercury modem itself (version 1.9.23, unchanged, through Mercury's own embedding library), so there is nothing else to install. It starts with the app when the station isn't in Demo mode and its modem is this phone (Modem host `127.0.0.1`, the default), listening on the usual ports (8300/8301 and 8100). Point the Modem host at another computer to use a Mercury there instead. Mercury is free software under the GPL-3.0, and so are the phone apps.
+
+**The screen.** The header always shows your callsign, the dial frequency and mode, the **Modem**, **Radio** and **Audio** lamps (green when ready), **TX** while transmitting, the **Here/Away** button and the Help button. Below it, five tabs:
+- **Operate**: the waterfall (0–3 kHz, the whistle band shaded), the dial (type kHz and tap **Tune**), **Search** (current band, one band, or all bands; **Answer automatically**), the last **Whistle** heard, **Heard** (tap **Answer** to tune and connect), **Call CQ** and **Connect** by callsign. While you're linked, a **Linked** card shows the station, mode, speed and time, with **Disconnect** and a **Move to kHz / Ask** row (QSY).
+- **Chat**: keyboard-to-keyboard over the link. The app switches here when a link comes up. A tick (✓) means the other station confirmed the line.
+- **Depot**: Arrivals, Departures, In Transit and Delivered. Tap a message to read it (that clears NEW), reply, connect now, or delete it. The pencil button writes new mail, with an optional **Via** relay.
+- **Log**: what the engine did, newest first, in UTC.
+- **Settings**: Help mode, your station (callsign, name, grid), Demo, the CAT bridge, and the modem's host and port. **Save** applies them; switching Demo on or off restarts the station. Everything else (search timing, QSY rules, the library, the schedule…) keeps the values in the phone's settings file, `whistlestop.toml` in the app's own storage, the same format as the desktop's.
+
+**Help mode.** A phone has no hover, so Help works by tapping: turn it on with the **?** in the header (or in Settings) and every card shows a brass **?**; tap one for its explanation. Like the desktop, Help mode is off each time the app starts.
+
+**Try it without a radio.** Turn on **Demo station** in Settings and tap Save: the phone gets the same simulated band as the desktop's Demo mode, with K7BOT whistling, calling CQ and chatting back.
+
+**Connecting a radio.**
+- **Audio**: the radio's sound goes through the phone's audio route, typically a USB audio interface (or the radio's own USB sound card) on a USB-C adapter. Both apps ask for the microphone permission, which covers that audio. On the iPhone, Whistlestop keeps listening with the screen off (background audio).
+- **Rig control (CAT)**: phones have no serial ports for Whistlestop's direct CAT, so set **CAT bridge** to a `host:port` on your network: a `rigctld`, or a serial-to-network adapter. Without CAT, Whistlestop can't read or tune the dial, so search and QSY need it; with VOX keying, calling and answering on the frequency you set by hand still work.
+- The RTL-SDR wide search isn't available on phones yet.
+
+**Not yet on the phones** (use the desktop for these for now): Files and the file library, Roundtables, the schedule, the Radio Controls window, the antenna tuner and SWR watch, and operating a desktop station remotely from the phone.
+
+**Building the apps** (developers): see `mobile/README.md`. The engine is the `whistlestop-mobile` crate (`mobile/core`), built for the phones by `mobile/build-ios.sh` and `mobile/build-android.sh`, with Mercury from `mobile/build-mercury.sh`.
+
 ## Bandwidth and speed
 
 ### Your bandwidth limit

@@ -1,0 +1,479 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 77;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		2EEB11994712D70A5A5B8C24 /* WhistlestopUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1C8E88FAF89523D403DC4344 /* WhistlestopUITests.swift */; };
+		2EED086EA148CB7C67C6F961 /* DepotView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 497D9C41F5B9C79CBC66A297 /* DepotView.swift */; };
+		2F32A9C3FF6285D3C086DCD1 /* Models.swift in Sources */ = {isa = PBXBuildFile; fileRef = 61A7407124542665C00681E0 /* Models.swift */; };
+		35019EC988EA4CA61042A57A /* WhistlestopApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = C7F740951A97C1C058AB66BB /* WhistlestopApp.swift */; };
+		3A14AADBB8D4FEBB3EDDBFCB /* Help.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6192EE20BAA1ABD97E5F58DF /* Help.swift */; };
+		563283F6A021306C2A529720 /* ChatView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 979BAD88AAC665BE3986ADCF /* ChatView.swift */; };
+		5858F43A8C34D6B887B281C6 /* OperateView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2F976A58480EF2E86DA2645B /* OperateView.swift */; };
+		A72C90E720A1B1A4AC4696DF /* WhistlestopCore.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = D22E438897EB5938EB0A8B90 /* WhistlestopCore.xcframework */; };
+		C8E58BB3D3129AB9764F010D /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 05FDF90D79C417FBB8983FC6 /* SettingsView.swift */; };
+		C9C7AB9A6E5E8277FCC54B3A /* Theme.swift in Sources */ = {isa = PBXBuildFile; fileRef = 42DEA0EAB95596CBC962DB2E /* Theme.swift */; };
+		CFA20445A1B4315AABB293D1 /* Waterfall.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5346A439170DA64901645542 /* Waterfall.swift */; };
+		FEA5C12B837FBC4C6732E2D7 /* Core.swift in Sources */ = {isa = PBXBuildFile; fileRef = F8ABA0662EED073C5B1115E0 /* Core.swift */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		31A90111635812FCFB8C6417 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 640EC4B46817500E9A5F0388 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = B6120A41C4D29B4970141388;
+			remoteInfo = Whistlestop;
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXFileReference section */
+		05FDF90D79C417FBB8983FC6 /* SettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsView.swift; sourceTree = "<group>"; };
+		1C8E88FAF89523D403DC4344 /* WhistlestopUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WhistlestopUITests.swift; sourceTree = "<group>"; };
+		2F976A58480EF2E86DA2645B /* OperateView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OperateView.swift; sourceTree = "<group>"; };
+		42DEA0EAB95596CBC962DB2E /* Theme.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Theme.swift; sourceTree = "<group>"; };
+		497D9C41F5B9C79CBC66A297 /* DepotView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DepotView.swift; sourceTree = "<group>"; };
+		5346A439170DA64901645542 /* Waterfall.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Waterfall.swift; sourceTree = "<group>"; };
+		6192EE20BAA1ABD97E5F58DF /* Help.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Help.swift; sourceTree = "<group>"; };
+		61A7407124542665C00681E0 /* Models.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Models.swift; sourceTree = "<group>"; };
+		8A8535C1F5A722A8BC3AB965 /* Whistlestop.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = Whistlestop.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		8AC9E953DFB069EE6CDE524B /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
+		979BAD88AAC665BE3986ADCF /* ChatView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatView.swift; sourceTree = "<group>"; };
+		B5729DB21C74F75216C2D283 /* WhistlestopUITests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = WhistlestopUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		C7F740951A97C1C058AB66BB /* WhistlestopApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WhistlestopApp.swift; sourceTree = "<group>"; };
+		D22E438897EB5938EB0A8B90 /* WhistlestopCore.xcframework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.xcframework; path = WhistlestopCore.xcframework; sourceTree = "<group>"; };
+		F8ABA0662EED073C5B1115E0 /* Core.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Core.swift; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		B98F775878097D296C07110F /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				A72C90E720A1B1A4AC4696DF /* WhistlestopCore.xcframework in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		0CA5B46E8DFF52C303AA169D = {
+			isa = PBXGroup;
+			children = (
+				50C80496136DBB378EF85D8C /* Whistlestop */,
+				6EF2A9882B1456FDA86B9C8F /* WhistlestopUITests */,
+				DC7A50F20A65ABBA2C7104E0 /* Frameworks */,
+				E52B623A2A3A9E9F3CA13C3A /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		50C80496136DBB378EF85D8C /* Whistlestop */ = {
+			isa = PBXGroup;
+			children = (
+				979BAD88AAC665BE3986ADCF /* ChatView.swift */,
+				F8ABA0662EED073C5B1115E0 /* Core.swift */,
+				497D9C41F5B9C79CBC66A297 /* DepotView.swift */,
+				6192EE20BAA1ABD97E5F58DF /* Help.swift */,
+				8AC9E953DFB069EE6CDE524B /* Info.plist */,
+				61A7407124542665C00681E0 /* Models.swift */,
+				2F976A58480EF2E86DA2645B /* OperateView.swift */,
+				05FDF90D79C417FBB8983FC6 /* SettingsView.swift */,
+				42DEA0EAB95596CBC962DB2E /* Theme.swift */,
+				5346A439170DA64901645542 /* Waterfall.swift */,
+				C7F740951A97C1C058AB66BB /* WhistlestopApp.swift */,
+			);
+			path = Whistlestop;
+			sourceTree = "<group>";
+		};
+		6EF2A9882B1456FDA86B9C8F /* WhistlestopUITests */ = {
+			isa = PBXGroup;
+			children = (
+				1C8E88FAF89523D403DC4344 /* WhistlestopUITests.swift */,
+			);
+			path = WhistlestopUITests;
+			sourceTree = "<group>";
+		};
+		DC7A50F20A65ABBA2C7104E0 /* Frameworks */ = {
+			isa = PBXGroup;
+			children = (
+				D22E438897EB5938EB0A8B90 /* WhistlestopCore.xcframework */,
+			);
+			name = Frameworks;
+			sourceTree = "<group>";
+		};
+		E52B623A2A3A9E9F3CA13C3A /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				8A8535C1F5A722A8BC3AB965 /* Whistlestop.app */,
+				B5729DB21C74F75216C2D283 /* WhistlestopUITests.xctest */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		42EF1FF13D2D0EFE971A8EA5 /* WhistlestopUITests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 17DDE81F0017190858A660C3 /* Build configuration list for PBXNativeTarget "WhistlestopUITests" */;
+			buildPhases = (
+				51219323B0BC638B5B8F0779 /* Sources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				1D640EB759F41FB4D2EB7E47 /* PBXTargetDependency */,
+			);
+			name = WhistlestopUITests;
+			packageProductDependencies = (
+			);
+			productName = WhistlestopUITests;
+			productReference = B5729DB21C74F75216C2D283 /* WhistlestopUITests.xctest */;
+			productType = "com.apple.product-type.bundle.ui-testing";
+		};
+		B6120A41C4D29B4970141388 /* Whistlestop */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 4F2142A79BDE034231F919B4 /* Build configuration list for PBXNativeTarget "Whistlestop" */;
+			buildPhases = (
+				01228C18DC39E41B077DB660 /* Sources */,
+				B98F775878097D296C07110F /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = Whistlestop;
+			packageProductDependencies = (
+			);
+			productName = Whistlestop;
+			productReference = 8A8535C1F5A722A8BC3AB965 /* Whistlestop.app */;
+			productType = "com.apple.product-type.application";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		640EC4B46817500E9A5F0388 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = YES;
+				LastUpgradeCheck = 1430;
+				TargetAttributes = {
+					42EF1FF13D2D0EFE971A8EA5 = {
+						TestTargetID = B6120A41C4D29B4970141388;
+					};
+				};
+			};
+			buildConfigurationList = E98021941345A18AF2F0D0D0 /* Build configuration list for PBXProject "Whistlestop" */;
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				Base,
+				en,
+			);
+			mainGroup = 0CA5B46E8DFF52C303AA169D;
+			minimizedProjectReferenceProxies = 1;
+			preferredProjectObjectVersion = 77;
+			productRefGroup = E52B623A2A3A9E9F3CA13C3A /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				B6120A41C4D29B4970141388 /* Whistlestop */,
+				42EF1FF13D2D0EFE971A8EA5 /* WhistlestopUITests */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXSourcesBuildPhase section */
+		01228C18DC39E41B077DB660 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				563283F6A021306C2A529720 /* ChatView.swift in Sources */,
+				FEA5C12B837FBC4C6732E2D7 /* Core.swift in Sources */,
+				2EED086EA148CB7C67C6F961 /* DepotView.swift in Sources */,
+				3A14AADBB8D4FEBB3EDDBFCB /* Help.swift in Sources */,
+				2F32A9C3FF6285D3C086DCD1 /* Models.swift in Sources */,
+				5858F43A8C34D6B887B281C6 /* OperateView.swift in Sources */,
+				C8E58BB3D3129AB9764F010D /* SettingsView.swift in Sources */,
+				C9C7AB9A6E5E8277FCC54B3A /* Theme.swift in Sources */,
+				CFA20445A1B4315AABB293D1 /* Waterfall.swift in Sources */,
+				35019EC988EA4CA61042A57A /* WhistlestopApp.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		51219323B0BC638B5B8F0779 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				2EEB11994712D70A5A5B8C24 /* WhistlestopUITests.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		1D640EB759F41FB4D2EB7E47 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = B6120A41C4D29B4970141388 /* Whistlestop */;
+			targetProxy = 31A90111635812FCFB8C6417 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
+
+/* Begin XCBuildConfiguration section */
+		0C10B7C9507784EB325CEC01 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				"EXCLUDED_ARCHS[sdk=iphonesimulator*]" = x86_64;
+				GENERATE_INFOPLIST_FILE = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.nr5p.whistlestop.uitests;
+				SDKROOT = iphoneos;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_TARGET_NAME = Whistlestop;
+			};
+			name = Release;
+		};
+		0DFEB72ADF3515E64FB6F8FC /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_IDENTITY = "iPhone Developer";
+				"EXCLUDED_ARCHS[sdk=iphonesimulator*]" = x86_64;
+				FRAMEWORK_SEARCH_PATHS = (
+					"$(inherited)",
+					"\".\"",
+				);
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = Whistlestop/Info.plist;
+				INFOPLIST_KEY_CFBundleDisplayName = Whistlestop;
+				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "Whistlestop reaches your radio bridge, and your home station for remote operation, on your local network.";
+				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Whistlestop listens to your radio's audio for whistles and data.";
+				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
+				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
+				INFOPLIST_KEY_UISupportedInterfaceOrientations = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				INFOPLIST_KEY_UIUserInterfaceStyle = Dark;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				OTHER_LDFLAGS = "-lc++ -framework AudioToolbox -framework CoreAudio -framework AVFoundation";
+				PRODUCT_BUNDLE_IDENTIFIER = com.nr5p.whistlestop;
+				SDKROOT = iphoneos;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		45D5C8FD7959D233F529D1FC /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				CURRENT_PROJECT_VERSION = 1;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"$(inherited)",
+					"DEBUG=1",
+				);
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				MARKETING_VERSION = 0.1.0;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				SWIFT_VERSION = 5.0;
+			};
+			name = Debug;
+		};
+		64451D74200A2C94B2982A01 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				"EXCLUDED_ARCHS[sdk=iphonesimulator*]" = x86_64;
+				GENERATE_INFOPLIST_FILE = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.nr5p.whistlestop.uitests;
+				SDKROOT = iphoneos;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_TARGET_NAME = Whistlestop;
+			};
+			name = Debug;
+		};
+		98413E9B99293983D0A81C32 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_IDENTITY = "iPhone Developer";
+				"EXCLUDED_ARCHS[sdk=iphonesimulator*]" = x86_64;
+				FRAMEWORK_SEARCH_PATHS = (
+					"$(inherited)",
+					"\".\"",
+				);
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = Whistlestop/Info.plist;
+				INFOPLIST_KEY_CFBundleDisplayName = Whistlestop;
+				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "Whistlestop reaches your radio bridge, and your home station for remote operation, on your local network.";
+				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Whistlestop listens to your radio's audio for whistles and data.";
+				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
+				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
+				INFOPLIST_KEY_UISupportedInterfaceOrientations = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				INFOPLIST_KEY_UIUserInterfaceStyle = Dark;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				OTHER_LDFLAGS = "-lc++ -framework AudioToolbox -framework CoreAudio -framework AVFoundation";
+				PRODUCT_BUNDLE_IDENTIFIER = com.nr5p.whistlestop;
+				SDKROOT = iphoneos;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
+		EB025433D1F085672D5D826F /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				CURRENT_PROJECT_VERSION = 1;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				MARKETING_VERSION = 0.1.0;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				MTL_FAST_MATH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_OPTIMIZATION_LEVEL = "-O";
+				SWIFT_VERSION = 5.0;
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		17DDE81F0017190858A660C3 /* Build configuration list for PBXNativeTarget "WhistlestopUITests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				64451D74200A2C94B2982A01 /* Debug */,
+				0C10B7C9507784EB325CEC01 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		4F2142A79BDE034231F919B4 /* Build configuration list for PBXNativeTarget "Whistlestop" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				0DFEB72ADF3515E64FB6F8FC /* Debug */,
+				98413E9B99293983D0A81C32 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		E98021941345A18AF2F0D0D0 /* Build configuration list for PBXProject "Whistlestop" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				45D5C8FD7959D233F529D1FC /* Debug */,
+				EB025433D1F085672D5D826F /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+/* End XCConfigurationList section */
+	};
+	rootObject = 640EC4B46817500E9A5F0388 /* Project object */;
+}
