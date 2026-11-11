@@ -96,10 +96,10 @@ An RTL-SDR dongle connected to your radio's **RX OUT** (receive antenna output) 
 
 From top to bottom:
 
-- **Top bar**: the Whistlestop mark; the **frequency display** (TX/RX lamp, dial frequency, band, radio mode); the **S-meter** and **SNR** meters; the **status pills** (Radio, Mercury, Audio, SDR: green means connected); **DEMO** when in Demo mode; **🔈 Listen** (the radio's audio on your speakers); **📖 Guide** (this manual, in its own window); the **? Help** toggle; and **Settings**.
-- **Modem strip**: what Mercury is doing right now (see "The modem strip").
+- **Top bar**: the Whistlestop mark; the **frequency display** (TX/RX lamp, dial frequency, band, radio mode); the **S-meter** and **SNR** meters; **🙋 Here / 🚪 Away** (see "Away"); **DEMO** when in Demo mode; **🔈 Listen** (the radio's audio on your speakers); **📖 Guide** (this manual, in its own window); the **? Help** toggle; and **Settings**.
+- **Modem strip**: what Mercury is doing right now (see "The modem strip"), and at its right end the **status pills** (Radio, Mercury, Audio, SDR: green means connected).
 - **Left column** (top to bottom): **Call CQ**, **Search for whistles**, **Heard**, **Bandwidth**, **Radio**.
-- **Centre**: tabs for **Chat**, **Roundtable**, **Files** and **Log**.
+- **Centre**: tabs for **Chat**, **Roundtable**, **Files**, **Depot** (mail; see "The Depot") and **Log**.
 - **Bottom**: the **Radio audio** waterfall (what your radio hears, 0–3 kHz) and, with an SDR, the **Wide receiver** waterfall. Drag the line above the waterfalls to resize them.
 
 ## Listening on your speakers
@@ -250,6 +250,56 @@ Broadcast frames are not acknowledged, so Whistlestop adds:
 - **The floor**: click a member's name to pass them the floor (the "talking stick"). It's a courtesy, not a lock.
 
 > Roundtables are always plain text, even with encryption turned on.
+
+## The Depot
+
+The **🏤 Depot** tab is Whistlestop's mailbox: messages that wait for a station instead of needing you both on the air at once. It has four boxes:
+
+- **📬 Arrivals**: mail for you. Stations that connect while you're **Away** leave it here, and stations carrying mail for you hand it over when you link. New mail is marked **NEW** and counted on the tab; **Mark read**, **Reply** (fills in the To box) and **Delete** are on each message.
+- **📮 Departures**: mail you've written that hasn't been handed over yet. **Connect to …** calls the station (or the relay) now.
+- **🚚 In Transit**: mail you're carrying *for other people* (store and forward). This box only fills if **Carry mail for other stations** is on (see "Store and forward (relaying)").
+- **✓ Delivered**: mail the next station confirmed, with the time (UTC) and who took it.
+
+**Writing mail**: type a callsign in **To**, your message, and press **📮 Post**. It waits in Departures. The next time you're linked with that station, for any reason, Whistlestop hands it over at the start of the link, and it moves to Delivered when the other station's Whistlestop confirms it (a MAILACK). Nothing is "seen" or "read" on the other side: delivered means it's in their Arrivals.
+
+**Via**: to reach a station through someone else, put the relay's callsign in **Via**. The mail is handed to the relay when you next link with them, and they carry it on (if they have relaying turned on). Leave Via empty to wait for the station itself.
+
+The Depot is saved in `depot.json` beside the settings, so mail survives restarts. Repeat deliveries are ignored, so a link that drops mid-handover is harmless: unconfirmed mail is simply handed over again next time.
+
+## Away
+
+**🙋 Here / 🚪 Away** in the top bar says whether you're at the radio. When **Away**:
+
+- Stations that connect get your **away message** (Settings → Automation), with your callsign in front.
+- Anything they type in chat is saved to your **Arrivals**, so they can leave you a message just by connecting and typing.
+- A link with nothing happening for the **Hang up quiet links after** time (default 180 s) is ended with a polite 73, so the next station can get through.
+- Automatic delivery and collection (if you turned them on) are allowed. They never happen while you're **Here**.
+
+Away is a convenience, not a licence to leave a station running unattended where your rules don't allow it (see "Legal and good practice").
+
+## Station ID beacon
+
+The **Station ID beacon** (Settings → Automation, off by default) sends one short broadcast frame every N minutes (10 to 120, default 30) when the band is quiet: your callsign, grid, whether you're away, and the callsigns you hold mail for (up to what fits in one 120-byte frame). It has **no whistle**: it's an ID, not a call, so it doesn't stop scanning stations.
+
+Stations on your frequency in the calling mode decode it. If your beacon lists their callsign, their Whistlestop shows **📬 … has mail for you** in the Heard card (and collects it, if they're away with automatic collection on). **Send one now** sends one immediately. A beacon is never sent during a link, a CQ, a search or a Roundtable, and (with the segment guard on) never outside the automatic-control segments: you'll see "Station ID skipped" in the Log instead.
+
+## Automatic mail handling
+
+Whistlestop notices stations it holds mail for whenever it hears them: a CQ, a Station ID, a Roundtable frame or a mail notice. The **Heard** card then shows **📮 N message(s) for CALL** with **Deliver now**; when someone says they hold mail for you it shows **📬 CALL has mail for you** with **Collect**. Those buttons are always there. Three switches in Settings → Automation (all **off** by default) let Whistlestop do more by itself:
+
+| Switch | What happens | When |
+|---|---|---|
+| **Tell stations I hear that I have mail for them** | Sends a short NOTICE frame: "N messages waiting here, connect to me" | Any time the band is quiet, at most once per station every 15 minutes |
+| **While away: connect and deliver** | Connects to the station, hands over the mail, waits for the confirmations and hangs up | Only while Away, the band is quiet and you're not calling or searching; once per station every 15 minutes |
+| **While away: connect and collect** | Connects to a station that says it holds mail for you; it hands the mail over, and the link ends after 20 s of quiet | Same conditions |
+
+Every automatic transmission is written to the Log (🤖 and 📣 lines), so you can see what your station did while you were gone.
+
+## Store and forward (relaying)
+
+With **Carry mail for other stations** on (off by default), your Depot accepts mail addressed to someone else: a station that links with you can hand you mail for a third station, and you carry it in **In Transit** until you link with (or, while away, hear) that station. It's then delivered like your own mail and moves to Delivered with the callsign that took it. With relaying off, such mail is declined (logged) and stays with the sender.
+
+Loop guards: each message carries a hop count, and a message is relayed at most **3** times; a message you've already carried or delivered is never taken twice. Your Station ID and notices include the calls you're carrying mail for, so their owners can come and collect it.
 
 ## Bandwidth and speed
 
@@ -431,6 +481,14 @@ Settings are saved to `~/Library/Application Support/Whistlestop/whistlestop.tom
 | SWR limit | Above this: red reading, log warning, auto-tune if on | 2.0 : 1 |
 | Download folder | Where received files go | ~/Downloads/Whistlestop |
 | Listen on / Listen volume | Speaker for the 🔈 Listen button, and its level | System default / 70% |
+| Away message | What stations see when they connect while you're away | "Away from the radio…" |
+| Hang up quiet links after | While away, end links idle this long | 180 s |
+| Station ID beacon / every | Send a Station ID every N minutes (see "Station ID beacon") | off / 30 min |
+| Tell stations about their mail | Send a NOTICE when you hear a station you hold mail for | off |
+| Deliver automatically while away | Connect and deliver Depot mail | off |
+| Collect automatically while away | Connect and collect mail waiting for you | off |
+| Carry mail for other stations | Store and forward (In Transit) | off |
+| Automatic only in the segments | Automatic transmissions only inside the automatic-control segments | on |
 
 The **Whistle** length and **Answer automatically** are set on the main screen and saved too.
 
@@ -497,7 +555,8 @@ Reduce audio drive until the ALC barely moves, and turn off speech processing.
 - **Identification**: Mercury's CQFRAME carries your callsign in the clear on every CQ, and connections carry both calls. Identify by voice or CW as your rules require on long contacts.
 - **The whistle** is a documented, swept-tone data signal under 2.1 kHz wide (this guide and the source code document it). Use it in the data segments, keep it as short as the searchers need, and listen before calling.
 - **Encryption** is off by default and not legal on amateur bands in most countries (see Encryption).
-- **Unattended operation**: Whistlestop is meant to be attended. Automatic answering and auto-tune are conveniences for an operator who is present.
+- **Unattended operation**: Automatic answering and auto-tune are conveniences for an operator who is present. The Away features (Station ID beacon, mail notices, automatic delivery and collection) can transmit when you're not at the radio. In the US, a station under automatic control may send data unattended in the automatic-control segments of 47 CFR 97.221(b); outside them, only narrow (500 Hz or less) replies to a station that is under local control (97.221(c)). **Automatic only in the automatic-control segments** (on by default) keeps every automatic transmission inside the configured segments; turn it off only where your rules allow. You remain responsible for your station whatever it does on its own: check the Log.
+- **Beacons**: the Station ID is a short identification and mail list sent at most every 10 minutes, never a continuous beacon. Some rules restrict beacons on HF: keep the interval long and turn it off where it isn't allowed.
 
 ## Glossary
 

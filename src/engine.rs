@@ -68,6 +68,16 @@ pub enum Cmd {
     TuneAntenna,
     /// Speaker monitor on/off, and its volume.
     Monitor(bool),
+    /// You're away (or back).
+    SetAway(bool),
+    /// Write Depot mail to a station.
+    DepotPost { to: String, via: Option<String>, text: String },
+    DepotDelete(u64),
+    DepotRead(u64),
+    /// Connect to a station now to deliver its mail (or collect yours).
+    DepotConnect(String),
+    /// Send a Station ID beacon now.
+    BeaconNow,
     MonitorVolume(f32),
     /// Wide whistle search on the SDR; `auto` tunes the radio to hits.
     WideSearch { on: bool, auto: bool },
@@ -246,6 +256,10 @@ pub struct State {
     pub rig_ext: RigExt,
     /// The speaker monitor is playing.
     pub monitor_on: bool,
+    pub depot: crate::depot::Depot,
+    pub away: bool,
+    /// Mail news to show: (station, what, since).
+    pub mail_alerts: Vec<MailAlert>,
 }
 
 /// Radio controls beyond the basics, polled while their window is open,
@@ -275,6 +289,15 @@ pub struct WideView {
     pub note: String,
     /// (caller dial as the SDR sees it, score, seconds since last heard)
     pub hits: Vec<(f64, f64, f64)>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct MailAlert {
+    pub call: String,
+    /// We hold mail for them (true), or they hold mail for us (false).
+    pub ours: bool,
+    pub count: usize,
+    pub at: Instant,
 }
 
 pub const WIDE_SCOPE: &str = "SDR wide search";
@@ -426,6 +449,14 @@ struct Station {
     mon_from: u64,
     /// The real-Mercury demo (its modems, band and K7BOT), while running.
     real_demo: Option<crate::realdemo::RealDemo>,
+    depot: crate::depot::Depot,
+    away: bool,
+    last_beacon: Instant,
+    last_link_activity: Instant,
+    /// Why we connected automatically (deliver or collect), if we did.
+    link_auto: Option<bool>,
+    /// Per-station cooldown for notices and automatic connects.
+    auto_cooldown: HashMap<String, Instant>,
     /// Roundtable host: the speed to switch to once the announcement is out.
     pending_speed: Option<(&'static Mode, Instant)>,
     last_query: Instant,
@@ -542,6 +573,21 @@ impl Station {
             monitor: None,
             mon_from: 0,
             real_demo: None,
+            // Demo keeps its own mailbox; tests can point anywhere.
+            depot: crate::depot::Depot::load(std::env::var_os("WHISTLESTOP_DEPOT").map(PathBuf::from).unwrap_or_else(|| {
+                if cfg!(test) {
+                    std::env::temp_dir().join(format!("ws-depot-{}-{}.json", std::process::id(), cfg.callsign))
+                } else if cfg.demo {
+                    crate::depot::default_path().with_file_name("depot-demo.json")
+                } else {
+                    crate::depot::default_path()
+                }
+            })),
+            away: false,
+            last_beacon: Instant::now(),
+            last_link_activity: Instant::now(),
+            link_auto: None,
+            auto_cooldown: HashMap::new(),
             pending_speed: None,
             last_query: Instant::now(),
         };
@@ -699,6 +745,8 @@ impl Station {
         }
 
         s.real_demo = real;
+        let d = s.depot.clone();
+        s.set(|g| g.depot = d);
         if cfg.monitor {
             s.set_monitor(true);
         }
@@ -1107,6 +1155,52 @@ impl Station {
                 self.last_ext_poll = Instant::now() - Duration::from_secs(10);
             }
             Cmd::TuneAntenna => self.tune_antenna("by hand").await?,
+            Cmd::SetAway(on) => {
+                self.away = on;
+                self.set(|g| g.away = on);
+                self.log(if on { "🚪 Away: links get your away message; what they type waits in your Depot".into() } else { "Back at the radio".into() });
+            }
+            Cmd::DepotPost { to, via, text } => {
+                let to = to.trim().to_uppercase();
+                if to.is_empty() || text.trim().is_empty() {
+                    anyhow::bail!("write a callsign and a message");
+                }
+                let me = self.mycall();
+                let via = via.map(|v| v.trim().to_uppercase()).filter(|v| !v.is_empty() && *v != to);
+                self.depot.post_via(&me, &to, via.as_deref(), text.trim());
+                self.log(match &via {
+                    Some(v) => format!("📮 Mail for {to} waits in Departures, to be handed to {v}"),
+                    None => format!("📮 Mail for {to} waits in Departures"),
+                });
+                // Linked with them (or the relay) right now: send it at once.
+                if let Some(p) = self.peer.clone()
+                    && (p == to || via.as_deref() == Some(p.as_str())) {
+                        let ids: Vec<u64> = self.depot.departures.iter().rev().take(1).map(|m| m.id).collect();
+                        let mail: Vec<Link> = self.depot.departures.iter().filter(|m| ids.contains(&m.id)).map(|m| Link::Mail { id: m.id, from: m.from.clone(), to: m.to.clone(), created: m.created, hops: m.hops, text: m.text.clone() }).collect();
+                        self.hi_queue.extend(mail);
+                        self.pump().await?;
+                    }
+                self.sync_depot();
+            }
+            Cmd::DepotDelete(id) => {
+                self.depot.delete(id);
+                self.sync_depot();
+            }
+            Cmd::DepotRead(id) => {
+                self.depot.mark_read(id);
+                self.sync_depot();
+            }
+            Cmd::DepotConnect(call) => {
+                let call = call.trim().to_uppercase();
+                if self.peer.is_some() {
+                    anyhow::bail!("already linked");
+                }
+                let me = self.mycall();
+                self.tnc()?.command(&format!("CONNECT {me} {call}")).await?;
+                self.set(|g| g.calling = Some(call.clone()));
+                self.log(format!("Connecting to {call} for Depot mail…"));
+            }
+            Cmd::BeaconNow => self.send_beacon("by hand")?,
             Cmd::Monitor(on) => {
                 self.cfg.monitor = on;
                 self.set_monitor(on);
@@ -1546,11 +1640,21 @@ impl Station {
                 for o in self.outgoing.iter() {
                     self.hi_queue.push_back(o.offer());
                 }
+                // Depot mail for this station goes across now.
+                self.last_link_activity = Instant::now();
+                self.queue_mail_for(&peer);
+                let they_called = l.split_whitespace().nth(1).is_some_and(|c| !c.eq_ignore_ascii_case(&self.mycall()));
+                if self.away && they_called {
+                    let text = format!("[{}] {}", self.mycall(), self.cfg.away_message);
+                    self.hi_queue.push_back(Link::Chat { id: 0, text: text.clone() });
+                    self.system_line(format!("(away) sent: {text}"));
+                }
                 self.pump().await?;
                 let early = std::mem::take(&mut self.early);
                 self.on_bodies(early).await?;
             }
             "DISCONNECTED" => {
+                self.link_auto = None;
                 // Forget the session keys (they wipe themselves on drop).
                 self.e2e = None;
                 self.ctl_queue.clear();
@@ -1604,6 +1708,7 @@ impl Station {
                 let dial = self.dial();
                 self.log(format!("📣 CQ from {call} on {:.3} kHz", dial / 1e3));
                 self.add_heard(&call, "CQ".into(), None);
+                self.heard_station(&call).await?;
                 let locked = matches!(self.search.as_ref().map(|s| &s.phase), Some(SearchPhase::WaitCq { .. }));
                 if locked {
                     self.stop_search(&format!("found {call}"));
@@ -1715,6 +1820,12 @@ impl Station {
                 });
             }
             Link::Chat { id, text } => {
+                self.last_link_activity = Instant::now();
+                if self.away && !peer.is_empty() {
+                    let m = crate::depot::Mail { id: crate::depot::new_id(), from: peer.clone(), to: self.mycall(), created: crate::depot::now_s(), text: text.clone(), read: false, delivered_at: None, via: None, hops: 0, handed: None };
+                    self.depot.arrive(m);
+                    self.sync_depot();
+                }
                 self.hi_queue.push_back(Link::Received { id });
                 self.set(|g| {
                     g.chat.push(ChatLine { at: Clock::now(), who: Who::Them, from: peer, text, id, delivered: true })
@@ -1837,6 +1948,46 @@ impl Station {
                 });
             }
             // Handled by the e2e channel before we get here.
+            Link::Mail { id, from, to, created, hops, text } => {
+                self.last_link_activity = Instant::now();
+                let m = crate::depot::Mail { id, from: from.clone(), to: to.clone(), created, text, read: false, delivered_at: None, via: None, hops, handed: None };
+                if to.eq_ignore_ascii_case(&self.mycall()) {
+                    self.hi_queue.push_back(Link::MailAck { id });
+                    if self.depot.arrive(m) {
+                        self.log(format!("📬 Mail from {from} arrived in your Depot"));
+                        self.system_line(format!("📬 Mail from {from} is in your Depot (Arrivals)"));
+                    }
+                    self.set(|g| g.mail_alerts.retain(|a| !(a.call == from && !a.ours)));
+                } else if self.cfg.relay {
+                    // Store and forward: carry it on toward its station.
+                    let fresh = self.depot.take_in_transit(crate::depot::Mail { hops: hops.saturating_add(1), ..m }, &peer);
+                    let already = self.depot.transit.iter().chain(self.depot.delivered.iter()).any(|x| x.id == id);
+                    if fresh || already {
+                        self.hi_queue.push_back(Link::MailAck { id });
+                    }
+                    if fresh {
+                        self.log(format!("🚚 Carrying mail from {from} for {to} (In Transit)"));
+                        self.system_line(format!("🚚 {peer} handed you mail for {to}: it's In Transit until you reach {to}"));
+                    } else if !already {
+                        self.log(format!("Mail for {to} not taken: relayed too many times"));
+                    }
+                } else {
+                    self.log(format!("{peer} offered mail for {to}; not carried (Settings → Automation → Carry mail for other stations is off)"));
+                }
+                self.sync_depot();
+                self.pump().await?;
+            }
+            Link::MailAck { id } => {
+                self.last_link_activity = Instant::now();
+                if let Some(m) = self.depot.confirm(id, &peer).cloned() {
+                    self.log(format!("✓ Mail delivered to {} (now in Delivered)", m.to));
+                    let left = self.depot.waiting_for(&m.to).len();
+                    if left == 0 {
+                        self.set(|g| g.mail_alerts.retain(|a| !(a.call == m.to && a.ours)));
+                    }
+                }
+                self.sync_depot();
+            }
             Link::KeyCommit { .. } | Link::KeyX { .. } | Link::Sealed { .. } | Link::Unknown(_) => {}
         }
         Ok(())
@@ -2054,10 +2205,38 @@ impl Station {
 
     async fn on_table_frame(&mut self, f: &[u8]) -> anyhow::Result<()> {
         let Some(fr) = TableFrame::decode(f) else { return Ok(()) };
-        if let TableBody::Call { kind, table_name, .. } = &fr.body {
-            let what = if *kind == CALL_TABLE { format!("Roundtable \"{table_name}\"") } else { "CQ (chat)".into() };
-            self.add_heard(&fr.from, what, (*kind == CALL_TABLE).then(|| table_name.clone()));
-            return Ok(());
+        match &fr.body {
+            TableBody::Call { kind, table_name, .. } => {
+                let what = if *kind == CALL_TABLE { format!("Roundtable \"{table_name}\"") } else { "CQ (chat)".into() };
+                self.add_heard(&fr.from, what, (*kind == CALL_TABLE).then(|| table_name.clone()));
+                self.heard_station(&fr.from).await?;
+                return Ok(());
+            }
+            TableBody::Beacon { grid, away, mail_for } => {
+                let me = self.mycall();
+                let for_me = mail_for.iter().any(|c| c.eq_ignore_ascii_case(&me));
+                let what = format!(
+                    "Station ID {}{}{}",
+                    grid,
+                    if *away { " · away" } else { "" },
+                    if mail_for.is_empty() { String::new() } else { format!(" · mail for {}", mail_for.join(" ")) }
+                );
+                self.add_heard(&fr.from, what, None);
+                if for_me {
+                    self.they_have_mail(&fr.from.clone(), 1).await?;
+                }
+                self.heard_station(&fr.from).await?;
+                return Ok(());
+            }
+            TableBody::Notice { to, count } => {
+                if to.eq_ignore_ascii_case(&self.mycall()) {
+                    self.add_heard(&fr.from, format!("has {count} message(s) for you"), None);
+                    self.they_have_mail(&fr.from.clone(), *count as usize).await?;
+                }
+                self.heard_station(&fr.from).await?;
+                return Ok(());
+            }
+            _ => {}
         }
         let Some(my_id) = self.table_id() else { return Ok(()) };
         if fr.table != my_id {
@@ -2114,7 +2293,7 @@ impl Station {
                     t.lines.push((Clock::now(), String::new(), format!("{from} left")));
                 }
             }),
-            TableBody::Call { .. } => {}
+            TableBody::Call { .. } | TableBody::Beacon { .. } | TableBody::Notice { .. } => {}
         }
         Ok(())
     }
@@ -2179,6 +2358,7 @@ impl Station {
         self.step_waterfall();
         self.step_monitor();
         self.step_wide().await?;
+        self.step_automation().await?;
         if self.pending_tune {
             let quiet = {
                 let g = self.st.lock().unwrap();
@@ -2262,6 +2442,150 @@ impl Station {
     }
 
     /// Radio-audio waterfall rows from the shared RX buffer.
+    fn sync_depot(&self) {
+        let d = self.depot.clone();
+        self.set(|g| g.depot = d);
+    }
+
+    fn queue_mail_for(&mut self, call: &str) {
+        let mail: Vec<Link> = self
+            .depot
+            .waiting_for(call)
+            .into_iter()
+            .map(|m| Link::Mail { id: m.id, from: m.from.clone(), to: m.to.clone(), created: m.created, hops: m.hops, text: m.text.clone() })
+            .collect();
+        if !mail.is_empty() {
+            self.log(format!("📮 Sending {} Depot message(s) to {call}", mail.len()));
+        }
+        self.hi_queue.extend(mail);
+    }
+
+    /// Is the radio inside an automatic-control digital segment (where an
+    /// unattended station may transmit, 47 CFR 97.221(b))?
+    fn auto_allowed(&self) -> bool {
+        if !self.cfg.auto_in_segments_only {
+            return true;
+        }
+        let d = self.dial();
+        self.cfg.segments.iter().any(|s| d + 300.0 >= s.lo_hz && d + 2700.0 <= s.hi_hz)
+    }
+
+    fn quiet(&self) -> bool {
+        let g = self.st.lock().unwrap();
+        !g.tx && g.link.is_none() && g.calling.is_none() && !g.incoming_call
+    }
+
+    fn cooled(&mut self, call: &str, secs: u64) -> bool {
+        let ok = self.auto_cooldown.get(call).is_none_or(|t| t.elapsed() > Duration::from_secs(secs));
+        if ok {
+            self.auto_cooldown.insert(call.to_string(), Instant::now());
+        }
+        ok
+    }
+
+    /// We heard `call` (CQ, Station ID, a Roundtable frame…). If we hold
+    /// mail for them: show it, tell them (if on), or deliver it (if away).
+    async fn heard_station(&mut self, call: &str) -> anyhow::Result<()> {
+        let call = call.to_uppercase();
+        let n = self.depot.waiting_for(&call).len();
+        if n == 0 || call == self.mycall() {
+            return Ok(());
+        }
+        self.set(|g| {
+            g.mail_alerts.retain(|a| !(a.call == call && a.ours));
+            g.mail_alerts.push(MailAlert { call: call.clone(), ours: true, count: n, at: Instant::now() });
+        });
+        let quiet = self.quiet() && self.cq.is_none() && self.search.is_none();
+        if self.away && self.cfg.auto_deliver && quiet && self.auto_allowed() && self.cooled(&format!("deliver {call}"), 900) {
+            let me = self.mycall();
+            self.tnc()?.command(&format!("CONNECT {me} {call}")).await?;
+            self.link_auto = Some(true);
+            self.set(|g| g.calling = Some(call.clone()));
+            self.log(format!("🤖 Away: connecting to {call} to deliver {n} Depot message(s)"));
+        } else if self.cfg.notify_mail && self.auto_allowed() && self.cooled(&format!("notice {call}"), 900) {
+            let me = self.mycall();
+            self.table_tx(TableFrame { table: 0, from: me, body: TableBody::Notice { to: call.clone(), count: n.min(255) as u8 } }.encode());
+            self.log(format!("📣 Told {call}: {n} message(s) waiting here"));
+        }
+        Ok(())
+    }
+
+    /// `call` says it holds mail for us.
+    async fn they_have_mail(&mut self, call: &str, count: usize) -> anyhow::Result<()> {
+        let call = call.to_uppercase();
+        self.set(|g| {
+            g.mail_alerts.retain(|a| !(a.call == call && !a.ours));
+            g.mail_alerts.push(MailAlert { call: call.clone(), ours: false, count, at: Instant::now() });
+        });
+        self.log(format!("📬 {call} has mail for you"));
+        let quiet = self.quiet() && self.cq.is_none() && self.search.is_none();
+        if self.away && self.cfg.auto_collect && quiet && self.auto_allowed() && self.cooled(&format!("collect {call}"), 900) {
+            let me = self.mycall();
+            self.tnc()?.command(&format!("CONNECT {me} {call}")).await?;
+            self.link_auto = Some(false);
+            self.set(|g| g.calling = Some(call.clone()));
+            self.log(format!("🤖 Away: connecting to {call} to collect your mail"));
+        }
+        Ok(())
+    }
+
+    fn send_beacon(&mut self, why: &str) -> anyhow::Result<()> {
+        if self.tnc.is_none() {
+            anyhow::bail!("Mercury is not connected");
+        }
+        let me = self.mycall();
+        let mut mail_for = self.depot.waiting_calls();
+        // One modem frame (123 bytes on DATAC3): keep the list short.
+        while (TableFrame { table: 0, from: me.clone(), body: TableBody::Beacon { grid: self.cfg.grid.clone(), away: self.away, mail_for: mail_for.clone() } }).encode().len() > 120 {
+            mail_for.pop();
+        }
+        let f = TableFrame { table: 0, from: me, body: TableBody::Beacon { grid: self.cfg.grid.clone(), away: self.away, mail_for: mail_for.clone() } };
+        self.table_tx(f.encode());
+        self.last_beacon = Instant::now();
+        self.log(format!(
+            "📡 Station ID sent ({why}){}",
+            if mail_for.is_empty() { String::new() } else { format!(": mail waiting for {}", mail_for.join(" ")) }
+        ));
+        Ok(())
+    }
+
+    async fn step_automation(&mut self) -> anyhow::Result<()> {
+        // Station ID beacon, when due and the band is quiet.
+        if self.cfg.beacon
+            && self.last_beacon.elapsed() > Duration::from_secs_f64(self.cfg.beacon_minutes.max(10.0) * 60.0)
+            && self.quiet()
+            && self.cq.is_none()
+            && self.search.is_none()
+            && self.table_queue.is_empty()
+        {
+            if self.auto_allowed() {
+                self.send_beacon("scheduled")?;
+            } else {
+                self.last_beacon = Instant::now();
+                self.log("Station ID skipped: outside the automatic-control segments".into());
+            }
+        }
+        // Hang up quiet links when away, or after an automatic connect has
+        // done its job, so others can get through.
+        if let Some(peer) = self.peer.clone() {
+            let idle = self.last_link_activity.elapsed().as_secs_f64();
+            let done = match self.link_auto {
+                Some(true) => self.depot.waiting_for(&peer).is_empty() && idle > 8.0,
+                Some(false) => idle > 20.0,
+                None => self.away && idle > self.cfg.away_idle_s,
+            };
+            if done && self.mercury_buffer == 0 {
+                self.log(format!("Hanging up with {peer} (idle {idle:.0} s)"));
+                self.link_auto = None;
+                self.hi_queue.push_back(Link::Bye { text: "73".into() });
+                self.pump().await?;
+                self.tnc()?.command("DISCONNECT").await?;
+                self.last_link_activity = Instant::now();
+            }
+        }
+        Ok(())
+    }
+
     fn set_monitor(&mut self, on: bool) {
         if !on {
             self.monitor = None;
@@ -2588,6 +2912,43 @@ mod tests {
         wait("file delivered", 60, &|s| s.transfers.iter().any(|t| t.dir == Dir::Out && t.state == XferState::Done(None)));
         h.send(Cmd::Stop);
         std::fs::remove_dir_all(&cfg.download_dir).ok();
+    }
+
+    /// Depot in the demo: mail posted for K7BOT waits in Departures, goes
+    /// across when linked and moves to Delivered on K7BOT's MAILACK; while
+    /// away, what K7BOT types is saved to Arrivals.
+    #[test]
+    fn demo_depot_mail_delivered() {
+        let h = spawn(|| {});
+        let mut cfg = Config { demo: true, demo_real_mercury: false, callsign: "N0MAIL".into(), ..Default::default() };
+        cfg.sdr.enabled = false;
+        cfg.whistle_watch = false;
+        let _ = std::fs::remove_file(std::env::temp_dir().join(format!("ws-depot-{}-N0MAIL.json", std::process::id())));
+        h.send(Cmd::Start(cfg));
+        let wait = |what: &str, secs: u64, f: &dyn Fn(&State) -> bool| {
+            let t = Instant::now();
+            while t.elapsed() < Duration::from_secs(secs) {
+                if f(&h.state.lock().unwrap()) {
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            let g = h.state.lock().unwrap();
+            let log: Vec<_> = g.log.iter().map(|l| l.1.clone()).collect();
+            panic!("timed out waiting for {what}; log:\n{}", log.join("\n"));
+        };
+        wait("Mercury", 10, &|s| s.mercury_ok);
+        h.send(Cmd::DepotPost { to: "k7bot".into(), via: None, text: "See you on 40 m".into() });
+        wait("mail in Departures", 5, &|s| s.depot.departures.len() == 1 && s.depot.departures[0].to == "K7BOT");
+        h.send(Cmd::SetAway(true));
+        wait("away", 5, &|s| s.away);
+        h.send(Cmd::DepotConnect("K7BOT".into()));
+        wait("link with K7BOT", 40, &|s| s.link.is_some());
+        wait("mail delivered", 40, &|s| s.depot.departures.is_empty() && s.depot.delivered.iter().any(|m| m.to == "K7BOT" && m.handed.as_deref() == Some("K7BOT")));
+        // While away, K7BOT's chat lands in Arrivals.
+        wait("chat saved to Arrivals", 40, &|s| s.depot.arrivals.iter().any(|m| m.from == "K7BOT"));
+        h.send(Cmd::Stop);
+        let _ = std::fs::remove_file(std::env::temp_dir().join(format!("ws-depot-{}-N0MAIL.json", std::process::id())));
     }
 
     /// Demo with encryption required: link to K7BOT, see the 🔒 and the

@@ -127,6 +127,8 @@ pub const T_HELLO: u8 = 0x01;
 pub const T_KEYC: u8 = 0x0B;
 pub const T_KEYX: u8 = 0x0C;
 pub const T_SEALED: u8 = 0x0D;
+pub const T_MAIL: u8 = 0x0E;
+pub const T_MAILACK: u8 = 0x0F;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Link {
@@ -141,6 +143,11 @@ pub enum Link {
     Cancel { fid: u64 },
     Report { snr_db: i8, mode_index: u8 },
     Bye { text: String },
+    /// Depot mail, store-and-forward (sent automatically to the station
+    /// it's addressed to when linked).
+    Mail { id: u64, from: String, to: String, created: u64, hops: u8, text: String },
+    /// Mail `id` is safely in the other station's Depot.
+    MailAck { id: u64 },
     /// E2E handshake, step 1: a commitment to the ephemeral public key.
     KeyCommit { suite: u8, commit: [u8; 32] },
     /// E2E handshake, step 2: the public key itself (sent only after the
@@ -186,6 +193,12 @@ impl Link {
             Link::Bye { text } => {
                 w.u8(0x0A).str(text);
             }
+            Link::Mail { id, from, to, created, hops, text } => {
+                w.u8(T_MAIL).uv(*id).call(from).call(to).uv(*created).u8(*hops).str(text);
+            }
+            Link::MailAck { id } => {
+                w.u8(T_MAILACK).uv(*id);
+            }
             Link::KeyCommit { suite, commit } => {
                 w.u8(T_KEYC).u8(*suite).raw(commit);
             }
@@ -230,6 +243,8 @@ impl Link {
             0x08 => Link::Cancel { fid: r.uv()? },
             0x09 => Link::Report { snr_db: r.i8()?, mode_index: r.u8()? },
             0x0A => Link::Bye { text: r.str()? },
+            T_MAIL => Link::Mail { id: r.uv()?, from: r.str()?, to: r.str()?, created: r.uv()?, hops: r.u8()?, text: r.str()? },
+            T_MAILACK => Link::MailAck { id: r.uv()? },
             T_KEYC => Link::KeyCommit { suite: r.u8()?, commit: r.hash()? },
             T_KEYX => Link::KeyX { suite: r.u8()?, pubkey: r.hash()? },
             T_SEALED => Link::Sealed { data: r.rest().to_vec() },
@@ -412,6 +427,10 @@ pub enum TableBody {
     Again { of: String, id: u64, missing: u64 },
     Floor { to: String },
     Leave,
+    /// Station ID beacon: who, where, whether away, and who has mail here.
+    Beacon { grid: String, away: bool, mail_for: Vec<String> },
+    /// "I have `count` messages for `to`: connect to me to collect them."
+    Notice { to: String, count: u8 },
 }
 
 pub const CALL_CHAT: u8 = 0;
@@ -435,6 +454,8 @@ impl TableFrame {
             TableBody::Again { .. } => 0x14,
             TableBody::Floor { .. } => 0x15,
             TableBody::Leave => 0x16,
+            TableBody::Beacon { .. } => 0x17,
+            TableBody::Notice { .. } => 0x18,
         };
         w.u8(TABLE_MAGIC).u8(t).uv(self.table as u64).call(&self.from);
         match &self.body {
@@ -457,6 +478,15 @@ impl TableFrame {
                 w.call(to);
             }
             TableBody::Leave => {}
+            TableBody::Beacon { grid, away, mail_for } => {
+                w.str(grid).u8(*away as u8).uv(mail_for.len() as u64);
+                for c in mail_for {
+                    w.call(c);
+                }
+            }
+            TableBody::Notice { to, count } => {
+                w.call(to).u8(*count);
+            }
         }
         w.0
     }
@@ -479,6 +509,17 @@ impl TableFrame {
                 0x14 => TableBody::Again { of: r.str()?, id: r.uv()?, missing: r.uv()? },
                 0x15 => TableBody::Floor { to: r.str()? },
                 0x16 => TableBody::Leave,
+                0x17 => {
+                    let grid = r.str()?;
+                    let away = r.u8()? & 1 == 1;
+                    let n = r.uv()?.min(32);
+                    let mut mail_for = vec![];
+                    for _ in 0..n {
+                        mail_for.push(r.str()?);
+                    }
+                    TableBody::Beacon { grid, away, mail_for }
+                }
+                0x18 => TableBody::Notice { to: r.str()?, count: r.u8()? },
                 _ => bail!("unknown"),
             })
         })()
@@ -662,6 +703,8 @@ mod tests {
             Link::Done { fid: 9, ok: true },
             Link::Report { snr_db: -7, mode_index: 1 },
             Link::Bye { text: "73".into() },
+            Link::Mail { id: 0xDEAD_BEEF, from: "N0CALL".into(), to: "K7BOT".into(), created: 1_800_000_000, hops: 1, text: "See you on 40 m ✓".into() },
+            Link::MailAck { id: 0xDEAD_BEEF },
             Link::KeyCommit { suite: 1, commit: [3; 32] },
             Link::KeyX { suite: 1, pubkey: [4; 32] },
             Link::Sealed { data: vec![9; 40] },
@@ -738,6 +781,8 @@ mod tests {
             TableBody::Again { of: "K1ABC".into(), id: 7, missing: 0b101 },
             TableBody::Floor { to: "K1ABC".into() },
             TableBody::Leave,
+            TableBody::Beacon { grid: "EM12".into(), away: true, mail_for: vec!["K7BOT".into(), "W1AW".into()] },
+            TableBody::Notice { to: "K7BOT".into(), count: 2 },
         ] {
             let f = TableFrame { table: 77, from: "N0CALL".into(), body };
             assert_eq!(TableFrame::decode(&f.encode()), Some(f));

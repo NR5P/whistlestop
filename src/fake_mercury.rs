@@ -428,6 +428,7 @@ impl Session {
                         }
                     }
             }
+            Link::Mail { id, .. } => self.bot_send(Link::MailAck { id }),
             Link::Bye { .. } => self.hang_up(),
             _ => {}
         }

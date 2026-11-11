@@ -68,6 +68,28 @@ pub struct Config {
     pub demo_real_mercury: bool,
     /// Path to the Mercury engine; empty = look in the usual places.
     pub mercury_bin: String,
+
+    // ---- Automation (all off by default) ----
+    /// Shown to stations that connect while you're away.
+    pub away_message: String,
+    /// While away, hang up a link that has been quiet this long (s).
+    pub away_idle_s: f64,
+    /// Send a Station ID beacon every `beacon_minutes` (no whistle).
+    pub beacon: bool,
+    pub beacon_minutes: f64,
+    /// Tell stations you hear that you have mail for them.
+    pub notify_mail: bool,
+    /// While away: connect to stations you hear that have mail waiting,
+    /// and deliver it.
+    pub auto_deliver: bool,
+    /// While away: when a station says it has mail for you, connect and
+    /// collect it.
+    pub auto_collect: bool,
+    /// Automatic transmissions only inside the automatic-control digital
+    /// segments (US 47 CFR 97.221(b)).
+    pub auto_in_segments_only: bool,
+    /// Carry Depot mail for other stations (store and forward).
+    pub relay: bool,
 }
 
 impl Default for Config {
@@ -106,6 +128,15 @@ impl Default for Config {
             monitor_device: String::new(),
             demo_real_mercury: true,
             mercury_bin: String::new(),
+            away_message: "Away from the radio right now. Type a message and it will wait for me in my Depot. 73".into(),
+            away_idle_s: 180.0,
+            beacon: false,
+            beacon_minutes: 30.0,
+            notify_mail: false,
+            auto_deliver: false,
+            auto_collect: false,
+            auto_in_segments_only: true,
+            relay: false,
         }
     }
 }

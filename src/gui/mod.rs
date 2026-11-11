@@ -1,5 +1,6 @@
 //! Whistlestop's graphical interface (egui).
 
+mod depot;
 mod guide;
 pub mod icon;
 mod rigwin;
@@ -134,6 +135,7 @@ enum Tab {
     Roundtable,
     Files,
     Log,
+    Depot,
 }
 
 pub struct App {
@@ -162,6 +164,7 @@ pub struct App {
     guide: guide::Guide,
     /// The Guide's own window is open.
     guide_open: bool,
+    depot_tab: depot::DepotTab,
     rigwin: rigwin::RigWindow,
     /// Settings: radio detection results and the model filter.
     detected: Vec<whistlestop::rigsetup::RadioGuess>,
@@ -218,6 +221,7 @@ impl App {
             last_err: None,
             guide: guide::Guide::default(),
             guide_open: false,
+            depot_tab: depot::DepotTab::default(),
             rigwin: rigwin::RigWindow::default(),
             detected: vec![],
             model_filter: String::new(),
@@ -327,11 +331,12 @@ impl App {
                 if s.demo {
                     ui.label(RichText::new(" DEMO ").strong().size(12.0).color(BG).background_color(BRASS)).help(&help::DEMO);
                 }
-                let sdr_on = self.h.sdr.lock().unwrap().running;
-                pill(ui, "SDR", sdr_on).help(&help::PILLS);
-                pill(ui, "Audio", s.audio_ok).help(&help::PILLS);
-                pill(ui, "Mercury", s.mercury_ok).help(&help::PILLS);
-                pill(ui, "Radio", s.rig_ok).help(&help::PILLS);
+                let away = s.away;
+                let ab = egui::Button::new(RichText::new(if away { "🚪 Away" } else { "🙋 Here" }).size(14.0).strong().color(if away { BG } else { TEXT }))
+                    .fill(if away { AMBER } else { CARD_HI });
+                if ui.add(ab).help(&help::AWAY).clicked() {
+                    self.send(Cmd::SetAway(!away));
+                }
             });
         });
     }
@@ -449,8 +454,13 @@ impl App {
                 ui.label(RichText::new(if s.link.is_some() { "automatic" } else { "used when linked" }).size(10.5).color(DIM));
             });
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                let sdr_on = self.h.sdr.lock().unwrap().running;
+                pill(ui, "SDR", sdr_on).help(&help::PILLS);
+                pill(ui, "Audio", s.audio_ok).help(&help::PILLS);
+                pill(ui, "Mercury", s.mercury_ok).help(&help::PILLS);
+                pill(ui, "Radio", s.rig_ok).help(&help::PILLS);
                 if let Some(v) = &s.modem_version {
-                    ui.label(RichText::new(v).size(10.5).color(DIM));
+                    ui.label(RichText::new(v).size(10.5).color(DIM)).on_hover_text(v.as_str());
                 }
             });
         });
@@ -712,6 +722,23 @@ impl App {
 
     fn heard_card(&mut self, ui: &mut Ui, s: &State) {
         card(ui, "Heard", |ui| {
+            for a in s.mail_alerts.iter().filter(|a| a.at.elapsed() < Duration::from_secs(1800)) {
+                Frame::NONE.fill(if a.ours { BRASS.linear_multiply(0.15) } else { TEAL.linear_multiply(0.15) }).corner_radius(8.0).inner_margin(Margin::same(8)).show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        if a.ours {
+                            ui.label(RichText::new(format!("📮 {} message(s) for {}", a.count, a.call)).strong().color(BRASS)).help(&help::ALERT_OURS);
+                        } else {
+                            ui.label(RichText::new(format!("📬 {} has mail for you", a.call)).strong().color(TEAL)).help(&help::ALERT_THEIRS);
+                        }
+                        if s.link.is_none() {
+                            let label = if a.ours { "Deliver now" } else { "Collect" };
+                            if ui.small_button(label).help(if a.ours { &help::ALERT_OURS } else { &help::ALERT_THEIRS }).clicked() {
+                                self.send(Cmd::DepotConnect(a.call.clone()));
+                            }
+                        }
+                    });
+                });
+            }
             if let Some(w) = &s.whistle
                 && w.at.elapsed() < Duration::from_secs(30) && !s.search.active {
                     Frame::NONE.fill(BRASS.linear_multiply(0.15)).corner_radius(8.0).inner_margin(Margin::same(8)).show(ui, |ui| {
@@ -761,15 +788,16 @@ impl App {
 
     fn centre(&mut self, ui: &mut Ui, s: &State) {
         ui.horizontal(|ui| {
-            for (t, label) in [(Tab::Chat, "💬  Chat"), (Tab::Roundtable, "◎  Roundtable"), (Tab::Files, "📁  Files"), (Tab::Log, "≡  Log")] {
+            for (t, label) in [(Tab::Chat, "💬  Chat"), (Tab::Roundtable, "◎  Roundtable"), (Tab::Files, "📁  Files"), (Tab::Depot, "🏤  Depot"), (Tab::Log, "≡  Log")] {
                 let on = self.tab == t;
                 let badge = match t {
                     Tab::Files => s.transfers.iter().filter(|x| x.state == XferState::WaitingForYou).count(),
+                    Tab::Depot => s.depot.unread(),
                     _ => 0,
                 };
                 let txt = if badge > 0 { format!("{label}  ({badge})") } else { label.to_string() };
                 let b = egui::Button::new(RichText::new(txt).size(14.5).color(if on { BG } else { TEXT })).fill(if on { BRASS } else { CARD });
-                if ui.add(b).help(&help::TABS).clicked() {
+                if ui.add(b).help(if t == Tab::Depot { &help::DEPOT_TAB } else { &help::TABS }).clicked() {
                     self.tab = t;
                 }
             }
@@ -780,6 +808,13 @@ impl App {
             Tab::Roundtable => self.table_tab(ui, s),
             Tab::Files => self.files_tab(ui, s),
             Tab::Log => self.log_tab(ui, s),
+            Tab::Depot => {
+                let mut cmds = vec![];
+                self.depot_tab.show(ui, s, &mut cmds, self.cfg.relay);
+                for c in cmds {
+                    self.send(c);
+                }
+            }
         }
     }
 
@@ -1668,6 +1703,40 @@ impl App {
                         ui.label(RichText::new("Roundtables are never encrypted. Keys are made per link and never saved.").small().color(DIM));
                     });
                     ui.add_space(6.0);
+                    card(ui, "Automation (all off by default)", |ui| {
+                        ui.label(RichText::new("Automatic transmissions happen only when you're not linked, calling or searching, and (if the last switch is on) only inside the automatic-control digital segments. You remain responsible for your station.").small().color(DIM));
+                        ui.add_space(4.0);
+                        ui.label(RichText::new("Away").strong());
+                        ui.horizontal(|ui| {
+                            ui.label("Away message");
+                            ui.add(egui::TextEdit::singleline(&mut c.away_message).desired_width(330.0)).help(&help::ST_AWAY_MSG);
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label("Hang up quiet links after");
+                            ui.add(egui::Slider::new(&mut c.away_idle_s, 60.0..=900.0).suffix(" s").integer()).help(&help::ST_AWAY_IDLE);
+                        });
+                        ui.add_space(4.0);
+                        ui.label(RichText::new("Station ID").strong());
+                        ui.horizontal(|ui| {
+                            ui.checkbox(&mut c.beacon, "Station ID beacon every").help(&help::ST_BEACON);
+                            ui.add(egui::Slider::new(&mut c.beacon_minutes, 10.0..=120.0).suffix(" min").integer()).help(&help::ST_BEACON);
+                            if ui.button("Send one now").help(&help::ST_BEACON_NOW).clicked() {
+                                self.h.send(Cmd::BeaconNow);
+                            }
+                        });
+                        ui.add_space(4.0);
+                        ui.label(RichText::new("Mail").strong());
+                        ui.checkbox(&mut c.notify_mail, "Tell stations I hear that I have mail for them").help(&help::ST_NOTIFY);
+                        ui.checkbox(&mut c.auto_deliver, "While away: connect and deliver mail to stations I hear").help(&help::ST_AUTO_DELIVER);
+                        ui.checkbox(&mut c.auto_collect, "While away: connect and collect mail that's waiting for me").help(&help::ST_AUTO_COLLECT);
+                        ui.checkbox(&mut c.relay, "Carry mail for other stations (store and forward)").help(&help::ST_RELAY);
+                        ui.add_space(4.0);
+                        ui.checkbox(&mut c.auto_in_segments_only, "Automatic transmissions only inside the automatic-control segments").help(&help::ST_SEGMENTS);
+                        if !c.auto_in_segments_only {
+                            ui.label(RichText::new("⚠ Unattended automatic operation outside the automatic-control segments isn't allowed in the US (47 CFR 97.221). Check your rules.").small().color(RED));
+                        }
+                    });
+                    ui.add_space(6.0);
                     card(ui, "Files", |ui| {
                         ui.horizontal(|ui| {
                             ui.label(c.download_dir.display().to_string());
@@ -1780,6 +1849,9 @@ impl eframe::App for App {
                 rig_caps: g.rig_caps.clone(),
                 rig_ext: g.rig_ext.clone(),
                 monitor_on: g.monitor_on,
+                depot: g.depot.clone(),
+                away: g.away,
+                mail_alerts: g.mail_alerts.clone(),
             }
         };
 

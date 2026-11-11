@@ -43,6 +43,9 @@ pub async fn run(p: BotPorts, stop: std::sync::Arc<std::sync::atomic::AtomicBool
     // A whistle in progress (it plays in the background so K7BOT keeps
     // hearing Mercury: a connect can arrive mid-whistle).
     let mut whistling: Option<tokio::task::JoinHandle<()>> = None;
+    // Stations K7BOT has heard call CQ get a message waiting for them.
+    let mut mail_for: Vec<String> = vec![];
+    let mut noticed: std::collections::HashMap<String, Instant> = Default::default();
     let mut incoming_call = false;
     // Drain what the band sends this station's "speaker" (unused).
     std::thread::spawn(move || {
@@ -68,6 +71,21 @@ pub async fn run(p: BotPorts, stop: std::sync::Arc<std::sync::atomic::AtomicBool
             ev = erx.recv() => {
                 let Some(ev) = ev else { break };
                 match ev {
+                    TncEvent::Line(l) if l.starts_with("CQFRAME ") => {
+                        // Someone called CQ: K7BOT has a message for them, and
+                        // says so (a NOTICE), at most every 10 minutes.
+                        let who = l.split_whitespace().nth(1).unwrap_or("").to_uppercase();
+                        if !who.is_empty() && who != CALL {
+                            if !mail_for.contains(&who) {
+                                mail_for.push(who.clone());
+                            }
+                            if noticed.get(&who).is_none_or(|t| t.elapsed() > Duration::from_secs(600)) {
+                                noticed.insert(who.clone(), Instant::now());
+                                let n = TableFrame { table: 0, from: CALL.into(), body: TableBody::Notice { to: who, count: 1 } };
+                                later_bc.push((Instant::now() + Duration::from_secs(6), n.encode()));
+                            }
+                        }
+                    }
                     TncEvent::Line(l) if l == "PENDING" => incoming_call = true,
                     TncEvent::Line(l) if l == "CANCELPENDING" => incoming_call = false,
                     TncEvent::Line(l) if l.starts_with("CONNECTED") => {
@@ -83,6 +101,19 @@ pub async fn run(p: BotPorts, stop: std::sync::Arc<std::sync::atomic::AtomicBool
                         let mut w = Link::Hello { version: VERSION, caps: CAP_RESUME | CAP_ZIP, name: "Demo station".into(), grid: "DN31".into(), app: "Whistlestop demo (real Mercury)".into() }.encode();
                         chat_id += 1;
                         w.extend(Link::Chat { id: chat_id, text: format!("Hi {who}, K7BOT here on a real Mercury modem. Type anything, send me a file, or ask me for one.") }.encode());
+                        // Depot mail K7BOT holds for this station.
+                        if let Some(i) = mail_for.iter().position(|c| c.eq_ignore_ascii_case(&who)) {
+                            mail_for.remove(i);
+                            let m = Link::Mail {
+                                id: crate::depot::new_id(),
+                                from: CALL.into(),
+                                to: who.clone(),
+                                created: crate::depot::now_s(),
+                                hops: 0,
+                                text: format!("Hello {who}! This message waited for you in K7BOT's Depot until you connected. It's in your Arrivals now. 73"),
+                            };
+                            w.extend(m.encode());
+                        }
                         tnc.send_data(&w).await?;
                     }
                     TncEvent::Line(l) if l.starts_with("DISCONNECTED") => {
@@ -143,6 +174,11 @@ pub async fn run(p: BotPorts, stop: std::sync::Arc<std::sync::atomic::AtomicBool
                                             }
                                             tnc.send_data(&w).await?;
                                         }
+                                }
+                                Link::Mail { id, .. } => {
+                                    tnc.send_data(&Link::MailAck { id }.encode()).await?;
+                                    chat_id += 1;
+                                    later.push((Instant::now() + Duration::from_secs(1), Link::Chat { id: chat_id, text: "Got your Depot mail, thanks!".into() }.encode()));
                                 }
                                 Link::Bye { .. } => {
                                     let _ = tnc.command("DISCONNECT").await;

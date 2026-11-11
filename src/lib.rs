@@ -2,6 +2,7 @@ pub mod audio;
 pub mod bandplan;
 pub mod config;
 pub mod demo_bot;
+pub mod depot;
 pub mod e2e;
 pub mod engine;
 pub mod ether;
