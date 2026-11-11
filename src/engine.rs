@@ -76,6 +76,12 @@ pub enum Cmd {
     DepotRead(u64),
     /// Connect to a station now to deliver its mail (or collect yours).
     DepotConnect(String),
+    /// Ask the linked station to move the link to this dial frequency.
+    Qsy(f64),
+    /// Browse the linked station's file library at this path ("" = top).
+    LibList(String),
+    /// Download this file from the linked station's library.
+    LibFetch(String),
     /// Send a Station ID beacon now.
     BeaconNow,
     MonitorVolume(f32),
@@ -260,6 +266,14 @@ pub struct State {
     pub away: bool,
     /// Mail news to show: (station, what, since).
     pub mail_alerts: Vec<MailAlert>,
+    /// A QSY in force: where we came from and where the link is now.
+    pub qsy: Option<QsyView>,
+    /// QSY in progress or just refused, for the link card.
+    pub qsy_note: Option<String>,
+    /// The linked station's library, as last listed.
+    pub library: Option<LibView>,
+    /// The schedule slot in charge, as text.
+    pub schedule_now: Option<String>,
 }
 
 /// Radio controls beyond the basics, polled while their window is open,
@@ -289,6 +303,19 @@ pub struct WideView {
     pub note: String,
     /// (caller dial as the SDR sees it, score, seconds since last heard)
     pub hits: Vec<(f64, f64, f64)>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct QsyView {
+    pub home_hz: f64,
+    pub at_hz: f64,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct LibView {
+    pub path: String,
+    pub entries: Vec<crate::protocol::LibEntry>,
+    pub note: String,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -462,6 +489,21 @@ struct Station {
     link_auto: Option<bool>,
     /// Per-station cooldown for notices and automatic connects.
     auto_cooldown: HashMap<String, Instant>,
+    /// QSY in force: (home dial, dial now).
+    qsy: Option<(f64, f64)>,
+    /// Our QSY request awaiting an answer: (id, dial).
+    qsy_out: Option<(u64, f64)>,
+    /// Agreed QSY: move to this dial once the answer has crossed.
+    qsy_move: Option<(f64, Instant, bool)>,
+    /// Tuned the antenna since arriving (once per QSY).
+    qsy_tuned: bool,
+    qsy_tune_now: bool,
+    /// SWR stayed high on the QSY frequency: end the link, go home.
+    qsy_fail: bool,
+    /// Library downloads we asked for (their offers are accepted at once).
+    wanted: std::collections::HashSet<u64>,
+    last_sched: Option<Instant>,
+    sched_slot: Option<usize>,
     /// Roundtable host: the speed to switch to once the announcement is out.
     pending_speed: Option<(&'static Mode, Instant)>,
     last_query: Instant,
@@ -595,6 +637,15 @@ impl Station {
             last_link_activity: Instant::now(),
             link_auto: None,
             auto_cooldown: HashMap::new(),
+            qsy: None,
+            qsy_out: None,
+            qsy_move: None,
+            qsy_tuned: false,
+            qsy_tune_now: false,
+            qsy_fail: false,
+            wanted: Default::default(),
+            last_sched: None,
+            sched_slot: None,
             pending_speed: None,
             last_query: Instant::now(),
         };
@@ -880,7 +931,16 @@ impl Station {
                             ""
                         }
                     ));
-                    if self.cfg.auto_tune && can && !recently {
+                    if self.qsy.is_some() {
+                        // Moved for a QSY: tune once (if auto-tune is on);
+                        // if it's still high, end the link so both go home.
+                        if self.cfg.auto_tune && can && !self.qsy_tuned {
+                            self.qsy_tuned = true;
+                            self.qsy_tune_now = true;
+                        } else if self.cfg.qsy_swr_home {
+                            self.qsy_fail = true;
+                        }
+                    } else if self.cfg.auto_tune && can && !recently {
                         self.pending_tune = true;
                         self.set(|g| g.rig_ext.tune_pending = true);
                     }
@@ -1234,6 +1294,33 @@ impl Station {
                 self.log(format!("Connecting to {call} for Depot mail…"));
             }
             Cmd::BeaconNow => self.send_beacon("by hand")?,
+            Cmd::Qsy(hz) => {
+                let Some(peer) = self.peer.clone() else { anyhow::bail!("not linked") };
+                if bandplan::band_of(hz).is_none() {
+                    anyhow::bail!("{:.3} kHz isn't in an amateur band", hz / 1e3);
+                }
+                let id = crate::depot::new_id();
+                self.qsy_out = Some((id, hz));
+                self.hi_queue.push_back(Link::Qsy { id, dial_hz: hz.round() as u64, why: String::new() });
+                self.log(format!("↔ Asking {peer} to QSY to {:.3} kHz", hz / 1e3));
+                self.set(|g| g.qsy_note = Some(format!("Asked {peer} to move to {:.3} kHz…", hz / 1e3)));
+                self.pump().await?;
+            }
+            Cmd::LibList(path) => {
+                if self.peer.is_none() {
+                    anyhow::bail!("not linked");
+                }
+                self.hi_queue.push_back(Link::ListReq { id: crate::depot::new_id(), path });
+                self.pump().await?;
+            }
+            Cmd::LibFetch(path) => {
+                let Some(peer) = self.peer.clone() else { anyhow::bail!("not linked") };
+                let id = crate::depot::new_id();
+                self.wanted.insert(id);
+                self.hi_queue.push_back(Link::Fetch { id, path: path.clone() });
+                self.log(format!("📚 Asking {peer} for {path}"));
+                self.pump().await?;
+            }
             Cmd::Monitor(on) => {
                 self.cfg.monitor = on;
                 self.set_monitor(on);
@@ -1392,19 +1479,23 @@ impl Station {
                     // Now within a few tens of hertz: the matched filter
                     // measures the rest to about a hertz.
                     let wide = s.scope == WIDE_SCOPE;
-                    let v = self.detector.detect_near(&x, 150.0).map(|v| v.offset_hz).or_else(|| {
-                        // The scan detector, unambiguous: it also copes with
-                        // a strong signal inside the sweep (it levels
-                        // carriers away) and with an SDR hand-off's crystal
-                        // error. Refined by the matched filter if it can.
-                        let secs = x.len() as f64 / FS as f64;
-                        let h = self.tracker.scan(&x).filter(|h| h.z >= TrackDetector::found(secs))?;
-                        let reach = if wide { self.whistle_params().scan_reach_hz() } else { 120.0 };
-                        (h.offset_hz.abs() <= reach).then(|| match self.detector.detect(&x) {
-                            Some(d) => self.fine_offset(h.offset_hz, d.offset_hz),
-                            None => h.offset_hz,
-                        })
-                    });
+                    // The scan detector's estimate (unambiguous, good to
+                    // about 10 Hz) decides; the matched filter refines it
+                    // only when the two agree. It copes with a strong signal
+                    // inside the sweep and an SDR hand-off's crystal error.
+                    let secs = x.len() as f64 / FS as f64;
+                    let reach = if wide { self.whistle_params().scan_reach_hz() } else { 150.0 };
+                    let coarse_now = self.tracker.scan(&x).filter(|h| h.z >= TrackDetector::found(secs) && h.offset_hz.abs() <= reach);
+                    let fine = self.detector.detect(&x).map(|d| d.offset_hz);
+                    let v = match (coarse_now, fine) {
+                        (Some(h), Some(f)) => {
+                            let f = self.fine_offset(h.offset_hz, f);
+                            Some(if (f - h.offset_hz).abs() <= 25.0 { f } else { h.offset_hz })
+                        }
+                        (Some(h), None) => Some(h.offset_hz),
+                        (None, _) => self.detector.detect_near(&x, 60.0).map(|d| d.offset_hz),
+                    };
+                    let heard_something = coarse_now.is_some() || self.tracker.scan(&x).is_some_and(|h| h.z >= TrackDetector::MAYBE);
                     match v {
                         Some(off) => {
                             let fine = target + off;
@@ -1418,7 +1509,7 @@ impl Station {
                             ));
                             s.phase = SearchPhase::WaitCq { until: Instant::now() + Duration::from_secs(45) };
                         }
-                        _ if !again => {
+                        _ if !again && heard_something => {
                             // Faded, or the pattern straddled the window: listen once more.
                             s.phase = SearchPhase::Verify { target, from: audio::now_count(&self.rx).max(1), coarse, again: true };
                         }
@@ -1717,6 +1808,18 @@ impl Station {
                     i.save_partial();
                 }
                 self.incoming.clear();
+                self.qsy_out = None;
+                self.qsy_move = None;
+                self.wanted.clear();
+                self.set(|g| {
+                    g.qsy_note = None;
+                    g.library = None;
+                });
+                if let Some((home, at)) = self.qsy.take() {
+                    self.tune(home).await?;
+                    self.log(format!("↔ QSY over: back from {:.3} to {:.3} kHz", at / 1e3, home / 1e3));
+                    self.set(|g| g.qsy = None);
+                }
                 for o in self.outgoing.iter_mut() {
                     o.next = None; // re-offer (with resume) on the next link
                 }
@@ -1852,6 +1955,63 @@ impl Station {
     async fn on_link(&mut self, p: Link) -> anyhow::Result<()> {
         let peer = self.peer.clone().unwrap_or_default();
         match p {
+            Link::Qsy { id, dial_hz, why } => {
+                let hz = dial_hz as f64;
+                let why = if why.is_empty() { String::new() } else { format!(" ({why})") };
+                match self.qsy_verdict(hz) {
+                    Ok(()) => {
+                        self.hi_queue.push_back(Link::QsyAnswer { id, accept: true, reason: String::new() });
+                        self.qsy_move = Some((hz, Instant::now(), false));
+                        self.log(format!("↔ {peer} asked to QSY to {:.3} kHz{why}: agreed", hz / 1e3));
+                        self.system_line(format!("↔ {peer} asked to move to {:.3} kHz: agreed. Back here when the link ends.", hz / 1e3));
+                    }
+                    Err(reason) => {
+                        self.hi_queue.push_back(Link::QsyAnswer { id, accept: false, reason: reason.clone() });
+                        self.log(format!("↔ {peer} asked to QSY to {:.3} kHz{why}: declined ({reason})", hz / 1e3));
+                        self.system_line(format!("↔ {peer} asked to move to {:.3} kHz: declined ({reason})", hz / 1e3));
+                    }
+                }
+            }
+            Link::QsyAnswer { id, accept, reason } => {
+                if let Some((want, hz)) = self.qsy_out
+                    && want == id
+                {
+                    self.qsy_out = None;
+                    if accept {
+                        self.system_line(format!("↔ {peer} agreed: moving to {:.3} kHz", hz / 1e3));
+                        self.qsy_move = Some((hz, Instant::now(), true));
+                    } else {
+                        self.system_line(format!("↔ {peer} declined the QSY: {reason}"));
+                        self.set(|g| g.qsy_note = None);
+                    }
+                }
+            }
+            Link::ListReq { id, path } => {
+                let ans = self.library_answer(id, &path);
+                if let Link::ListAns { note, entries, .. } = &ans {
+                    self.log(format!("📚 {peer} browsed the library ({}): {}", if path.is_empty() { "top" } else { &path }, if note.is_empty() { format!("{} entries", entries.len()) } else { note.clone() }));
+                }
+                self.hi_queue.push_back(ans);
+            }
+            Link::ListAns { path, entries, note, .. } => self.set(|g| g.library = Some(LibView { path, entries, note })),
+            Link::Fetch { id, path } => match self.library_file(&path) {
+                Ok((name, data)) => {
+                    self.log(format!("📚 Sending {path} from the library to {peer}"));
+                    self.hi_queue.push_back(Link::FetchAnswer { id, ok: true, reason: String::new() });
+                    let len = data.len() as u64;
+                    self.offer_data(id, name, data, false, 1, len).await?;
+                }
+                Err(e) => {
+                    self.log(format!("📚 {peer} asked for {path}: refused ({e})"));
+                    self.hi_queue.push_back(Link::FetchAnswer { id, ok: false, reason: e.to_string() });
+                }
+            },
+            Link::FetchAnswer { id, ok, reason } => {
+                if !ok {
+                    self.wanted.remove(&id);
+                    self.system_line(format!("📚 {peer} couldn't send that: {reason}"));
+                }
+            }
             Link::Hello { name, grid, app, .. } => {
                 self.set(|g| {
                     if let Some(l) = g.link.as_mut() {
@@ -1905,6 +2065,10 @@ impl Station {
                     if have > 0 { format!(", {} already here — will resume", modes::human_bytes(have as usize)) } else { String::new() },
                     modes::human_duration(eta)
                 ));
+                // A library file we asked for: take it.
+                if self.wanted.remove(&fid) {
+                    self.answer_offer(fid, true).await?;
+                }
             }
             Link::Answer { fid, accept, resume_from } => {
                 if let Some(o) = self.outgoing.iter_mut().find(|o| o.fid == fid) {
@@ -2066,6 +2230,11 @@ impl Station {
         };
         let fid = self.next_fid;
         self.next_fid += 1;
+        self.offer_data(fid, name, data, zipped, files, original).await
+    }
+
+    /// Offer data to the linked station (or as soon as one is linked).
+    async fn offer_data(&mut self, fid: u64, name: String, data: Vec<u8>, zipped: bool, files: u64, original: u64) -> anyhow::Result<()> {
         let out = Outgoing::new(fid, name.clone(), data, zipped, files);
         let size = out.data.len() as u64;
         let eta = self.est.eta_s(file_wire_size(&name, size), self.bw);
@@ -2401,6 +2570,7 @@ impl Station {
         self.step_monitor();
         self.step_wide().await?;
         self.step_automation().await?;
+        self.step_qsy().await?;
         if self.pending_tune {
             let quiet = {
                 let g = self.st.lock().unwrap();
@@ -2512,6 +2682,58 @@ impl Station {
         self.cfg.segments.iter().any(|s| d + 300.0 >= s.lo_hz && d + 2700.0 <= s.hi_hz)
     }
 
+    fn qsy_verdict(&self, hz: f64) -> Result<(), String> {
+        qsy_verdict(&self.cfg, self.qsy.map(|q| q.0).unwrap_or(self.dial()), hz)
+    }
+
+    async fn step_qsy(&mut self) -> anyhow::Result<()> {
+        if let Some((hz, at, asked)) = self.qsy_move {
+            // Both move a moment after the answer has crossed: the station
+            // that asked, 3 s after it arrived (time for Mercury's ack);
+            // the other, once Mercury has sent everything.
+            let due = if asked { at.elapsed() > Duration::from_secs(3) } else { self.mercury_buffer == 0 && at.elapsed() > Duration::from_secs(2) };
+            if self.peer.is_none() {
+                self.qsy_move = None;
+            } else if due {
+                self.qsy_move = None;
+                let home = self.qsy.map(|q| q.0).unwrap_or(self.dial());
+                self.tune(hz).await?;
+                self.qsy = Some((home, hz));
+                self.qsy_tuned = false;
+                self.qsy_fail = false;
+                self.log(format!("↔ QSY: moved to {:.3} kHz (home {:.3} kHz)", hz / 1e3, home / 1e3));
+                self.set(|g| {
+                    g.qsy = Some(QsyView { home_hz: home, at_hz: hz });
+                    g.qsy_note = None;
+                });
+            }
+        }
+        if self.qsy_tune_now {
+            self.qsy_tune_now = false;
+            if let Err(e) = self.tune_antenna("high SWR after a QSY").await {
+                self.log(format!("⚠ Antenna tuner: {e}"));
+                self.qsy_fail = self.cfg.qsy_swr_home;
+            }
+        }
+        if self.qsy_fail && self.peer.is_some() {
+            self.qsy_fail = false;
+            self.log("⚠ SWR stays high on the QSY frequency: ending the link so both stations go home".into());
+            self.hi_queue.push_back(Link::Chat { id: 0, text: "SWR is too high for me here; ending the link so we both go back. 73".into() });
+            self.hi_queue.push_back(Link::Bye { text: "73".into() });
+            self.pump().await?;
+            self.tnc()?.command("DISCONNECT").await?;
+        }
+        Ok(())
+    }
+
+    fn library_answer(&self, id: u64, path: &str) -> Link {
+        library_answer(&self.cfg, self.away, id, path)
+    }
+
+    fn library_file(&self, path: &str) -> anyhow::Result<(String, Vec<u8>)> {
+        library_file(&self.cfg, self.away, path)
+    }
+
     fn quiet(&self) -> bool {
         let g = self.st.lock().unwrap();
         !g.tx && g.link.is_none() && g.calling.is_none() && !g.incoming_call
@@ -2592,8 +2814,34 @@ impl Station {
     }
 
     async fn step_automation(&mut self) -> anyhow::Result<()> {
+        // The schedule: where to listen at this time of day (UTC).
+        if self.cfg.schedule_on && self.last_sched.is_none_or(|t| t.elapsed() > Duration::from_secs(20)) {
+            self.last_sched = Some(Instant::now());
+            let follow = !self.cfg.schedule_only_away || self.away;
+            let slot = crate::schedule::active(&self.cfg.schedule, crate::depot::now_s()).map(|(i, s)| (i, s.clone()));
+            let idle = self.quiet() && self.cq.is_none() && self.search.is_none() && self.peer.is_none() && self.qsy.is_none();
+            match slot {
+                Some((i, sl)) if follow => {
+                    let hz = sl.khz * 1000.0;
+                    if idle && (self.dial() - hz).abs() > 50.0 {
+                        self.tune(hz).await?;
+                        self.log(format!("🗓 Schedule: listening on {:.3} kHz ({}–{} UTC, {}){}", hz / 1e3, sl.from, sl.to, sl.days.label(), if sl.beacon { ", with Station ID" } else { "" }));
+                    }
+                    self.sched_slot = Some(i);
+                    self.set(|g| g.schedule_now = Some(format!("{:.3} kHz until {} UTC{}", hz / 1e3, sl.to, if sl.beacon { " · Station ID" } else { "" })));
+                }
+                _ => {
+                    self.sched_slot = None;
+                    self.set(|g| g.schedule_now = None);
+                }
+            }
+        } else if !self.cfg.schedule_on && self.sched_slot.is_some() {
+            self.sched_slot = None;
+            self.set(|g| g.schedule_now = None);
+        }
+        let sched_beacon = self.sched_slot.and_then(|i| self.cfg.schedule.get(i)).is_some_and(|s| s.beacon);
         // Station ID beacon, when due and the band is quiet.
-        if self.cfg.beacon
+        if (self.cfg.beacon || sched_beacon)
             && self.last_beacon.elapsed() > Duration::from_secs_f64(self.cfg.beacon_minutes.max(10.0) * 60.0)
             && self.quiet()
             && self.cq.is_none()
@@ -2785,6 +3033,57 @@ impl Station {
             self.set(|g| g.whistle = Some(WhistleSeen { at: Instant::now(), dial_hz: dial, offset_hz: d.offset_hz, score: d.score }));
         }
     }
+}
+
+/// May a link move from `home` to `hz`? (Settings → QSY requests.)
+pub fn qsy_verdict(cfg: &Config, home: f64, hz: f64) -> Result<(), String> {
+    if !cfg.accept_qsy {
+        return Err("QSY requests are turned off here".into());
+    }
+    let here = bandplan::band_of(home);
+    let Some(there) = bandplan::band_of(hz) else { return Err("not an amateur band I can use".into()) };
+    if cfg.qsy_same_band {
+        if Some(there) != here {
+            return Err(format!("I only QSY within {}", here.unwrap_or("this band")));
+        }
+    } else if !cfg.qsy_bands.iter().any(|b| b == there) {
+        return Err(format!("{there} isn't one of my QSY bands"));
+    }
+    if cfg.qsy_max_khz > 0.0 && (hz - home).abs() > cfg.qsy_max_khz * 1000.0 {
+        return Err(format!("more than {:.0} kHz from here", cfg.qsy_max_khz));
+    }
+    if cfg.qsy_segments_only && !cfg.segments.iter().any(|s| hz + 300.0 >= s.lo_hz && hz + 2700.0 <= s.hi_hz) {
+        return Err("outside my digital segments".into());
+    }
+    Ok(())
+}
+
+fn library_root(cfg: &Config, away: bool) -> Result<PathBuf, String> {
+    if !cfg.share_library || cfg.library_dir.trim().is_empty() {
+        return Err("there's no file library here".into());
+    }
+    if cfg.library_only_away && !away {
+        return Err("the library is open only while I'm away".into());
+    }
+    Ok(PathBuf::from(cfg.library_dir.trim()))
+}
+
+/// The answer to a library listing request, by the settings.
+pub fn library_answer(cfg: &Config, away: bool, id: u64, path: &str) -> Link {
+    let (entries, note) = match library_root(cfg, away) {
+        Ok(root) => match crate::library::list(&root, path) {
+            Ok(e) => (e, String::new()),
+            Err(e) => (vec![], e.to_string()),
+        },
+        Err(n) => (vec![], n),
+    };
+    Link::ListAns { id, path: path.to_string(), entries, note }
+}
+
+/// A library file to send, by the settings (or why not).
+pub fn library_file(cfg: &Config, away: bool, path: &str) -> anyhow::Result<(String, Vec<u8>)> {
+    let root = library_root(cfg, away).map_err(|e| anyhow::anyhow!(e))?;
+    crate::library::read(&root, path, (cfg.library_max_mb.max(0.0) * 1_048_576.0) as u64)
 }
 
 /// How to show the modem's VERSION reply.
@@ -3062,6 +3361,118 @@ mod tests {
         assert_eq!(ask("t"), "1");
         wait("PTT seen by Whistlestop", 10, &|s| s.rig.ptt);
         assert_eq!(ask("T 0"), "RPRT 0");
+        h.send(Cmd::Stop);
+    }
+
+    fn demo_station(call: &str, f: impl FnOnce(&mut Config)) -> (Handle, impl Fn(&Handle, &str, u64, &dyn Fn(&State) -> bool)) {
+        let h = spawn(|| {});
+        let mut cfg = Config { demo: true, demo_real_mercury: false, callsign: call.into(), ..Default::default() };
+        cfg.sdr.enabled = false;
+        cfg.whistle_watch = false;
+        cfg.download_dir = std::env::temp_dir().join(format!("ws-dl-{}-{call}", std::process::id()));
+        f(&mut cfg);
+        h.send(Cmd::Start(cfg));
+        let wait = |h: &Handle, what: &str, secs: u64, f: &dyn Fn(&State) -> bool| {
+            let t = Instant::now();
+            while t.elapsed() < Duration::from_secs(secs) {
+                if f(&h.state.lock().unwrap()) {
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            let g = h.state.lock().unwrap();
+            let log: Vec<_> = g.log.iter().map(|l| l.1.clone()).collect();
+            panic!("timed out waiting for {what}; log:\n{}", log.join("\n"));
+        };
+        (h, wait)
+    }
+
+    /// QSY by request: K7BOT agrees, the radio moves, and goes home when
+    /// the link ends; a QSY off 20 m is declined with K7BOT's reason.
+    #[test]
+    fn demo_qsy_there_and_back() {
+        let (h, wait) = demo_station("N0QSY", |_| {});
+        wait(&h, "Mercury", 10, &|s| s.mercury_ok);
+        let home = h.state.lock().unwrap().rig.freq_hz;
+        h.send(Cmd::Connect("K7BOT".into()));
+        wait(&h, "link", 30, &|s| s.link.is_some());
+        h.send(Cmd::Qsy(7_105_000.0));
+        wait(&h, "refusal", 30, &|s| s.chat.iter().any(|c| c.text.contains("declined the QSY") && c.text.contains("stays on 20 m")));
+        h.send(Cmd::Qsy(14_106_500.0));
+        wait(&h, "moved", 30, &|s| s.rig.freq_hz == 14_106_500.0 && s.qsy.as_ref().is_some_and(|q| q.home_hz == home));
+        h.send(Cmd::Disconnect);
+        wait(&h, "home again", 30, &|s| s.link.is_none() && s.rig.freq_hz == home && s.qsy.is_none());
+        h.send(Cmd::Stop);
+    }
+
+    /// The library: browse K7BOT's, fetch a file, and it's accepted and
+    /// saved without asking (we asked for it).
+    #[test]
+    fn demo_library_browse_and_fetch() {
+        let (h, wait) = demo_station("N0LIB", |_| {});
+        wait(&h, "Mercury", 10, &|s| s.mercury_ok);
+        h.send(Cmd::Connect("K7BOT".into()));
+        wait(&h, "link", 30, &|s| s.link.is_some());
+        h.send(Cmd::LibList(String::new()));
+        wait(&h, "listing", 30, &|s| s.library.as_ref().is_some_and(|l| l.entries.iter().any(|e| e.name == "k7bot-qsl.txt")));
+        h.send(Cmd::LibFetch("k7bot-qsl.txt".into()));
+        wait(&h, "file saved", 60, &|s| s.transfers.iter().any(|t| t.dir == Dir::In && t.name == "k7bot-qsl.txt" && matches!(t.state, XferState::Done(_))));
+        h.send(Cmd::LibFetch("nope.bin".into()));
+        wait(&h, "refusal", 30, &|s| s.chat.iter().any(|c| c.text.contains("couldn't send that: no such file")));
+        h.send(Cmd::Stop);
+    }
+
+    /// Our library, served: listing, sandboxing and size limit, by policy.
+    #[test]
+    fn library_policy() {
+        let dir = std::env::temp_dir().join(format!("ws-libsrv-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("small.txt"), "hi").unwrap();
+        std::fs::write(dir.join("big.bin"), vec![0u8; 3 * 1_048_576]).unwrap();
+        let mut cfg = Config { share_library: true, library_dir: dir.to_string_lossy().into(), library_max_mb: 1.0, ..Default::default() };
+        match library_answer(&cfg, false, 1, "") {
+            Link::ListAns { entries, note, .. } => assert!(note.is_empty() && entries.len() == 2, "{note} {entries:?}"),
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(library_file(&cfg, false, "small.txt").unwrap().1, b"hi");
+        assert!(library_file(&cfg, false, "big.bin").unwrap_err().to_string().contains("too big"));
+        assert!(library_file(&cfg, false, "../etc/passwd").is_err());
+        cfg.library_only_away = true;
+        assert!(library_file(&cfg, false, "small.txt").unwrap_err().to_string().contains("only while"));
+        assert!(library_file(&cfg, true, "small.txt").is_ok());
+        cfg.share_library = false;
+        assert!(library_file(&cfg, true, "small.txt").is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// QSY rules: off by default; same band, distance, bands, segments.
+    #[test]
+    fn qsy_policy() {
+        let home = 14_103_000.0;
+        let mut c = Config::default();
+        assert!(qsy_verdict(&c, home, 14_105_000.0).unwrap_err().contains("turned off"));
+        c.accept_qsy = true;
+        assert!(qsy_verdict(&c, home, 14_105_000.0).is_ok());
+        assert!(qsy_verdict(&c, home, 7_102_000.0).unwrap_err().contains("only QSY within 20m"));
+        assert!(qsy_verdict(&c, home, 14_200_000.0).unwrap_err().contains("kHz from here"));
+        c.qsy_same_band = false;
+        assert!(qsy_verdict(&c, home, 7_102_000.0).unwrap_err().contains("kHz from here"));
+        c.qsy_max_khz = 0.0;
+        assert!(qsy_verdict(&c, home, 7_102_000.0).is_ok(), "{:?}", qsy_verdict(&c, home, 7_102_000.0));
+        assert!(qsy_verdict(&c, home, 28_120_000.0).unwrap_err().contains("isn't one of my QSY bands"));
+        assert!(qsy_verdict(&c, home, 14_090_000.0).unwrap_err().contains("outside my digital segments"));
+    }
+
+    /// The schedule tunes the radio to the slot that's on now.
+    #[test]
+    fn demo_schedule_tunes_the_radio() {
+        let (h, wait) = demo_station("N0SKD", |c| {
+            c.schedule_on = true;
+            c.schedule_only_away = false;
+            c.schedule = vec![crate::schedule::Slot { from: "00:00".into(), to: "00:00".into(), khz: 14_108.5, ..Default::default() }];
+        });
+        wait(&h, "scheduled frequency", 30, &|s| s.rig.freq_hz == 14_108_500.0 && s.schedule_now.is_some());
         h.send(Cmd::Stop);
     }
 

@@ -543,6 +543,57 @@ impl Bench {
         self.update(&self.a, |c| c.auto_collect = false);
     }
 
+    /// Scan speed: BRAVO scans the 20 m segment (from a different start
+    /// each time); ALPHA calls CQ once. How long until BRAVO is locked on
+    /// within Mercury's ±55 Hz, and does it ever pass ALPHA over?
+    fn s_scan(&mut self) {
+        self.disconnect_both();
+        let w = Config::default().whistle_s;
+        let base = self.ether.channel.lock().unwrap().noise_dbfs;
+        for (label, extra_db) in [("normal", 0.0), ("weak", 22.0), ("very weak", 28.0)] {
+            self.ether.channel.lock().unwrap().noise_dbfs = base + extra_db;
+            println!("   scan test ({label}): {}", self.snr_note());
+            let mut times: Vec<f64> = vec![];
+            let trials = 4;
+            for trial in 0..trials {
+                self.a.send(Cmd::StopCq);
+                self.b.send(Cmd::StopSearch);
+                self.update(&self.a, |c| {
+                    c.whistle_s = w;
+                    c.cq_cycles = 1;
+                });
+                self.update(&self.b, |c| c.auto_answer = false);
+                self.b.send(Cmd::SetFreq(14_096_000.0 + 2300.0 * trial as f64));
+                std::thread::sleep(Duration::from_secs(2));
+                self.b.send(Cmd::StartSearch(SearchScope::CurrentBand));
+                std::thread::sleep(Duration::from_millis(800 + 1700 * trial as u64));
+                let mark = self.st(&self.b).log.len();
+                self.a.send(Cmd::CallCq { table: None });
+                let t = self.wait(w + 25.0, |_, b| b.log.iter().skip(mark).any(|l| l.1.starts_with("Locked on")) && (b.rig.freq_hz - A_DIAL).abs() <= 55.0);
+                if let Some(t) = t {
+                    times.push(t.as_secs_f64());
+                }
+                println!("     trial {trial}: {}", t.map(|d| format!("locked {:.1} s after the whistle began", d.as_secs_f64())).unwrap_or("missed".into()));
+                self.a.send(Cmd::StopCq);
+                self.b.send(Cmd::StopSearch);
+                std::thread::sleep(Duration::from_secs(3));
+            }
+            times.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            let med = times.get(times.len() / 2).copied();
+            self.record(
+                &format!("scan speed, {label} signal"),
+                times.len() == trials,
+                format!(
+                    "found {}/{trials} within one {w:.0} s whistle; median {} (times {:?})",
+                    times.len(),
+                    med.map(|m| format!("{m:.1} s")).unwrap_or("—".into()),
+                    times.iter().map(|t| (t * 10.0).round() / 10.0).collect::<Vec<_>>()
+                ),
+            );
+        }
+        self.ether.channel.lock().unwrap().noise_dbfs = base;
+    }
+
     fn report(&self) -> String {
         let mut s = String::from("# Whistlestop two-station bench (real Mercury 1.9.23 ×2)\n\n");
         s += &format!("Run time {:.0} s. {}\n\n| Result | Test | Details |\n|---|---|---|\n", self.started.elapsed().as_secs_f64(), self.snr_note());
@@ -597,6 +648,9 @@ pub fn main() -> anyhow::Result<()> {
     }
     if run("weak") {
         b.s_weak();
+    }
+    if run("scan") {
+        b.s_scan();
     }
     if run("e2e") {
         b.s_e2e();

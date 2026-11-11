@@ -8,11 +8,13 @@ pub mod engine;
 #[cfg(unix)]
 pub mod ether;
 pub mod fake_mercury;
+pub mod library;
 pub mod modes;
 pub mod protocol;
 pub mod realdemo;
 pub mod rig;
 pub mod rigsetup;
+pub mod schedule;
 pub mod sdr;
 pub mod tnc;
 pub mod whistle;

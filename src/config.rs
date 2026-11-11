@@ -98,6 +98,36 @@ pub struct Config {
     pub auto_in_segments_only: bool,
     /// Carry Depot mail for other stations (store and forward).
     pub relay: bool,
+
+    /// QSY: let a linked station move the link to another frequency (both
+    /// stations go home when the link ends). Off by default.
+    pub accept_qsy: bool,
+    /// Only within the band you're on.
+    pub qsy_same_band: bool,
+    /// Bands a QSY may go to (when not same-band-only).
+    pub qsy_bands: Vec<String>,
+    /// At most this far from where you were, kHz (0 = anywhere allowed).
+    pub qsy_max_khz: f64,
+    /// Only inside the configured digital segments.
+    pub qsy_segments_only: bool,
+    /// If SWR stays high after a QSY (and tuning, when auto-tune is on),
+    /// end the link so both go home.
+    pub qsy_swr_home: bool,
+
+    /// File library: a folder linked stations may browse and download from.
+    pub share_library: bool,
+    pub library_dir: String,
+    /// Only while you're away.
+    pub library_only_away: bool,
+    /// Largest file sent from the library, MB.
+    pub library_max_mb: f64,
+
+    /// The schedule: where to listen (and beacon) at different times of
+    /// day, UTC.
+    pub schedule_on: bool,
+    /// Follow it only while you're away.
+    pub schedule_only_away: bool,
+    pub schedule: Vec<crate::schedule::Slot>,
 }
 
 impl Default for Config {
@@ -148,6 +178,19 @@ impl Default for Config {
             auto_collect: false,
             auto_in_segments_only: true,
             relay: false,
+            accept_qsy: false,
+            qsy_same_band: true,
+            qsy_bands: vec!["40m".into(), "30m".into(), "20m".into()],
+            qsy_max_khz: 50.0,
+            qsy_segments_only: true,
+            qsy_swr_home: true,
+            share_library: false,
+            library_dir: String::new(),
+            library_only_away: false,
+            library_max_mb: 5.0,
+            schedule_on: false,
+            schedule_only_away: true,
+            schedule: vec![],
         }
     }
 }

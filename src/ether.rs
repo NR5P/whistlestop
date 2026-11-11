@@ -223,7 +223,10 @@ fn hilbert_taps(n: usize) -> Vec<f64> {
     (0..n)
         .map(|i| {
             let k = i as i64 - m;
-            let w = 0.54 - 0.46 * (2.0 * PI * i as f64 / (n - 1) as f64).cos();
+            // Blackman window: the image of the opposite sideband stays
+            // ~70 dB down, as in a real receiver.
+            let x = 2.0 * PI * i as f64 / (n - 1) as f64;
+            let w = 0.42 - 0.5 * x.cos() + 0.08 * (2.0 * x).cos();
             if k % 2 == 0 { 0.0 } else { 2.0 / (PI * k as f64) * w }
         })
         .collect()
@@ -259,19 +262,52 @@ impl Fir {
     }
 }
 
+/// Complex streaming FIR (for the receiver's one-sided passband).
+struct CFir {
+    re: Vec<f64>,
+    im: Vec<f64>,
+    hist: VecDeque<(f64, f64)>,
+}
+
+impl CFir {
+    /// Passes +300…+2700 Hz only: a 1200 Hz low-pass moved up to 1500 Hz.
+    /// Like a real USB receiver it rejects the opposite sideband, and the
+    /// fold-over of anything shifted past the top of the band.
+    fn usb_passband() -> Self {
+        let lp = bandpass_taps(127, 0.0, 1200.0);
+        let m = (lp.len() - 1) as f64 / 2.0;
+        let (re, im) = lp.iter().enumerate().map(|(i, h)| {
+            let ph = 2.0 * PI * 1500.0 * (i as f64 - m) / FS;
+            (h * ph.cos(), h * ph.sin())
+        }).unzip();
+        Self { re, im, hist: VecDeque::from(vec![(0.0, 0.0); 127]) }
+    }
+    fn step(&mut self, x: (f64, f64)) -> (f64, f64) {
+        self.hist.pop_front();
+        self.hist.push_back(x);
+        let (mut a, mut b) = (0.0, 0.0);
+        for ((xr, xi), (hr, hi)) in self.hist.iter().zip(self.re.iter().rev().zip(self.im.iter().rev())) {
+            a += xr * hr - xi * hi;
+            b += xr * hi + xi * hr;
+        }
+        (a, b)
+    }
+}
+
 /// One transmitter as heard by one receiver: frequency-shifted by `delta`.
 struct Path {
     hilbert: Fir,
     delay: VecDeque<f64>,
     phase: f64,
     fade_phase: f64,
+    rx: CFir,
 }
 
-const HILBERT_N: usize = 127;
+const HILBERT_N: usize = 511;
 
 impl Path {
     fn new(seed: f64) -> Self {
-        Self { hilbert: Fir::new(hilbert_taps(HILBERT_N)), delay: VecDeque::from(vec![0.0; HILBERT_N / 2]), phase: 0.0, fade_phase: seed }
+        Self { hilbert: Fir::new(hilbert_taps(HILBERT_N)), delay: VecDeque::from(vec![0.0; HILBERT_N / 2]), phase: 0.0, fade_phase: seed, rx: CFir::usb_passband() }
     }
     fn process(&mut self, x: &[f64], delta_hz: f64, gain: f64, fading: f64, out: &mut [f64]) {
         let dphi = 2.0 * PI * delta_hz / FS;
@@ -279,8 +315,10 @@ impl Path {
             let q = self.hilbert.step(v);
             self.delay.push_back(v);
             let i = self.delay.pop_front().unwrap();
-            // Analytic (i + jq) shifted by delta: real part of (i+jq)e^{jphi}.
-            let s = i * self.phase.cos() - q * self.phase.sin();
+            // Analytic (i + jq) shifted by delta, then the receiver's
+            // one-sided passband; the real part is what the speaker hears.
+            let (c, sn) = (self.phase.cos(), self.phase.sin());
+            let s = self.rx.step((i * c - q * sn, i * sn + q * c)).0;
             self.phase = (self.phase + dphi) % (2.0 * PI);
             self.fade_phase += 2.0 * PI * 0.11 / FS;
             let fade = 1.0 - fading * 0.5 * (1.0 + (self.fade_phase.sin() * (0.37 * self.fade_phase).cos()));
@@ -474,5 +512,47 @@ mod tests {
             }
         }
         assert!((best.0 - 1400.0).abs() <= 10.0, "{}", best.0);
+    }
+
+    #[test]
+    fn opposite_sideband_and_fold_over_are_rejected() {
+        // Like a real USB receiver: a station 2600 Hz below the dial (in the
+        // opposite sideband) and one 3450 Hz above (past the top of the
+        // audio band) are not heard; one 400 Hz above is.
+        let x: Vec<f64> = (0..8000).map(|i| (2.0 * PI * 1500.0 * i as f64 / FS).sin()).collect();
+        let rms = |delta: f64| {
+            let mut p = Path::new(0.0);
+            let mut y = vec![0.0; 8000];
+            p.process(&x, delta, 1.0, 0.0, &mut y);
+            (y[1000..].iter().map(|v| v * v).sum::<f64>() / 7000.0).sqrt()
+        };
+        let heard = rms(400.0);
+        assert!(heard > 0.5, "{heard}");
+        assert!(rms(-2600.0) < 0.02 * heard, "opposite sideband leaked: {}", rms(-2600.0));
+        assert!(rms(3450.0) < 0.02 * heard, "fold-over leaked: {}", rms(3450.0));
+    }
+
+    #[test]
+    fn mirror_image_is_far_down() {
+        // A strong 1500 Hz tone shifted 3450 Hz up must not leave a mirror
+        // image at 3450 − 1500 = 1950 Hz (a receiver's image rejection).
+        let x: Vec<f64> = (0..16000).map(|i| (2.0 * PI * 1500.0 * i as f64 / FS).sin()).collect();
+        let level = |delta: f64, f: f64| {
+            let mut p = Path::new(0.0);
+            let mut y = vec![0.0; x.len()];
+            p.process(&x, delta, 1.0, 0.0, &mut y);
+            let y = &y[2000..];
+            let (mut re, mut im) = (0.0, 0.0);
+            for (k, v) in y.iter().enumerate() {
+                let ph = 2.0 * PI * f * k as f64 / FS;
+                re += v * ph.cos();
+                im += v * ph.sin();
+            }
+            (re * re + im * im).sqrt() / y.len() as f64
+        };
+        let wanted = level(400.0, 1900.0);
+        let image = level(3450.0, 1950.0);
+        let db = 20.0 * (image / wanted).log10();
+        assert!(db < -65.0, "image only {db:.1} dB down");
     }
 }

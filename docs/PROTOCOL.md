@@ -61,6 +61,14 @@ body   := type(u8) fields...
 | `0x0B` | KEYC | `u8 suite`, `hash32 commit` | Encryption only: commitment to this link's public key. |
 | `0x0C` | KEYX | `u8 suite`, `32 bytes pubkey` | Encryption only: the public key, sent after the peer's KEYC arrives. |
 | `0x0D` | SEALED | `ciphertext + 16-byte tag` (rest of body) | Encryption only: one encrypted inner packet. |
+| `0x0E` | MAIL | `uv id`, `str from`, `str to`, `uv created`, `u8 hops`, `str text` | Depot mail, handed over when linked. `to` = this station: it goes to Arrivals; otherwise (relaying on) In Transit. `hops` counts relays (at most 3). |
+| `0x0F` | MAILACK | `uv id` | Mail `id` is safely stored; the sender moves it to Delivered. |
+| `0x20` | QSY | `uv id`, `uv dial_hz`, `str why` | "Let's both move to `dial_hz`." The other station decides by its own rules. |
+| `0x21` | QSYANS | `uv id`, `u8 accept`, `str reason` | The answer. When accepted, the asker moves 3 s after it arrives and the answerer once Mercury has sent everything (plus 2 s). Both return to where they were when the link ends. |
+| `0x22` | LIST | `uv id`, `str path` | "What's in your library at `path`?" (`""` = the top). |
+| `0x23` | LISTANS | `uv id`, `str path`, `str note`, `uv n`, n × (`str name`, `uv size`, `u8 dir`) | The listing (at most 200 entries), or none and why in `note`. |
+| `0x24` | FETCH | `uv id`, `str path` | "Please send me this library file." |
+| `0x25` | FETCHANS | `uv id`, `u8 ok`, `str reason` | Refused (with `reason`), or OK: an OFFER with `fid = id` follows, which the asker accepts automatically. |
 
 **Scheduling.** The sender keeps at most `2 × 1024` bytes of CHUNKs inside
 Mercury's TX buffer (it watches Mercury's `BUFFER` reports), and nothing else
@@ -186,6 +194,8 @@ frame := 0x57 type(u8) uv(table) call(from) fields...
 | `0x14` | AGAIN | `call of`, `uv id`, `uv missing` | Please resend the parts of `of`'s message `id` in the bitmap `missing` (bit n = part n+1). |
 | `0x15` | FLOOR | `call to` | Pass the talking stick to `to`. Holding it is a courtesy, not a lock. |
 | `0x16` | LEAVE | — | Leaving the table. |
+| `0x17` | BEACON | `str grid`, `u8 away`, `uv n`, n × `call` | Station ID: grid, whether the station is away, and the calls it holds mail for (as many as fit). No whistle. |
+| `0x18` | NOTICE | `call to`, `u8 count` | "I have `count` messages for `to`: connect to me." |
 
 **Speed ramp-up.** The host keeps the lowest `snr_of_host` reported in the
 last 5 minutes. It moves the table to the fastest mode, within the chosen

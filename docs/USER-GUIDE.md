@@ -120,7 +120,9 @@ From top to bottom:
 
 ### What it is
 
-Every Whistlestop CQ starts with the **whistle**: a train of chirp pairs. An **UP** chirp sweeps from 500 to 2500 Hz in half a second, then a **DOWN** chirp sweeps back, again and again. On a speaker it sounds like "whee-ooo, whee-ooo". Each chirp fades in and out over 10 ms, so there are no clicks or splatter.
+Every Whistlestop CQ starts with the **whistle**: a train of chirp pairs. An **UP** chirp sweeps from 1000 to 2000 Hz in 0.2 s, then a **DOWN** chirp sweeps back, again and again, two and a half times a second. On a speaker it sounds like a quick "wee-oo-wee-oo". Each chirp fades in and out over 10 ms, so there are no clicks or splatter.
+
+This is **whistle v2**. Its shape was chosen by a study of ten candidate signals: fast and slow chirps, narrow warbles, steady tones, tone pulses and FT8-style Costas patterns, all on a simulated fading HF path in a busy band (`docs/WHISTLE-LAB.md`). The winning design repeats quickly enough to be caught whole in a half-second listen, and is half as wide as the first whistle.
 
 ### Why it exists
 
@@ -128,29 +130,29 @@ Mercury's digital CQ is very robust, but a receiver must be tuned within **±55 
 
 The whistle fixes that:
 
-- **It can be found far off frequency.** A receiver matching against a perfect copy of the chirps still finds the whistle when it is tuned up to about **±1000 Hz** away. The sweep simply arrives at a different pitch, and part of it stays inside the radio's passband.
-- **It measures its own offset.** If the receiver is tuned off, the UP chirp's match comes slightly *early* and the DOWN chirp's slightly *late*, by the same amount. The time between them gives the frequency error to **under 1 Hz**, so the searching station retunes straight onto the caller, well inside Mercury's ±55 Hz window. Radio drift is corrected automatically, because the measurement includes it.
-- **It is distinctive.** The detector requires UP and DOWN matches that agree with each other, so carriers, FT8, noise and data bursts don't trigger it.
+- **It can be found far off frequency, fast.** A scanning station looks for the sweep's track in a short-frame spectrogram, at every timing and every offset up to about **±1100 Hz**, adding up the energy along it. This needs only half a second of audio, copes with fading, and gives a coarse offset (to a few hertz) that is never ambiguous: the UP and DOWN legs only line up at the true offset.
+- **It measures its own offset precisely.** Once retuned close, matched filters on the UP and DOWN chirps finish the job. If the receiver is tuned off, the UP chirp's match comes slightly *early* and the DOWN chirp's slightly *late*, by the same amount, and the time between them gives the error to **about 1 Hz**. The searching station ends up well inside Mercury's ±55 Hz window. Radio drift is corrected automatically, because the measurement includes it.
+- **It is distinctive.** Both detectors need UP and DOWN together. The scan detector levels away anything that sits in one frequency more than a quarter of the time (carriers, RTTY, FT8, modems). Steady tones and data bursts don't trigger it: on a simulated busy band, only 1 % of empty half-second listens score high enough to stop.
 
 ### Profiles
 
 | Profile | Sweep | Finds callers up to | Use |
 |---|---|---|---|
-| Wide (default) | 500–2500 Hz | ±1000 Hz away | normal 2.4 kHz filters |
+| Wide (default) | 1000–2000 Hz | ±1100 Hz away | normal 2.4 kHz filters |
 | Narrow | 1250–1750 Hz | ±250 Hz away | 500 Hz filters; chosen automatically for bandwidths below 1.7 kHz |
 
 Callers and searchers must use the same profile: both follow the **Bandwidth** setting.
 
 ### Hearing it
 
-`docs/whistle-demo.wav` and the files in `demo-sounds/` let you hear the whistle and a whole CQ, clean and as heard on the air. Make your own with `whistlestop cq-demo demo-sounds --whistle 24`.
+`docs/whistle-demo.wav` and the files in `demo-sounds/` let you hear the whistle and a whole CQ, clean and as heard on the air. Make your own with `whistlestop cq-demo demo-sounds --whistle 10`.
 
 ## Calling CQ
 
 The **Call CQ** card:
 
 - **Chat (1:1)** or **Roundtable**: what you're calling for. A Roundtable CQ invites anyone to join a group on your frequency; type the table's name.
-- **Whistle**: how long the whistle lasts (6–60 s, default **24 s**). It should be at least as long as one full pass of the searching stations, about 24 s for the 20 m segment. Longer whistles reach more searchers but occupy the frequency longer.
+- **Whistle**: how long the whistle lasts (4–60 s, default **10 s**). It should be at least as long as one full pass of the searching stations, about 6–8 s for the 20 m segment. Longer whistles reach slower searchers (or ones with longer dwells) but occupy the frequency longer.
 - **Call CQ** starts the cycle:
   1. Whistlestop keys the radio and plays the whistle.
   2. Mercury sends its **CQFRAME**, a 3-second digital burst carrying your callsign. This is your station identification.
@@ -174,9 +176,17 @@ There are three ways to find a calling station: searching with your one radio, t
 - **All bands**: every configured segment, band after band. A pass takes much longer, so callers would need very long whistles: use it for monitoring.
 - **Search band** with the band list: one chosen band.
 
-On each channel the radio settles (0.15 s), listens for **2.2 s**, and checks for a whistle. Channels are **1800 Hz** apart, so every caller in the segment is within the ±1000 Hz capture of some channel. A 20 m pass covers 10 channels in about 24 s. If something whistle-like is heard but not a full UP/DOWN pair yet, the search **holds** for 1.5 s more.
+On each channel the radio settles (0.15 s), listens for **0.5 s**, and checks for a whistle. Channels are **2000 Hz** apart, so every caller in the segment is within ±1100 Hz of some channel. A 20 m pass takes about 6–8 s.
 
-When it finds a whistle it **retunes** by the measured offset, **verifies** on the new frequency (and fine-tunes), then **waits up to 45 s for the CQ**. If the first measurement could be an alias (a caller more than 1000 Hz away shows up 2000 Hz off on the other side), the search checks the alternative frequency too. When Mercury decodes the caller's CQFRAME, the call appears under **Heard**. With **Answer automatically** ticked, Whistlestop connects at once.
+Listening is in two stages, the way military ALE scanners pause on a promising channel:
+
+- If the half-second clearly holds a whistle, the search stops there.
+- If it holds a hint of one (about 15 % of empty channels do, and almost every real whistle), the search **listens longer**, up to 2 s, and decides on that.
+- Otherwise it moves on. Fast where nothing is there, patient where something might be.
+
+When it finds a whistle it **retunes** by the coarse offset, **measures** the whistle precisely on the new frequency (three patterns, 1.2 s) and fine-tunes, then **waits up to 45 s for the CQ**. When Mercury decodes the caller's CQFRAME, the call appears under **Heard**. With **Answer automatically** ticked, Whistlestop connects at once.
+
+On the simulation, a half-second listen catches 86–88 % of whistles at −10 dB SNR (in 2500 Hz) on the first look and 98 % at −5 dB. Weaker than about −10 dB, Mercury itself struggles to link.
 
 ### Whistle watch (parked)
 
@@ -184,7 +194,7 @@ Even when you're not searching, Whistlestop listens for whistles on the frequenc
 
 ### Wide search (RTL-SDR)
 
-With an RTL-SDR running, tick **Wide search (SDR)** in the Search card. The SDR's wide view is split into virtual receivers every 1.8 kHz across the band's digital segment (10 on 20 m), and the whistle detector runs on all of them every second. A whistle anywhere in the segment is found within about 1.5 s, without moving your radio.
+With an RTL-SDR running, tick **Wide search (SDR)** in the Search card. The SDR's wide view is split into virtual receivers every 900 Hz across the band's digital segment, and the whistle detector runs on all of them every second. A whistle anywhere in the segment is found within about 1.5 s, without moving your radio.
 
 - Hits appear under **Heard** with an **SDR** tag and a **Lock on** button, and as a 🚂 box on the wide waterfall.
 - **auto-tune**: tune the radio to new hits by itself (when you're not linked, calling or searching).
@@ -304,6 +314,64 @@ Every automatic transmission is written to the Log (🤖 and 📣 lines), so you
 With **Carry mail for other stations** on (off by default), your Depot accepts mail addressed to someone else: a station that links with you can hand you mail for a third station, and you carry it in **In Transit** until you link with (or, while away, hear) that station. It's then delivered like your own mail and moves to Delivered with the callsign that took it. With relaying off, such mail is declined (logged) and stays with the sender.
 
 Loop guards: each message carries a hop count, and a message is relayed at most **3** times; a message you've already carried or delivered is never taken twice. Your Station ID and notices include the calls you're carrying mail for, so their owners can come and collect it.
+
+## QSY (moving a link)
+
+Once linked, either station can ask to **move the link** to another frequency, to get off a busy channel or to make room for a long transfer. On the link card, type a frequency in **↔ Move this link to** (kHz) and press **Ask**.
+
+- The other station decides by **its own rules** (below) and answers.
+- If it agrees, both stations retune a moment later. The answer has crossed by then, and Mercury's ARQ resends anything lost in the gap. The link carries on at the new frequency.
+- The link card shows "on … with …, back to … when the link ends". When the link ends, for any reason, **both stations go back** to where they were.
+- If it refuses, you see why ("I only QSY within 20m", "outside my digital segments"…).
+
+**Your rules** (Settings → QSY requests, **off by default**):
+
+| Setting | What it does | Default |
+|---|---|---|
+| Accept QSY requests | Agree to requests that meet the rules below | off |
+| Only within the band I'm on | Never leave the current band (where you know the antenna works) | on |
+| Bands | With the above off: which bands a QSY may go to | 40, 30, 20 m |
+| At most … kHz | How far from where you were (0 = anywhere allowed) | 50 kHz |
+| Only inside the digital segments | Only where your configured segments say data is allowed (legal for an unattended station) | on |
+| If SWR stays high there, end the link | A bad SWR sends both stations home | on |
+
+**SWR and the tuner.** Whistlestop watches SWR on every transmission. After a QSY:
+- if SWR is high and **auto-tune** is on (Radio Controls), the antenna tuner runs once at the new frequency;
+- if SWR is still high (or there's no tuner and the rule is on), Whistlestop says why, ends the link, and both stations go home.
+
+Auto-tune stays **off by default**: with it off, a high SWR after a QSY simply ends the link.
+
+## File library
+
+Share a folder of files that linked stations can browse and download, even while you're away.
+
+**Sharing** (Settings → File library, **off by default**):
+
+- **Share a file library**, and **Folder** (Choose…): the folder others may see. Put only files you're happy to share in it.
+- Nothing outside the folder can be reached: no `..`, no absolute paths, no hidden files (names starting with `.`), and no links that lead outside it.
+- **Only while I'm away**: open it only while you're Away.
+- **Largest file** (default 5 MB): bigger files are listed but refused. At a few hundred bytes a second, a big file ties up the frequency for a long time.
+- Each browse and download is noted in the Log.
+
+**Downloading** from someone else's library: when linked, the **Files** tab shows **📚 Browse** for their library.
+- Folders open with **Open**, **⬆ Up** goes back, and **Download** asks for a file.
+- It comes as a normal file transfer, with a time estimate and resume after a dropped link. It's accepted automatically because you asked, and saved in your **Download folder** (Settings → Files).
+
+## Schedule
+
+The schedule moves your radio to different frequencies at different times of day, and can send Station ID while there. Use it, for example, to sit on 40 m at night and 20 m by day while you're away.
+
+Settings → Schedule (**off by default**):
+
+- **Follow the schedule**, and **Only while I'm away** (on by default, so it never moves the radio under you).
+- **+ Add a time slot**, then set:
+  - **from–to** (HH:MM, **UTC**; a slot may cross midnight, e.g. 22:00–02:00);
+  - **days** (every day, Mon–Fri, Sat–Sun);
+  - the **dial frequency** (kHz);
+  - **Station ID**: send the Station ID beacon (every *N* minutes, as set under Automation) while the slot is on.
+- The first slot in the list that is on wins. Between slots the radio stays where it is.
+- Whistlestop checks every 20 seconds, and moves only when you're not linked, calling or searching. Each move is noted in the Log (🗓).
+- Station ID follows the same segment rule as all automatic transmissions.
 
 ## Bandwidth and speed
 
@@ -518,8 +586,8 @@ Settings are saved to `~/Library/Application Support/Whistlestop/whistlestop.tom
 | rigctld port | Where Whistlestop's rigctld listens (point Mercury here) | 4532 |
 | Audio in / out | The radio's sound device | system default |
 | Wide receiver | Use an RTL-SDR; RX OUT or IF OUT; IF Hz and inversion; crystal ppm | off |
-| Dwell per channel | How long search listens on each channel | 2.2 s |
-| Channel step | Distance between search channels (capped to the whistle's capture) | 1800 Hz |
+| Dwell per channel | How long search first listens on each channel (a promising channel gets up to 2 s) | 0.5 s |
+| Channel step | Distance between search channels (capped to the whistle's reach) | 2000 Hz |
 | CQ cycles | How many whistle/CQ/listen cycles before giving up | 5 |
 | Listen after CQ | How long to wait for answers each cycle | 20 s |
 | Whistle watch | Report whistles while parked | on |
@@ -536,6 +604,9 @@ Settings are saved to `~/Library/Application Support/Whistlestop/whistlestop.tom
 | Deliver automatically while away | Connect and deliver Depot mail | off |
 | Collect automatically while away | Connect and collect mail waiting for you | off |
 | Carry mail for other stations | Store and forward (In Transit) | off |
+| Accept QSY requests (and its rules) | Let a linked station move the link (see "QSY (moving a link)") | off |
+| Share a file library / Folder / Only while away / Largest file | See "File library" | off / — / off / 5 MB |
+| Follow the schedule / Only while away / time slots | See "Schedule" | off / on / none |
 | Automatic only in the segments | Automatic transmissions only inside the automatic-control segments | on |
 | depot_file (settings file only) | Where Depot mail is kept | depot.json beside the settings |
 
@@ -605,6 +676,7 @@ Reduce audio drive until the ALC barely moves, and turn off speech processing.
 - **The whistle** is a documented, swept-tone data signal under 2.1 kHz wide (this guide and the source code document it). Use it in the data segments, keep it as short as the searchers need, and listen before calling.
 - **Encryption** is off by default and not legal on amateur bands in most countries (see Encryption).
 - **Unattended operation**: Automatic answering and auto-tune are conveniences for an operator who is present. The Away features (Station ID beacon, mail notices, automatic delivery and collection) can transmit when you're not at the radio. In the US, a station under automatic control may send data unattended in the automatic-control segments of 47 CFR 97.221(b); outside them, only narrow (500 Hz or less) replies to a station that is under local control (97.221(c)). **Automatic only in the automatic-control segments** (on by default) keeps every automatic transmission inside the configured segments; turn it off only where your rules allow. You remain responsible for your station whatever it does on its own: check the Log.
+- **QSY and the schedule** move an unattended station's frequency. Keep **Only inside the digital segments** on, and allow only bands and distances your antenna handles: a high SWR ends a QSY.
 - **Beacons**: the Station ID is a short identification and mail list sent at most every 10 minutes, never a continuous beacon. Some rules restrict beacons on HF: keep the interval long and turn it off where it isn't allowed.
 
 ## Glossary

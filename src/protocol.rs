@@ -129,6 +129,20 @@ pub const T_KEYX: u8 = 0x0C;
 pub const T_SEALED: u8 = 0x0D;
 pub const T_MAIL: u8 = 0x0E;
 pub const T_MAILACK: u8 = 0x0F;
+pub const T_QSY: u8 = 0x20;
+pub const T_QSYANS: u8 = 0x21;
+pub const T_LIST: u8 = 0x22;
+pub const T_LISTANS: u8 = 0x23;
+pub const T_FETCH: u8 = 0x24;
+pub const T_FETCHANS: u8 = 0x25;
+
+/// One entry of a station's file library listing.
+#[derive(Clone, Debug, PartialEq)]
+pub struct LibEntry {
+    pub name: String,
+    pub size: u64,
+    pub dir: bool,
+}
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Link {
@@ -155,6 +169,19 @@ pub enum Link {
     KeyX { suite: u8, pubkey: [u8; 32] },
     /// One encrypted inner link packet body (ciphertext + 16-byte tag).
     Sealed { data: Vec<u8> },
+    /// "Let's both move to `dial_hz`", optionally with a reason.
+    Qsy { id: u64, dial_hz: u64, why: String },
+    /// The answer to QSY `id`; when accepted, both stations move once this
+    /// has crossed, and both go home when the link ends.
+    QsyAnswer { id: u64, accept: bool, reason: String },
+    /// "What's in your library at `path`?" ("" is the top).
+    ListReq { id: u64, path: String },
+    /// The listing (or, with no entries, why not in `note`).
+    ListAns { id: u64, path: String, entries: Vec<LibEntry>, note: String },
+    /// "Please send me `path` from your library."
+    Fetch { id: u64, path: String },
+    /// Refused (with a reason), or OK: an OFFER with fid = `id` follows.
+    FetchAnswer { id: u64, ok: bool, reason: String },
     Unknown(u8),
 }
 
@@ -198,6 +225,27 @@ impl Link {
             }
             Link::MailAck { id } => {
                 w.u8(T_MAILACK).uv(*id);
+            }
+            Link::Qsy { id, dial_hz, why } => {
+                w.u8(T_QSY).uv(*id).uv(*dial_hz).str(why);
+            }
+            Link::QsyAnswer { id, accept, reason } => {
+                w.u8(T_QSYANS).uv(*id).u8(*accept as u8).str(reason);
+            }
+            Link::ListReq { id, path } => {
+                w.u8(T_LIST).uv(*id).str(path);
+            }
+            Link::ListAns { id, path, entries, note } => {
+                w.u8(T_LISTANS).uv(*id).str(path).str(note).uv(entries.len() as u64);
+                for e in entries {
+                    w.str(&e.name).uv(e.size).u8(e.dir as u8);
+                }
+            }
+            Link::Fetch { id, path } => {
+                w.u8(T_FETCH).uv(*id).str(path);
+            }
+            Link::FetchAnswer { id, ok, reason } => {
+                w.u8(T_FETCHANS).uv(*id).u8(*ok as u8).str(reason);
             }
             Link::KeyCommit { suite, commit } => {
                 w.u8(T_KEYC).u8(*suite).raw(commit);
@@ -245,6 +293,20 @@ impl Link {
             0x0A => Link::Bye { text: r.str()? },
             T_MAIL => Link::Mail { id: r.uv()?, from: r.str()?, to: r.str()?, created: r.uv()?, hops: r.u8()?, text: r.str()? },
             T_MAILACK => Link::MailAck { id: r.uv()? },
+            T_QSY => Link::Qsy { id: r.uv()?, dial_hz: r.uv()?, why: r.str()? },
+            T_QSYANS => Link::QsyAnswer { id: r.uv()?, accept: r.u8()? != 0, reason: r.str()? },
+            T_LIST => Link::ListReq { id: r.uv()?, path: r.str()? },
+            T_LISTANS => {
+                let (id, path, note) = (r.uv()?, r.str()?, r.str()?);
+                let n = r.uv()?.min(10_000);
+                let mut entries = vec![];
+                for _ in 0..n {
+                    entries.push(LibEntry { name: r.str()?, size: r.uv()?, dir: r.u8()? != 0 });
+                }
+                Link::ListAns { id, path, entries, note }
+            }
+            T_FETCH => Link::Fetch { id: r.uv()?, path: r.str()? },
+            T_FETCHANS => Link::FetchAnswer { id: r.uv()?, ok: r.u8()? != 0, reason: r.str()? },
             T_KEYC => Link::KeyCommit { suite: r.u8()?, commit: r.hash()? },
             T_KEYX => Link::KeyX { suite: r.u8()?, pubkey: r.hash()? },
             T_SEALED => Link::Sealed { data: r.rest().to_vec() },
@@ -705,6 +767,20 @@ mod tests {
             Link::Bye { text: "73".into() },
             Link::Mail { id: 0xDEAD_BEEF, from: "N0CALL".into(), to: "K7BOT".into(), created: 1_800_000_000, hops: 1, text: "See you on 40 m ✓".into() },
             Link::MailAck { id: 0xDEAD_BEEF },
+            Link::Qsy { id: 7, dial_hz: 14_105_250, why: "file transfer".into() },
+            Link::QsyAnswer { id: 7, accept: false, reason: "outside my allowed bands".into() },
+            Link::ListReq { id: 8, path: "maps/".into() },
+            Link::ListAns {
+                id: 8,
+                path: "maps/".into(),
+                entries: vec![
+                    LibEntry { name: "grid.png".into(), size: 48_211, dir: false },
+                    LibEntry { name: "old".into(), size: 0, dir: true },
+                ],
+                note: String::new(),
+            },
+            Link::Fetch { id: 9, path: "maps/grid.png".into() },
+            Link::FetchAnswer { id: 9, ok: true, reason: String::new() },
             Link::KeyCommit { suite: 1, commit: [3; 32] },
             Link::KeyX { suite: 1, pubkey: [4; 32] },
             Link::Sealed { data: vec![9; 40] },

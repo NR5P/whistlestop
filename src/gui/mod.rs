@@ -156,6 +156,7 @@ pub struct App {
     chat_input: String,
     table_input: String,
     connect_to: String,
+    qsy_khz: String,
     join_name: String,
     cq_table: bool,
     cq_table_name: String,
@@ -213,6 +214,7 @@ impl App {
             chat_input: String::new(),
             table_input: String::new(),
             connect_to: String::new(),
+            qsy_khz: String::new(),
             join_name: String::new(),
             cq_table: false,
             cq_table_name: "Evening Table".into(),
@@ -910,6 +912,28 @@ impl App {
                     });
                 }
             });
+            // Moving the link (QSY).
+            if let Some(l) = &s.link {
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("↔ Move this link to").color(DIM)).help(&help::L_QSY);
+                    let r = ui.add(egui::TextEdit::singleline(&mut self.qsy_khz).hint_text("kHz, e.g. 14106.5").desired_width(120.0)).help(&help::L_QSY);
+                    let ask = ui.add_enabled(s.qsy_note.is_none(), egui::Button::new("Ask")).help(&help::L_QSY).clicked() || (r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)));
+                    if ask && !self.qsy_khz.trim().is_empty() {
+                        if let Ok(k) = self.qsy_khz.trim().replace(',', ".").parse::<f64>() {
+                            let hz = if k > 100_000.0 { k } else { k * 1000.0 };
+                            self.send(Cmd::Qsy(hz));
+                            self.qsy_khz.clear();
+                        } else {
+                            self.toast("Type a frequency in kHz, e.g. 14106.5");
+                        }
+                    }
+                    if let Some(q) = &s.qsy {
+                        ui.label(RichText::new(format!("on {:.3} kHz with {} · back to {:.3} when the link ends", q.at_hz / 1e3, l.peer, q.home_hz / 1e3)).color(TEAL)).help(&help::L_QSY);
+                    } else if let Some(n) = &s.qsy_note {
+                        ui.label(RichText::new(n).color(BRASS));
+                    }
+                });
+            }
         });
     }
 
@@ -1089,6 +1113,53 @@ impl App {
     }
 
     fn files_tab(&mut self, ui: &mut Ui, s: &State) {
+        if let Some(l) = &s.link {
+            let peer = l.peer.clone();
+            card(ui, &format!("{peer}'s library"), |ui| {
+                ui.horizontal(|ui| {
+                    if ui.button("📚  Browse").help(&help::F_LIB_BROWSE).clicked() {
+                        self.send(Cmd::LibList(String::new()));
+                    }
+                    if let Some(v) = &s.library {
+                        ui.label(RichText::new(if v.path.is_empty() { "/".to_string() } else { format!("/{}", v.path.trim_matches('/')) }).monospace().color(DIM));
+                        if !v.path.trim_matches('/').is_empty() && ui.small_button("⬆ Up").help(&help::F_LIB_BROWSE).clicked() {
+                            let p = v.path.trim_matches('/');
+                            self.send(Cmd::LibList(p.rsplit_once('/').map(|x| x.0.to_string()).unwrap_or_default()));
+                        }
+                    } else {
+                        ui.label(RichText::new("See what files they offer, and download any.").color(DIM));
+                    }
+                });
+                if let Some(v) = &s.library {
+                    if !v.note.is_empty() {
+                        ui.label(RichText::new(&v.note).color(AMBER));
+                    } else if v.entries.is_empty() {
+                        ui.label(RichText::new("Empty folder.").color(DIM));
+                    }
+                    let base = v.path.trim_matches('/').to_string();
+                    egui::ScrollArea::vertical().id_salt("lib").max_height(170.0).show(ui, |ui| {
+                        for e in &v.entries {
+                            let full = if base.is_empty() { e.name.clone() } else { format!("{base}/{}", e.name) };
+                            ui.horizontal(|ui| {
+                                ui.label(if e.dir { "📁" } else { "📄" });
+                                ui.add_sized([280.0, 18.0], egui::Label::new(RichText::new(&e.name).color(TEXT)).truncate());
+                                if e.dir {
+                                    if ui.small_button("Open").help(&help::F_LIB_BROWSE).clicked() {
+                                        self.send(Cmd::LibList(full.clone()));
+                                    }
+                                } else {
+                                    ui.add_sized([70.0, 18.0], egui::Label::new(RichText::new(modes::human_bytes(e.size as usize)).monospace().color(DIM)));
+                                    if ui.small_button("Download").help(&help::F_LIB_DOWNLOAD).clicked() {
+                                        self.send(Cmd::LibFetch(full.clone()));
+                                    }
+                                }
+                            });
+                        }
+                    });
+                }
+            });
+            ui.add_space(6.0);
+        }
         card(ui, "Send files", |ui| {
             ui.horizontal(|ui| {
                 if ui.add(egui::Button::new("+  Files…").fill(BRASS.linear_multiply(0.4))).help(&help::F_FILES).clicked()
@@ -1826,6 +1897,97 @@ impl App {
                         ui.label(RichText::new("Roundtables are never encrypted. Keys are made per link and never saved.").small().color(DIM));
                     });
                     ui.add_space(6.0);
+                    card(ui, "QSY requests (off by default)", |ui| {
+                        ui.label(RichText::new("A linked station may ask to move the link to another frequency (for a long transfer, or off a busy channel). Both go back here when the link ends.").small().color(DIM));
+                        ui.checkbox(&mut c.accept_qsy, "Accept QSY requests that meet these rules").help(&help::ST_QSY_ACCEPT);
+                        ui.add_enabled_ui(c.accept_qsy, |ui| {
+                            ui.checkbox(&mut c.qsy_same_band, "Only within the band I'm on").help(&help::ST_QSY_SAME);
+                            if !c.qsy_same_band {
+                                ui.horizontal_wrapped(|ui| {
+                                    ui.label("Bands:").help(&help::ST_QSY_BANDS);
+                                    let mut bands: Vec<String> = c.segments.iter().map(|s| s.band.clone()).collect();
+                                    bands.dedup();
+                                    for b in bands {
+                                        let mut on = c.qsy_bands.contains(&b);
+                                        if ui.checkbox(&mut on, &b).help(&help::ST_QSY_BANDS).changed() {
+                                            if on {
+                                                c.qsy_bands.push(b.clone());
+                                            } else {
+                                                c.qsy_bands.retain(|x| x != &b);
+                                            }
+                                        }
+                                    }
+                                });
+                            }
+                            ui.horizontal(|ui| {
+                                ui.label("At most").help(&help::ST_QSY_MAX);
+                                ui.add(egui::DragValue::new(&mut c.qsy_max_khz).range(0.0..=30_000.0).suffix(" kHz")).help(&help::ST_QSY_MAX);
+                                ui.label(RichText::new(if c.qsy_max_khz == 0.0 { "(anywhere allowed)" } else { "from where I was" }).color(DIM));
+                            });
+                            ui.checkbox(&mut c.qsy_segments_only, "Only inside the digital segments (band plan / legal)").help(&help::ST_QSY_SEG);
+                            ui.checkbox(&mut c.qsy_swr_home, "If SWR stays high there, end the link so we both go home").help(&help::ST_QSY_SWR);
+                            ui.label(RichText::new(if c.auto_tune { "On arrival, high SWR starts the antenna tuner once (auto-tune is on)." } else { "Turn on auto-tune (Radio Controls) to have the tuner run on arrival if SWR is high." }).small().color(DIM));
+                        });
+                    });
+                    ui.add_space(6.0);
+                    card(ui, "File library (off by default)", |ui| {
+                        ui.label(RichText::new("A folder linked stations may browse and download from, even while you're away. Nothing outside it can be reached.").small().color(DIM));
+                        ui.checkbox(&mut c.share_library, "Share a file library").help(&help::ST_LIB_SHARE);
+                        ui.add_enabled_ui(c.share_library, |ui| {
+                            ui.horizontal(|ui| {
+                                ui.label("Folder").help(&help::ST_LIB_DIR);
+                                ui.add(egui::TextEdit::singleline(&mut c.library_dir).hint_text("choose a folder").desired_width(300.0)).help(&help::ST_LIB_DIR);
+                                if ui.button("Choose…").help(&help::ST_LIB_DIR).clicked()
+                                    && let Some(p) = rfd::FileDialog::new().pick_folder()
+                                {
+                                    c.library_dir = p.to_string_lossy().to_string();
+                                }
+                            });
+                            ui.checkbox(&mut c.library_only_away, "Only while I'm away").help(&help::ST_LIB_AWAY);
+                            ui.horizontal(|ui| {
+                                ui.label("Largest file").help(&help::ST_LIB_MAX);
+                                ui.add(egui::DragValue::new(&mut c.library_max_mb).range(0.1..=200.0).speed(0.1).suffix(" MB")).help(&help::ST_LIB_MAX);
+                            });
+                        });
+                        ui.label(RichText::new(format!("Files you download go to the Download folder ({}).", c.download_dir.display())).small().color(DIM));
+                    });
+                    ui.add_space(6.0);
+                    card(ui, "Schedule (off by default)", |ui| {
+                        let now = whistlestop::depot::now_s();
+                        ui.label(RichText::new(format!("Listen (and send Station ID) on different frequencies at different times. Times are UTC; it's {} UTC now.", &depot::fmt_utc(now)[11..16])).small().color(DIM));
+                        ui.checkbox(&mut c.schedule_on, "Follow the schedule").help(&help::ST_SCHED_ON);
+                        ui.checkbox(&mut c.schedule_only_away, "Only while I'm away").help(&help::ST_SCHED_AWAY);
+                        let mut remove = None;
+                        for (i, sl) in c.schedule.iter_mut().enumerate() {
+                            ui.horizontal(|ui| {
+                                ui.add(egui::TextEdit::singleline(&mut sl.from).desired_width(48.0).char_limit(5)).help(&help::ST_SCHED_SLOT);
+                                ui.label("–");
+                                ui.add(egui::TextEdit::singleline(&mut sl.to).desired_width(48.0).char_limit(5)).help(&help::ST_SCHED_SLOT);
+                                egui::ComboBox::from_id_salt(("days", i)).width(90.0).selected_text(sl.days.label()).show_ui(ui, |ui| {
+                                    for d in whistlestop::schedule::Days::ALL {
+                                        ui.selectable_value(&mut sl.days, d, d.label());
+                                    }
+                                })
+                                .response
+                                .help(&help::ST_SCHED_SLOT);
+                                ui.add(egui::DragValue::new(&mut sl.khz).range(1800.0..=29_700.0).speed(0.5).max_decimals(3).suffix(" kHz")).help(&help::ST_SCHED_SLOT);
+                                ui.checkbox(&mut sl.beacon, "Station ID").help(&help::ST_SCHED_SLOT);
+                                if !sl.valid() {
+                                    ui.label(RichText::new("⚠ HH:MM").color(RED));
+                                }
+                                if ui.small_button("✕").help(&help::ST_SCHED_SLOT).clicked() {
+                                    remove = Some(i);
+                                }
+                            });
+                        }
+                        if let Some(i) = remove {
+                            c.schedule.remove(i);
+                        }
+                        if ui.button("+  Add a time slot").help(&help::ST_SCHED_ADD).clicked() {
+                            c.schedule.push(whistlestop::schedule::Slot::default());
+                        }
+                    });
+                    ui.add_space(6.0);
                     card(ui, "Automation (all off by default)", |ui| {
                         ui.label(RichText::new("Automatic transmissions happen only when you're not linked, calling or searching, and (if the last switch is on) only inside the automatic-control digital segments. You remain responsible for your station.").small().color(DIM));
                         ui.add_space(4.0);
@@ -1975,6 +2137,10 @@ impl eframe::App for App {
                 depot: g.depot.clone(),
                 away: g.away,
                 mail_alerts: g.mail_alerts.clone(),
+                qsy: g.qsy.clone(),
+                qsy_note: g.qsy_note.clone(),
+                library: g.library.clone(),
+                schedule_now: g.schedule_now.clone(),
             }
         };
 

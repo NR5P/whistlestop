@@ -431,6 +431,32 @@ impl Session {
                     }
             }
             Link::Mail { id, .. } => self.bot_send(Link::MailAck { id }),
+            // K7BOT agrees to any QSY within 20 m, and has a small library.
+            Link::Qsy { id, dial_hz, .. } => {
+                let ok = (14_000_000..=14_350_000).contains(&dial_hz);
+                self.bot_send(Link::QsyAnswer { id, accept: ok, reason: if ok { String::new() } else { "K7BOT stays on 20 m".into() } });
+            }
+            Link::ListReq { id, path } => {
+                let entries = if path.is_empty() {
+                    vec![
+                        LibEntry { name: "maps".into(), size: 0, dir: true },
+                        LibEntry { name: "k7bot-qsl.txt".into(), size: 1240, dir: false },
+                    ]
+                } else {
+                    vec![LibEntry { name: "grid.txt".into(), size: 600, dir: false }]
+                };
+                self.bot_send(Link::ListAns { id, path, entries, note: String::new() });
+            }
+            Link::Fetch { id, path } => {
+                if path.ends_with("k7bot-qsl.txt") {
+                    self.bot_send(Link::FetchAnswer { id, ok: true, reason: String::new() });
+                    let out = Outgoing::new(id, "k7bot-qsl.txt".into(), "QSL from K7BOT, Whistlestop demo station. 73!\n".repeat(26).into_bytes(), false, 1);
+                    self.bot_send(out.offer());
+                    self.bot_offer = Some(out);
+                } else {
+                    self.bot_send(Link::FetchAnswer { id, ok: false, reason: "no such file".into() });
+                }
+            }
             Link::Bye { .. } => self.hang_up(),
             _ => {}
         }

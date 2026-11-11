@@ -426,7 +426,7 @@ impl TrackDetector {
         // ~16 ms frames: the chirp moves about one bin per frame.
         let frame = ((0.016 * params.fs as f64) as usize).next_power_of_two();
         let win = (0..frame).map(|i| 0.5 - 0.5 * (2.0 * PI * i as f64 / frame as f64).cos()).collect();
-        Self { params, reach_hz: params.scan_reach_hz() + 100.0, frame, win, planner: FftPlanner::new() }
+        Self { params, reach_hz: params.scan_reach_hz(), frame, win, planner: FftPlanner::new() }
     }
 
     /// Track frequency (Hz) at time t into the pattern.
@@ -501,7 +501,9 @@ impl TrackDetector {
                 s += p[bhi as usize + 1] - p[blo as usize];
                 n += (bhi - blo + 1) as f64;
             }
-            (n >= 0.3 * nt as f64).then(|| (s - n * mu) / (n * var).sqrt())
+            // At least half the track inside the passband: a sliver at
+            // the edge is too easy to fake.
+            (n >= 0.5 * nt as f64).then(|| (s - n * mu) / (n * var).sqrt())
         };
         let mut best: Option<(TrackHit, usize, i64)> = None;
         for dt in 0..period_frames {

@@ -27,11 +27,11 @@ list of known, exact channels, the way BPQ32 does.
 
 The whistle fixes this. A linear chirp has two properties that suit the job:
 
-1. **Huge capture range.** A chirp sweeping 500 → 2500 Hz still produces a
-   strong matched-filter peak when the receiver is hundreds of Hz off. The
-   signal just moves along the sweep and part of it falls outside the
-   passband. A detector catches it from about ±1 kHz away, so scan steps can
-   be about 2 kHz wide.
+1. **Huge capture range.** A chirp sweeping 1000 → 2000 Hz (whistle v2) is
+   still found when the receiver is hundreds of Hz off: the signal just
+   moves along the sweep, and part of it can fall outside the passband. The
+   scan detector catches it from about ±1.1 kHz away, so scan steps can be
+   2 kHz wide.
 2. **It measures its own frequency error.** On a chirp, a frequency offset
    shows up as a **time shift** of the correlation peak. An up-chirp's peak
    moves *earlier* by Δf/k and a down-chirp's moves *later* by Δf/k (k is the
@@ -59,8 +59,9 @@ who hears it knows a Whistlestop station is calling.
  └─────────────────────────────────┘└───────────┘└────────────────┘
 ```
 
-* **Whistle**: repeated UP/DOWN chirp pairs. The default is 0.5 s per chirp
-  (500 → 2500 Hz), so one pair lasts 1 s. The whistle runs for `W` seconds,
+* **Whistle**: repeated UP/DOWN chirp pairs, 0.2 s per chirp
+  (1000 → 2000 Hz), so one pair lasts 0.4 s (whistle v2; the study behind it
+  is `docs/WHISTLE-LAB.md`). The whistle runs for `W` seconds (default 10),
   and `W` must be at least the listeners' full scan cycle, as with ALE
   "scanning calls". Whistlestop generates this audio itself and keys the
   radio through `rigctld`.
@@ -75,11 +76,12 @@ who hears it knows a Whistlestop station is calling.
 ```
  for each channel in the scan plan:
      tune radio (rigctld "F")
-     dwell D seconds, feeding audio to the whistle detector
-       ├─ no whistle            → next channel
-       ├─ partial whistle (one strong chirp, no pair yet) → HOLD (extend dwell)
-       └─ whistle pair found    → Δf measured
+     dwell D = 0.5 s, feeding audio to the scan (track) detector
+       ├─ nothing                       → next channel
+       ├─ a hint (score ≥ MAYBE)        → HOLD: listen to 2 s, decide again
+       └─ whistle (score ≥ found(D))    → coarse Δf (unambiguous, ±1100 Hz)
              retune dial by +Δf   (USB: a higher audio tone means dial up)
+             measure 1.2 s with the matched filters → fine Δf, retune
              STOP scanning, wait for Mercury's "CQFRAME <call>"
              show "CQ from <call>". Operator (or auto-answer) → CONNECT
 ```
@@ -87,14 +89,25 @@ who hears it knows a Whistlestop station is calling.
 * Mercury stays in `LISTEN ON` the whole time. Whistlestop never sends
   `LISTEN OFF` to hop channels (that flushes Mercury's decoders; see TNC.md
   "Scanning hosts").
-* **Dwell**: the detector needs one complete UP+DOWN pair inside its window.
-  The pair lasts 2T = 1 s, and the pattern repeats with period 2T, so a
-  window of 4T = 2 s always contains a complete pair. The default dwell is
-  2.2 s, which allows for retune settling.
-* **Step**: 2 kHz by default. A 20 kHz slice of band is 10 channels, a
-  22 s scan cycle, so the caller's whistle should run about 25 s. This
-  trade-off is your "not so fast that you miss it, fast enough to find them
-  quickly". Both numbers are in the config.
+* **Scan detector** (`whistle::TrackDetector`): a 16 ms-frame spectrogram,
+  each bin whitened by its 75th percentile (anything present more than a
+  quarter of the time, such as carriers, RTTY, FT8 or a modem, is levelled
+  away) with single cells capped, then the cells along the UP/DOWN track
+  summed for every pattern timing and offset. It is non-coherent, so it
+  survives fading, and it needs only the energy the dwell holds, not a
+  whole chirp at the right moment. Its thresholds come from
+  `whistlelab calibrate`: 1 % of empty busy-band dwells score above
+  `found(0.5 s)` = 6.4 (`found(2 s)` = 5.6), and 15 % above `MAYBE` = 5.07.
+* **Fine lock** (`whistle::Detector`): coherent matched filters on the UP and
+  DOWN chirps, after clipping strong narrow peaks in the spectrum. Within
+  ±150 Hz of where the scan said, a lower threshold is safe
+  (`detect_near`). If a strong signal inside the sweep still spoils it, the
+  scan detector's sub-bin estimate (a few hertz) is used instead.
+* **Dwell and step**: 0.5 s and 2 kHz by default. A 20 m pass takes about
+  6–8 s, so the caller's whistle runs 10 s. Both numbers are in the config.
+  The first whistle (0.5 s chirps, coherent detection only) needed a 2.2 s
+  dwell and a 24 s whistle; see `docs/WHISTLE-LAB.md` and `docs/BENCH.md`
+  for the comparison.
 
 ## 3b. Wide search with a second receiver (optional)
 
@@ -106,8 +119,9 @@ instant and leaves the main radio free:
    centre and low-passed/decimated to 64 kHz (128/256 kHz for wide segments
    like 10 m).
 2. **Channelize**: once a second, one FFT of the last 2.2 s is cut into
-   virtual USB receivers every 1.8 kHz across the segment. The normal whistle
-   detector runs on each (20 m: 10 virtual receivers).
+   virtual USB receivers every 900 Hz across the segment (inside the matched
+   filter's ±500 Hz unambiguous range). The matched-filter detector runs on
+   each.
 3. **Verify for free**: each candidate gets a virtual receiver centred exactly
    on it. A real caller reads about 0 Hz there; an alias does not. No retune.
 4. **Hand off**: the main radio tunes to the hit and measures the whistle on
@@ -184,9 +198,10 @@ offset so a scanner retunes exactly onto the caller.
 * Simulated so far: AWGN plus an SSB passband. Real fading (Watterson) may
   blank single chirps; repeated pairs should carry it. Test with Mercury's
   channel model and on air.
-* A caller more than ±1000 Hz from a scan channel aliases by 2000 Hz. The
-  search then checks the alias candidate (`WhistleParams::alias_of`).
-* The whistle must last at least the searchers' scan pass (about 24 s for
+* The matched filter alone is unambiguous only to ±500 Hz (beyond, it
+  aliases by 1000 Hz). The scan detector's coarse offset picks the right
+  candidate (`Engine::fine_offset`, `WhistleParams::alias_of`).
+* The whistle must last at least the searchers' scan pass (about 6–8 s for
   20 m). Searching "all bands" needs much longer whistles, or the RTL-SDR
   wide search below.
 
