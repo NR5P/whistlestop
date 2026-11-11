@@ -66,6 +66,9 @@ pub enum Cmd {
     RigWatch(bool),
     /// Start the antenna tuner now.
     TuneAntenna,
+    /// Speaker monitor on/off, and its volume.
+    Monitor(bool),
+    MonitorVolume(f32),
     /// Wide whistle search on the SDR; `auto` tunes the radio to hits.
     WideSearch { on: bool, auto: bool },
     /// Tune to an SDR hit and fine-lock on it with the radio's own audio.
@@ -241,6 +244,8 @@ pub struct State {
     pub rig_desc: String,
     pub rig_caps: Option<crate::rig::RigCaps>,
     pub rig_ext: RigExt,
+    /// The speaker monitor is playing.
+    pub monitor_on: bool,
 }
 
 /// Radio controls beyond the basics, polled while their window is open,
@@ -417,6 +422,8 @@ struct Station {
     swr_peak: f32,
     pending_tune: bool,
     last_autotune: Option<(Instant, Option<&'static str>)>,
+    monitor: Option<Arc<Mutex<audio::Monitor>>>,
+    mon_from: u64,
     /// Roundtable host: the speed to switch to once the announcement is out.
     pending_speed: Option<(&'static Mode, Instant)>,
     last_query: Instant,
@@ -530,6 +537,8 @@ impl Station {
             swr_peak: 0.0,
             pending_tune: false,
             last_autotune: None,
+            monitor: None,
+            mon_from: 0,
             pending_speed: None,
             last_query: Instant::now(),
         };
@@ -663,6 +672,9 @@ impl Station {
             Err(e) => s.log(format!("⚠ {e}")),
         }
 
+        if cfg.monitor {
+            s.set_monitor(true);
+        }
         s.push_wide_cfg();
         if cfg.sdr.enabled || cfg.demo {
             s.start_sdr();
@@ -937,6 +949,9 @@ impl Station {
             Cmd::StopSearch => self.stop_search("stopped"),
             Cmd::CallCq { table } => self.start_cq(table).await?,
             Cmd::StopCq => {
+                if let Some(m) = &self.monitor {
+                    m.lock().unwrap().clear_tx();
+                }
                 if let Some(Cq { phase: CqPhase::Whistle { .. }, .. }) = &self.cq
                     && let Some(o) = &self.output {
                         o.abort();
@@ -1065,6 +1080,16 @@ impl Station {
                 self.last_ext_poll = Instant::now() - Duration::from_secs(10);
             }
             Cmd::TuneAntenna => self.tune_antenna("by hand").await?,
+            Cmd::Monitor(on) => {
+                self.cfg.monitor = on;
+                self.set_monitor(on);
+            }
+            Cmd::MonitorVolume(v) => {
+                self.cfg.monitor_volume = v;
+                if let Some(m) = &self.monitor {
+                    m.lock().unwrap().set_volume(v);
+                }
+            }
             Cmd::SetSdrSpan(hz) => *self.sdr_span.lock().unwrap() = hz.clamp(5_000.0, 1_600_000.0),
             Cmd::LockOn(dial) => {
                 if self.cq.is_some() || self.peer.is_some() {
@@ -1304,6 +1329,7 @@ impl Station {
         let secs = self.cfg.whistle_s;
         let params = self.whistle_params();
         let out = self.output.clone();
+        let mon = if self.cfg.demo { self.monitor.clone() } else { None };
         self.ptt(true).await;
         tokio::spawn(async move {
             match out {
@@ -1311,7 +1337,14 @@ impl Station {
                     let audio = whistle(secs, &params.with_fs(o.rate));
                     o.play(&audio).await;
                 }
-                None => tokio::time::sleep(Duration::from_secs_f64(secs)).await, // Demo
+                None => {
+                    // Demo: nothing is transmitted, but you can hear it.
+                    if let Some(m) = mon {
+                        let m = m.lock().unwrap();
+                        m.push_tx(&whistle(secs, &params.with_fs(m.rate)));
+                    }
+                    tokio::time::sleep(Duration::from_secs_f64(secs)).await
+                }
             }
             done.store(true, Ordering::Relaxed);
         });
@@ -1327,6 +1360,13 @@ impl Station {
                 let me = self.mycall();
                 let arq_bw = self.bw.mercury_arq_bw();
                 self.tnc()?.command(&format!("CQFRAME {me} {arq_bw}")).await?;
+                if self.cfg.demo {
+                    if let Some(m) = &self.monitor {
+                        let m = m.lock().unwrap();
+                        let mut seed = 0x5eed_u64 ^ Instant::now().elapsed().as_nanos() as u64 ^ 0x9e37;
+                        m.push_tx(&audio::ofdm_burst(m.rate as f64, 3.1, &mut seed));
+                    }
+                }
                 let kind = if table.is_some() { CALL_TABLE } else { CALL_CHAT };
                 let call = TableFrame {
                     table: table.as_deref().map(table_id).unwrap_or(0),
@@ -2111,6 +2151,7 @@ impl Station {
 
     async fn tick(&mut self) -> anyhow::Result<()> {
         self.step_waterfall();
+        self.step_monitor();
         self.step_wide().await?;
         if self.pending_tune {
             let quiet = {
@@ -2195,6 +2236,48 @@ impl Station {
     }
 
     /// Radio-audio waterfall rows from the shared RX buffer.
+    fn set_monitor(&mut self, on: bool) {
+        if !on {
+            self.monitor = None;
+            self.set(|g| g.monitor_on = false);
+            return;
+        }
+        if self.monitor.is_some() {
+            return;
+        }
+        match audio::Monitor::start(&self.cfg.monitor_device, self.cfg.monitor_volume) {
+            Ok(m) => {
+                self.mon_from = audio::now_count(&self.rx);
+                self.monitor = Some(Arc::new(Mutex::new(m)));
+                self.set(|g| g.monitor_on = true);
+                self.log("🔊 Listening on the speakers".into());
+            }
+            Err(e) => {
+                self.set(|g| g.monitor_on = false);
+                self.log(format!("⚠ Speakers: {e}"));
+            }
+        }
+    }
+
+    /// Band audio to the speakers.
+    fn step_monitor(&mut self) {
+        let Some(m) = &self.monitor else { return };
+        let x = {
+            let rx = self.rx.lock().unwrap();
+            if rx.count.saturating_sub(self.mon_from) > FS as u64 {
+                self.mon_from = rx.count - (FS / 10) as u64; // fell behind: catch up
+            }
+            let n = (rx.count - self.mon_from) as usize;
+            let v = rx.range(self.mon_from, n).unwrap_or_default();
+            self.mon_from = rx.count;
+            v
+        };
+        if !x.is_empty() {
+            let f: Vec<f32> = x.iter().map(|v| *v as f32 * 3.0).collect();
+            m.lock().unwrap().push_rx(&f);
+        }
+    }
+
     fn step_waterfall(&mut self) {
         let n = self.spectrum.n;
         let hop = n; // 15.6 rows/s at 8 kHz

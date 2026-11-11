@@ -99,7 +99,7 @@ fn pill(ui: &mut Ui, label: &str, ok: bool) -> egui::Response {
         .fill(color.linear_multiply(0.14))
         .stroke(Stroke::new(1.0, color.linear_multiply(0.6)))
         .corner_radius(20.0)
-        .inner_margin(Margin::symmetric(7, 2))
+        .inner_margin(Margin::symmetric(5, 2))
         .show(ui, |ui| {
             ui.horizontal(|ui| {
                 let (r, _) = ui.allocate_exact_size(vec2(8.0, 8.0), Sense::hover());
@@ -303,16 +303,24 @@ impl App {
                 .help(&help::SNR_METER);
             });
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if ui.add(egui::Button::new(RichText::new("⚙  Settings").size(14.0))).help(&help::SETTINGS).clicked() {
+                if ui.add(egui::Button::new(RichText::new("⚙ Settings").size(14.0))).help(&help::SETTINGS).clicked() {
                     self.settings_open = true;
                 }
-                let gb = egui::Button::new(RichText::new("📖  Guide").size(14.0).strong().color(if self.guide_open { BG } else { TEXT }))
+                let lon = s.monitor_on;
+                let lb = egui::Button::new(RichText::new(if lon { "🔊 Listen" } else { "🔈 Listen" }).size(14.0).strong().color(if lon { BG } else { TEXT }))
+                    .fill(if lon { GREEN } else { CARD_HI });
+                if ui.add(lb).help(&help::LISTEN).clicked() {
+                    self.cfg.monitor = !lon;
+                    let _ = self.cfg.save();
+                    self.send(Cmd::Monitor(!lon));
+                }
+                let gb = egui::Button::new(RichText::new("📖 Guide").size(14.0).strong().color(if self.guide_open { BG } else { TEXT }))
                     .fill(if self.guide_open { TEAL } else { CARD_HI });
                 if ui.add(gb).help(&help::GUIDE_BTN).clicked() {
                     self.guide_open = !self.guide_open;
                 }
                 let on = help::on();
-                let hb = egui::Button::new(RichText::new("?  Help").size(14.0).strong().color(if on { BG } else { TEXT })).fill(if on { BRASS } else { CARD_HI });
+                let hb = egui::Button::new(RichText::new("? Help").size(14.0).strong().color(if on { BG } else { TEXT })).fill(if on { BRASS } else { CARD_HI });
                 if ui.add(hb).help(&help::HELP_TOGGLE).clicked() {
                     help::set(!on);
                 }
@@ -342,7 +350,7 @@ impl App {
 
     fn meter(&self, ui: &mut Ui, label: &str, v: Option<f32>, color: Color32) {
         ui.label(RichText::new(label).size(10.5).color(DIM));
-        let (r, _) = ui.allocate_exact_size(vec2(110.0, 9.0), Sense::hover());
+        let (r, _) = ui.allocate_exact_size(vec2(84.0, 9.0), Sense::hover());
         let p = ui.painter();
         p.rect_filled(r, 4.0, Color32::from_rgb(10, 13, 18));
         if let Some(v) = v {
@@ -1546,6 +1554,21 @@ impl App {
                     ui.add_space(6.0);
                     card(ui, "Audio", |ui| {
                         egui::Grid::new("ra").num_columns(2).spacing(vec2(10.0, 8.0)).show(ui, |ui| {
+                            ui.label("Listen on").help(&help::ST_MON_DEV);
+                            egui::ComboBox::from_id_salt("mon").width(280.0).selected_text(if c.monitor_device.is_empty() { "System default" } else { &c.monitor_device }).show_ui(ui, |ui| {
+                                ui.selectable_value(&mut c.monitor_device, String::new(), "System default");
+                                for d in &self.devices.1 {
+                                    ui.selectable_value(&mut c.monitor_device, d.clone(), d);
+                                }
+                            })
+                            .response
+                            .help(&help::ST_MON_DEV);
+                            ui.end_row();
+                            ui.label("Listen volume").help(&help::ST_MON_VOL);
+                            if ui.add(egui::Slider::new(&mut c.monitor_volume, 0.0..=1.5).show_value(false)).help(&help::ST_MON_VOL).changed() {
+                                self.h.send(Cmd::MonitorVolume(c.monitor_volume));
+                            }
+                            ui.end_row();
                             ui.label("Audio in").help(&help::ST_AUDIO);
                             egui::ComboBox::from_id_salt("ain").width(280.0).selected_text(if c.audio_in.is_empty() { "System default" } else { &c.audio_in }).show_ui(ui, |ui| {
                                 ui.selectable_value(&mut c.audio_in, String::new(), "System default");
@@ -1742,6 +1765,7 @@ impl eframe::App for App {
                 rig_desc: g.rig_desc.clone(),
                 rig_caps: g.rig_caps.clone(),
                 rig_ext: g.rig_ext.clone(),
+                monitor_on: g.monitor_on,
             }
         };
 

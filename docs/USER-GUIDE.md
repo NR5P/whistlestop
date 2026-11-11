@@ -19,7 +19,7 @@ Whistlestop is an HF keyboard chat, file transfer and group conversation program
 
 The first time you open Whistlestop it starts in **Demo mode**: a simulated radio, a simulated 20 m band, a simulated Mercury modem and a demo station, **K7BOT**, who calls CQ every 45 seconds. Nothing is transmitted. Try this:
 
-1. Look at the **Radio audio** waterfall at the bottom left. Every so often you'll see K7BOT's whistle as slanted strokes.
+1. Press **🔈 Listen** in the top bar to hear the band on your speakers. Look at the **Radio audio** waterfall at the bottom left: every so often you'll see (and hear) K7BOT's whistle as slanted strokes.
 2. In **Search for whistles**, press **Current band**. Your radio steps through the 20 m digital segment. Within about one pass it stops, says "Whistle! measuring", retunes, and waits for the CQ.
 3. When K7BOT's CQ is heard it appears under **Heard**. Press **Answer** (or tick **Answer automatically** before searching).
 4. Once linked, type in **Chat** and press Enter. K7BOT answers. Ask it for a file: it offers one in the **Files** tab.
@@ -90,11 +90,21 @@ An RTL-SDR dongle connected to your radio's **RX OUT** (receive antenna output) 
 
 From top to bottom:
 
-- **Top bar**: the Whistlestop mark; the **frequency display** (TX/RX lamp, dial frequency, band, radio mode); the **S-meter** and **SNR** meters; the **status pills** (Radio, Mercury, Audio, SDR: green means connected); **DEMO** when in Demo mode; **📖 Guide** (this manual, in its own window); the **? Help** toggle; and **Settings**.
+- **Top bar**: the Whistlestop mark; the **frequency display** (TX/RX lamp, dial frequency, band, radio mode); the **S-meter** and **SNR** meters; the **status pills** (Radio, Mercury, Audio, SDR: green means connected); **DEMO** when in Demo mode; **🔈 Listen** (the radio's audio on your speakers); **📖 Guide** (this manual, in its own window); the **? Help** toggle; and **Settings**.
 - **Modem strip**: what Mercury is doing right now (see "The modem strip").
 - **Left column** (top to bottom): **Call CQ**, **Search for whistles**, **Heard**, **Bandwidth**, **Radio**.
 - **Centre**: tabs for **Chat**, **Roundtable**, **Files** and **Log**.
 - **Bottom**: the **Radio audio** waterfall (what your radio hears, 0–3 kHz) and, with an SDR, the **Wide receiver** waterfall. Drag the line above the waterfalls to resize them.
+
+## Listening on your speakers
+
+**🔈 Listen** in the top bar plays what the radio hears through the computer's speakers or headphones. The button turns green (🔊) while it's on. It is **off by default**.
+
+- **The band, live**: whatever your receiver hears (noise, whistles, Mercury's data signals) plays with less than half a second of delay. If the computer falls behind, it skips ahead rather than drifting later and later.
+- **In Demo mode** you also hear **your own CQ**: the 24-second whistle ("whee-ooo, whee-ooo"), then the CQ burst (an approximation of Mercury's 3-second digital ID). You also hear K7BOT's whistle and CQ, and the FT8-like signals on the simulated band. On the air you'd hear your own transmissions on the radio, not through Whistlestop.
+- **Settings → Audio**: **Listen on** chooses the speaker (System default normally), and **Listen volume** sets the level; changes apply at once.
+
+> Don't choose the radio's own USB audio for **Listen on**: that would play the band back into the radio's transmit audio.
 
 ## The whistle
 
@@ -412,6 +422,7 @@ Settings are saved to `~/Library/Application Support/Whistlestop/whistlestop.tom
 | Auto-tune on high SWR | Start the antenna tuner after a high-SWR transmission, when quiet (Radio Controls window) | off |
 | SWR limit | Above this: red reading, log warning, auto-tune if on | 2.0 : 1 |
 | Download folder | Where received files go | ~/Downloads/Whistlestop |
+| Listen on / Listen volume | Speaker for the 🔈 Listen button, and its level | System default / 70% |
 
 The **Whistle** length and **Answer automatically** are set on the main screen and saved too.
 

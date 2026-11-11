@@ -168,3 +168,8 @@ pub const ST_MODEL: Topic = ("Radio model", "Hamlib's model for your radio. Auto
 pub const ST_PORT: Topic = ("Serial port", "The radio's CAT port. On Yaesu radios with two ports, the first (Enhanced) carries CAT. Automatic uses the detected radio.", "Setting up your station");
 pub const ST_BAUD: Topic = ("Speed", "Serial speed, matching the radio's CAT setting. Automatic uses Hamlib's default for the model.", "Setting up your station");
 pub const ST_RIGPORT: Topic = ("rigctld port", "The TCP port Whistlestop's rigctld listens on (127.0.0.1). Point Mercury's Hamlib NET rigctl at the same address.", "Setting up your station");
+
+// ------------------------------------------------------------ Speakers
+pub const LISTEN: Topic = ("Listen on the speakers", "Plays what the radio hears through the computer's speakers (it stays live, under half a second behind). In Demo mode you also hear your own CQ: the whistle, then the CQ burst. Off by default; volume and speaker are in Settings → Audio.", "Listening on your speakers");
+pub const ST_MON_DEV: Topic = ("Speaker", "Where Listen plays: the computer's speakers or headphones (System default). Don't pick the radio's own USB audio here, or you'd send the band back into the radio.", "Listening on your speakers");
+pub const ST_MON_VOL: Topic = ("Listen volume", "How loud Listen plays. Changes take effect at once.", "Listening on your speakers");

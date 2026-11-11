@@ -58,6 +58,12 @@ pub struct Config {
     /// `swr_limit` (off by default; tuning transmits a carrier).
     pub auto_tune: bool,
     pub swr_limit: f32,
+    /// Play the radio's audio through the computer's speakers (and your own
+    /// CQ in Demo mode). Off by default.
+    pub monitor: bool,
+    pub monitor_volume: f32,
+    /// Speaker device; empty = the system's default output.
+    pub monitor_device: String,
 }
 
 impl Default for Config {
@@ -91,6 +97,9 @@ impl Default for Config {
             managed_rig: crate::rigsetup::ManagedRig::default(),
             auto_tune: false,
             swr_limit: 2.0,
+            monitor: false,
+            monitor_volume: 0.7,
+            monitor_device: String::new(),
         }
     }
 }

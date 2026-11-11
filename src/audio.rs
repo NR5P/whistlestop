@@ -327,6 +327,137 @@ impl Drop for LiveOutput {
     }
 }
 
+// ---------------------------------------------------------- speaker monitor
+
+/// Plays what the radio hears (and, in Demo mode, what you send) through
+/// the computer's speakers. Two streams are mixed: the band (kept under half
+/// a second behind, so it stays live) and your own transmissions (played in
+/// full).
+pub struct Monitor {
+    rx: Arc<Mutex<VecDeque<f32>>>,
+    tx: Arc<Mutex<VecDeque<f32>>>,
+    volume: Arc<std::sync::atomic::AtomicU32>,
+    pub rate: u32,
+    stop: Arc<AtomicBool>,
+    up_pos: f64,
+    up_prev: f32,
+}
+
+impl Monitor {
+    pub fn start(device_name: &str, volume: f32) -> Result<Self> {
+        let rx: Arc<Mutex<VecDeque<f32>>> = Default::default();
+        let tx: Arc<Mutex<VecDeque<f32>>> = Default::default();
+        let vol = Arc::new(std::sync::atomic::AtomicU32::new(volume.to_bits()));
+        let stop = Arc::new(AtomicBool::new(false));
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel::<Result<u32>>();
+        let (r, t, v, st, name) = (rx.clone(), tx.clone(), vol.clone(), stop.clone(), device_name.to_string());
+        std::thread::spawn(move || {
+            let build = || -> Result<(cpal::Stream, u32)> {
+                let dev = find_device(&name, false)?;
+                let cfg = dev.default_output_config()?;
+                let rate = cfg.sample_rate();
+                let ch = cfg.channels() as usize;
+                let stream = dev.build_output_stream::<f32, _, _>(
+                    cfg.config(),
+                    move |data: &mut [f32], _| {
+                        let g = f32::from_bits(v.load(Ordering::Relaxed));
+                        let (mut r, mut t) = (r.lock().unwrap(), t.lock().unwrap());
+                        for frame in data.chunks_mut(ch) {
+                            let s = (r.pop_front().unwrap_or(0.0) + t.pop_front().unwrap_or(0.0)) * g;
+                            frame.iter_mut().for_each(|x| *x = s.clamp(-1.0, 1.0));
+                        }
+                    },
+                    |e| eprintln!("speaker monitor error: {e}"),
+                    None,
+                )?;
+                stream.play()?;
+                Ok((stream, rate))
+            };
+            match build() {
+                Ok((stream, rate)) => {
+                    let _ = ready_tx.send(Ok(rate));
+                    while !st.load(Ordering::Relaxed) {
+                        std::thread::sleep(Duration::from_millis(100));
+                    }
+                    drop(stream);
+                }
+                Err(e) => {
+                    let _ = ready_tx.send(Err(e));
+                }
+            }
+        });
+        let rate = ready_rx.recv_timeout(Duration::from_secs(5)).map_err(|_| anyhow!("speaker output did not start"))??;
+        Ok(Self { rx, tx, volume: vol, rate, stop, up_pos: 0.0, up_prev: 0.0 })
+    }
+
+    pub fn set_volume(&self, v: f32) {
+        self.volume.store(v.clamp(0.0, 1.5).to_bits(), Ordering::Relaxed);
+    }
+
+    /// Band audio at 8 kHz: resampled to the speaker rate, kept live.
+    pub fn push_rx(&mut self, x: &[f32]) {
+        let step = FS as f64 / self.rate as f64;
+        let mut out = Vec::with_capacity((x.len() as f64 / step) as usize + 2);
+        for &s in x {
+            // Linear interpolation from the previous sample to this one.
+            while self.up_pos < 1.0 {
+                out.push(self.up_prev + (s - self.up_prev) * self.up_pos as f32);
+                self.up_pos += step;
+            }
+            self.up_pos -= 1.0;
+            self.up_prev = s;
+        }
+        let mut q = self.rx.lock().unwrap();
+        q.extend(out);
+        let max = self.rate as usize / 2;
+        if q.len() > max {
+            let extra = q.len() - max / 2;
+            q.drain(..extra);
+        }
+    }
+
+    /// Your own transmission, already at the speaker rate: played in full.
+    pub fn push_tx(&self, x: &[f32]) {
+        self.tx.lock().unwrap().extend(x.iter().copied());
+    }
+
+    pub fn clear_tx(&self) {
+        self.tx.lock().unwrap().clear();
+    }
+}
+
+impl Drop for Monitor {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+    }
+}
+
+/// What a Mercury CQ burst roughly sounds like (DATAC16 is a ~3 s OFDM
+/// burst about 200 Hz wide): 8 carriers around 1500 Hz, random QPSK each
+/// 40 ms symbol. For listening only; Mercury makes the real one.
+pub fn ofdm_burst(fs: f64, secs: f64, seed: &mut u64) -> Vec<f32> {
+    let mut rnd = move || {
+        *seed ^= *seed << 13;
+        *seed ^= *seed >> 7;
+        *seed ^= *seed << 17;
+        (*seed >> 61) as usize
+    };
+    let carriers = 8;
+    let ns = (0.04 * fs) as usize;
+    let n_sym = (secs / 0.04) as usize;
+    let mut out = Vec::with_capacity(n_sym * ns);
+    for k in 0..n_sym {
+        let ph: Vec<f64> = (0..carriers).map(|c| if k < 2 { (c % 2) as f64 * PI } else { (rnd() % 4) as f64 * PI / 2.0 }).collect();
+        for i in 0..ns {
+            let t = (k * ns + i) as f64 / fs;
+            let v: f64 = ph.iter().enumerate().map(|(c, p)| (2.0 * PI * (1500.0 + (c as f64 - 3.5) * 25.0) * t + p).cos()).sum();
+            let edge = (i.min(ns - 1 - i) as f64 / (0.002 * fs)).min(1.0);
+            out.push((v / carriers as f64 * 0.9 * (0.6 + 0.4 * edge)) as f32);
+        }
+    }
+    out
+}
+
 // -------------------------------------------------------------- simulator --
 
 /// Something on the simulated band, at an RF frequency.
