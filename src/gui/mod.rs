@@ -1,6 +1,7 @@
 //! Whistlestop's graphical interface (egui).
 
 mod guide;
+pub mod icon;
 mod rigwin;
 mod help;
 mod waterfall;
@@ -329,20 +330,7 @@ impl App {
 
     fn wordmark(&mut self, ui: &mut Ui) {
         let (r, _) = ui.allocate_exact_size(vec2(44.0, 44.0), Sense::hover());
-        let p = ui.painter();
-        p.circle_filled(r.center(), 21.0, BRASS.linear_multiply(0.16));
-        p.circle_stroke(r.center(), 21.0, Stroke::new(1.5, BRASS));
-        // A chirp: the whistle's up/down sweep.
-        let pts: Vec<Pos2> = (0..=40)
-            .map(|i| {
-                let t = i as f32 / 40.0;
-                let f = 2.0 + 10.0 * (if t < 0.5 { t * 2.0 } else { 2.0 - t * 2.0 });
-                let x = r.left() + 8.0 + 28.0 * t;
-                let y = r.center().y + 9.0 * (std::f32::consts::TAU * f * t).sin() * 0.9;
-                Pos2::new(x, y)
-            })
-            .collect();
-        p.add(egui::Shape::line(pts, Stroke::new(2.0, BRASS)));
+        icon::paint(ui.painter(), r, BRASS);
         ui.vertical(|ui| {
             ui.add_space(2.0);
             ui.label(RichText::new("WHISTLESTOP").size(21.0).strong().color(TEXT).extra_letter_spacing(2.5));

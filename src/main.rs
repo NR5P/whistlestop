@@ -29,6 +29,11 @@ enum Command {
     },
     /// List audio devices.
     Devices,
+    /// Write the app icon as a PNG.
+    IconPng {
+        #[arg(default_value = "whistlestop-icon.png")]
+        path: String,
+    },
     /// Write demo sounds of a whole CQ (whistle + CQ burst), clean and as
     /// heard on the air, into a folder.
     CqDemo {
@@ -47,6 +52,7 @@ fn main() -> anyhow::Result<()> {
                 viewport: eframe::egui::ViewportBuilder::default()
                     .with_title("Whistlestop")
                     .with_app_id("whistlestop")
+                    .with_icon(gui::icon::icon_data())
                     .with_inner_size([1440.0, 920.0])
                     .with_min_inner_size([1100.0, 700.0])
                     .with_drag_and_drop(true),
@@ -68,6 +74,13 @@ fn main() -> anyhow::Result<()> {
             Ok(())
         }
         Command::CqDemo { dir, whistle: wsecs } => cq_demo(&dir, wsecs),
+        Command::IconPng { path } => {
+            let d = gui::icon::icon_data();
+            let img = eframe::egui::ColorImage::from_rgba_unmultiplied([d.width as usize, d.height as usize], &d.rgba);
+            write_png(&path, d.width, d.height, &img.as_raw().to_vec())?;
+            println!("Wrote {path}");
+            Ok(())
+        }
         Command::Devices => {
             let (ins, outs) = whistlestop::audio::list_devices();
             println!("Input devices:");
@@ -183,5 +196,56 @@ fn cq_demo(dir: &str, whistle_s: f64) -> anyhow::Result<()> {
         write_wav(&dir.join(name), x)?;
         println!("{name:28} {:5.1} s  {what}", x.len() as f64 / fs);
     }
+    Ok(())
+}
+
+/// A minimal PNG writer (stored, uncompressed deflate) so no image crate is needed.
+fn write_png(path: &str, w: u32, h: u32, rgba: &[u8]) -> anyhow::Result<()> {
+    fn crc(data: &[u8]) -> u32 {
+        let mut c = 0xffff_ffffu32;
+        for &b in data {
+            c ^= b as u32;
+            for _ in 0..8 {
+                c = if c & 1 != 0 { 0xedb8_8320 ^ (c >> 1) } else { c >> 1 };
+            }
+        }
+        !c
+    }
+    fn chunk(out: &mut Vec<u8>, ty: &[u8], data: &[u8]) {
+        out.extend((data.len() as u32).to_be_bytes());
+        let mut c = ty.to_vec();
+        c.extend(data);
+        out.extend(&c);
+        out.extend(crc(&c).to_be_bytes());
+    }
+    let mut raw = vec![];
+    for row in rgba.chunks((w * 4) as usize) {
+        raw.push(0u8);
+        raw.extend(row);
+    }
+    // zlib: header, stored blocks, adler32.
+    let mut z = vec![0x78, 0x01];
+    for (i, block) in raw.chunks(65535).enumerate() {
+        let last = (i + 1) * 65535 >= raw.len();
+        z.push(last as u8);
+        z.extend((block.len() as u16).to_le_bytes());
+        z.extend((!(block.len() as u16)).to_le_bytes());
+        z.extend(block);
+    }
+    let (mut a, mut b) = (1u32, 0u32);
+    for &x in &raw {
+        a = (a + x as u32) % 65521;
+        b = (b + a) % 65521;
+    }
+    z.extend(((b << 16) | a).to_be_bytes());
+    let mut out = vec![0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
+    let mut ihdr = vec![];
+    ihdr.extend(w.to_be_bytes());
+    ihdr.extend(h.to_be_bytes());
+    ihdr.extend([8, 6, 0, 0, 0]);
+    chunk(&mut out, b"IHDR", &ihdr);
+    chunk(&mut out, b"IDAT", &z);
+    chunk(&mut out, b"IEND", &[]);
+    std::fs::write(path, out)?;
     Ok(())
 }
