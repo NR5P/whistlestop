@@ -379,12 +379,12 @@ impl App {
             // Each readout has a fixed width, so changing values never push
             // their neighbours around.
             let w = match label {
-                "MODEM" => 150.0,
+                "MODEM" => 132.0,
                 "MODE" => 104.0,
                 "CARRIERS" => 92.0,
-                "BANDWIDTH" => 196.0,
+                "BANDWIDTH" => 184.0,
                 "SPEED" => 128.0,
-                "ERROR CORRECTION" => 168.0,
+                "ERROR CORRECTION" => 160.0,
                 _ => 104.0,
             };
             ui.allocate_ui_with_layout(vec2(w, 46.0), Layout::top_down(Align::Min), |ui| {
@@ -398,11 +398,21 @@ impl App {
             })
             .response
             .help(topic);
-            ui.add_space(6.0);
-            ui.separator();
-            ui.add_space(6.0);
+            // A fixed-height divider (a separator would stretch to fill).
+            let (r, _) = ui.allocate_exact_size(vec2(9.0, 46.0), Sense::hover());
+            ui.painter().vline(r.center().x, r.y_range(), Stroke::new(1.0, BORDER));
         };
-        ui.horizontal(|ui| {
+        // Pills in a fixed column at the right; the readouts (fixed widths)
+        // fill the rest and wrap to a second row only in a narrow window,
+        // so nothing ever runs underneath anything else.
+        let sdr_on = self.h.sdr.lock().unwrap().running;
+        const PILLS_W: f32 = 270.0;
+        let full = ui.available_width();
+        let top = ui.cursor().min;
+        {
+            let left_w = (full - PILLS_W - 8.0).max(300.0);
+            let left_rect = Rect::from_min_size(top, vec2(left_w, 400.0));
+            let used = ui.scope_builder(egui::UiBuilder::new().max_rect(left_rect).layout(Layout::left_to_right(Align::Min).with_main_wrap(true)), |ui| {
             ui.spacing_mut().item_spacing.x = 4.0;
             let (state, col) = if s.tx { ("TRANSMITTING", RED) } else { ("RECEIVING", GREEN) };
             let state = RichText::new(state).monospace().strong();
@@ -417,7 +427,7 @@ impl App {
                         "BANDWIDTH",
                         RichText::new(format!("{} Hz used", m.bandwidth_hz)).strong(),
                         Some(match &s.link {
-                            Some(l) => format!("your limit {} · agreed {} Hz", user_bw, l.bw),
+                            Some(l) => format!("limit {} · agreed {} Hz", user_bw, l.bw),
                             None => format!("your limit {user_bw}"),
                         }),
                         &help::M_BW,
@@ -453,17 +463,18 @@ impl App {
                 ));
                 ui.label(RichText::new(if s.link.is_some() { "automatic" } else { "used when linked" }).size(10.5).color(DIM));
             });
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                let sdr_on = self.h.sdr.lock().unwrap().running;
+            }).response.rect;
+            let pills_rect = Rect::from_min_size(Pos2::new(top.x + full - PILLS_W, top.y), vec2(PILLS_W, used.height().max(46.0)));
+            ui.scope_builder(egui::UiBuilder::new().max_rect(pills_rect).layout(Layout::right_to_left(Align::Center)), |ui| {
                 pill(ui, "SDR", sdr_on).help(&help::PILLS);
                 pill(ui, "Audio", s.audio_ok).help(&help::PILLS);
-                pill(ui, "Mercury", s.mercury_ok).help(&help::PILLS);
-                pill(ui, "Radio", s.rig_ok).help(&help::PILLS);
+                let mp = pill(ui, "Mercury", s.mercury_ok).help(&help::PILLS);
                 if let Some(v) = &s.modem_version {
-                    ui.label(RichText::new(v).size(10.5).color(DIM)).on_hover_text(v.as_str());
+                    mp.on_hover_text(v.as_str());
                 }
+                pill(ui, "Radio", s.rig_ok).help(&help::PILLS);
             });
-        });
+        }
     }
 
     // ---------------------------------------------------------- left panel
