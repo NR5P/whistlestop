@@ -391,11 +391,20 @@ impl Drop for Server {
     }
 }
 
+/// Serve remote operation to the local network (the desktop's Settings →
+/// Remote operation).
 pub fn serve(port: u16, password: &str, shared: Shared) -> Result<Server> {
+    serve_on(std::net::Ipv4Addr::UNSPECIFIED, port, password, shared)
+}
+
+/// Serve remote operation on one address only, e.g. loopback for the test
+/// bench, which reaches a phone through `adb forward` or the Simulator's
+/// shared network and must not open the station to the LAN.
+pub fn serve_on(addr: std::net::Ipv4Addr, port: u16, password: &str, shared: Shared) -> Result<Server> {
     if password.trim().len() < 4 {
         bail!("set a password of at least 4 characters first");
     }
-    let l = TcpListener::bind(("0.0.0.0", port))
+    let l = TcpListener::bind((addr, port))
         .map_err(|e| anyhow!("can't listen on port {port}: {e}"))?;
     let port = l.local_addr()?.port();
     // Polled, so stopping closes it promptly.
@@ -1512,6 +1521,18 @@ mod tests {
         ));
         let _ = std::fs::remove_file(up);
         let _ = std::fs::remove_file(outside);
+    }
+
+    /// The bench's server (phones) answers on loopback and not on the LAN.
+    #[test]
+    fn serve_on_loopback_is_not_on_the_lan() {
+        let (shared, _rx) = fake_shared();
+        let srv = serve_on(std::net::Ipv4Addr::LOCALHOST, 0, "hunter22", shared).unwrap();
+        assert!(TcpStream::connect(("127.0.0.1", srv.port)).is_ok());
+        if let Some(lan) = lan_address().filter(|ip| !ip.is_loopback()) {
+            let r = TcpStream::connect_timeout(&std::net::SocketAddr::new(lan, srv.port), Duration::from_secs(2));
+            assert!(r.is_err(), "reachable on the LAN at {lan}:{}", srv.port);
+        }
     }
 
     #[test]

@@ -92,7 +92,10 @@ pub fn serve(b: &Bench, h: &Handle, cfg: &Config) -> Option<whistlestop::remote:
         cfg: Arc::new(Mutex::new((0, cfg.clone()))),
         devices: Default::default(),
     };
-    whistlestop::remote::serve(b.remote_port, &b.remote_password, shared)
+    // Loopback only: the bench reaches it through `adb forward` (Android)
+    // or the Simulator's shared network. A real phone on Wi-Fi must not
+    // serve the bench's well-known password to its LAN.
+    whistlestop::remote::serve_on(std::net::Ipv4Addr::LOCALHOST, b.remote_port, &b.remote_password, shared)
         .map_err(|e| eprintln!("whistlestop: bench: {e:#}"))
         .ok()
 }

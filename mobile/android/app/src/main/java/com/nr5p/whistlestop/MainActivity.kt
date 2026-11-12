@@ -128,16 +128,24 @@ private enum class Tab(val label: String) { Operate("Operate"), Chat("Chat"), De
 private fun App(station: Station) {
     val s by station.state.collectAsState()
     var tab by rememberSaveable { mutableStateOf(Tab.Operate) }
-    var lastPeer by remember { mutableStateOf<String?>(null) }
+    // Switch to Chat when a link or a Roundtable starts, not when the
+    // activity is recreated (rotation) with one already up: what was seen
+    // survives recreation, and the empty state before the first poll is
+    // ignored.
+    var lastPeer by rememberSaveable { mutableStateOf<String?>(null) }
+    var lastTable by rememberSaveable { mutableStateOf<String?>(null) }
     // The Chat tab shows the 1:1 link's chat or the Roundtable.
     var tablePane by rememberSaveable { mutableStateOf(false) }
-    LaunchedEffect(s.link?.peer) {
+    LaunchedEffect(s.loaded, s.link?.peer) {
+        if (!s.loaded) return@LaunchedEffect
         if (s.link?.peer != null && s.link?.peer != lastPeer) { tab = Tab.Chat; tablePane = false }
         lastPeer = s.link?.peer
     }
     val tableName = s.table?.name ?: s.tablePending
-    LaunchedEffect(tableName) {
-        if (tableName != null) { tab = Tab.Chat; tablePane = true }
+    LaunchedEffect(s.loaded, tableName) {
+        if (!s.loaded) return@LaunchedEffect
+        if (tableName != null && tableName != lastTable) { tab = Tab.Chat; tablePane = true }
+        lastTable = tableName
     }
     Column(Modifier.fillMaxSize().background(C.bg).systemBarsPadding()) {
         StationHeader(station, s)

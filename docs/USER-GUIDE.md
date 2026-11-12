@@ -255,7 +255,7 @@ A Roundtable is a group conversation on one frequency. There is no special broad
 - After you **Leave**, Mercury goes back to listening in DATAC3, the calling mode, once your goodbye has gone out (a table that sped up would otherwise leave you deaf to calls).
 - **Host**: Call CQ → **Roundtable**, name the table, **Call CQ**. Your whistle and CQ invite others; Whistlestop sends a CALL packet with the table's name.
 - **Join**: when a Roundtable CALL is heard, it appears under **Heard** with **Join**. Or type the name in the Roundtable tab and press **Join here** (you must be on the host's frequency).
-- **Joining right after a link**: Mercury can't switch to Roundtable listening while a 1:1 link is still closing (its disconnect takes several seconds, more if the other station is slow to answer). If you press **Join here** then, the tab shows "⏳ Joining … as soon as Mercury is free" and Whistlestop tries again every **2 s** for up to **60 s**; **Cancel** stops waiting. While a link is up and you haven't hung up, joining is refused: end the link first.
+- **Joining right after a link**: Mercury can't switch to Roundtable listening while a 1:1 link is still closing (its disconnect takes several seconds, more if the other station is slow to answer). If you press **Join here** then, the tab shows "⏳ Joining … as soon as Mercury is free" and Whistlestop tries again every **2 s** for up to **60 s**; **Cancel** stops waiting, and so does calling a station or calling CQ (the Log says "Roundtable join … cancelled"). It doesn't retry while you're calling someone. While a link is up and you haven't hung up, joining is refused: end the link first.
 - **Leave** says goodbye to the table.
 
 ### Talking

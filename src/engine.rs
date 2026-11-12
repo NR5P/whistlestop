@@ -104,6 +104,10 @@ pub enum Cmd {
     LibFetch(String),
     /// Send a Station ID beacon now.
     BeaconNow,
+    /// Connect to Mercury again if not connected, keeping the radio, its
+    /// shared rigctld port and everything else as they are. For a Mercury
+    /// that opened its ports after the station started (the phone apps').
+    ReconnectModem,
     MonitorVolume(f32),
     /// Wide whistle search on the SDR; `auto` tunes the radio to hits.
     WideSearch {
@@ -663,6 +667,8 @@ struct Station {
     mon_from: u64,
     /// The real-Mercury demo (its modems, band and K7BOT), while running.
     real_demo: Option<crate::realdemo::RealDemo>,
+    /// Where Mercury's TNC is: (host, control port, broadcast port).
+    modem: (String, u16, u16),
     depot: crate::depot::Depot,
     away: bool,
     last_beacon: Instant,
@@ -849,6 +855,7 @@ impl Station {
             monitor: None,
             mon_from: 0,
             real_demo: None,
+            modem: (String::new(), 0, 0),
             // Demo keeps its own mailbox; tests can point anywhere.
             depot: crate::depot::Depot::load(
                 std::env::var_os("WHISTLESTOP_DEPOT")
@@ -1132,27 +1139,8 @@ impl Station {
                 cfg.mercury_bcast_port,
             )
         };
-        let (etx, erx) = mpsc::unbounded_channel();
-        match Tnc::connect(&host, port, Some(bport), etx).await {
-            Ok(mut t) => match t.setup(&cfg.callsign, bw.mercury_arq_bw()).await {
-                Ok(()) => {
-                    let _ = t.command("MODE 1").await; // calling mode: DATAC3
-                    let _ = t.send_line("VERSION").await;
-                    s.tnc = Some(t);
-                    s.tnc_rx = Some(erx);
-                    s.set(|g| {
-                        g.mercury_ok = true;
-                        g.listen_mode = modes::mode_by_name("DATAC3");
-                    });
-                    s.log(format!(
-                        "Mercury: connected ({host}:{port}), listening as {}",
-                        cfg.callsign.to_uppercase()
-                    ));
-                }
-                Err(e) => s.log(format!("⚠ Mercury setup: {e}")),
-            },
-            Err(e) => s.log(format!("⚠ {e}")),
-        }
+        s.modem = (host, port, bport);
+        s.connect_modem().await;
 
         s.real_demo = real;
         let d = s.depot.clone();
@@ -1166,6 +1154,39 @@ impl Station {
         }
         s.poll_rig().await;
         s
+    }
+
+    /// Connect to Mercury's TNC (`self.modem`). Mercury serves one control
+    /// client, so this is tried at start and then only on request
+    /// (`Cmd::ReconnectModem`), never polled.
+    async fn connect_modem(&mut self) -> bool {
+        let (host, port, bport) = self.modem.clone();
+        let (etx, erx) = mpsc::unbounded_channel();
+        match Tnc::connect(&host, port, Some(bport), etx).await {
+            Ok(mut t) => match t.setup(&self.cfg.callsign, self.bw.mercury_arq_bw()).await {
+                Ok(()) => {
+                    let _ = t.command("MODE 1").await; // calling mode: DATAC3
+                    let _ = t.send_line("VERSION").await;
+                    self.tnc = Some(t);
+                    self.tnc_rx = Some(erx);
+                    self.set(|g| {
+                        g.mercury_ok = true;
+                        g.listen_mode = modes::mode_by_name("DATAC3");
+                    });
+                    let call = self.cfg.callsign.to_uppercase();
+                    self.log(format!("Mercury: connected ({host}:{port}), listening as {call}"));
+                    true
+                }
+                Err(e) => {
+                    self.log(format!("⚠ Mercury setup: {e}"));
+                    false
+                }
+            },
+            Err(e) => {
+                self.log(format!("⚠ {e}"));
+                false
+            }
+        }
     }
 
     async fn shutdown(mut self) {
@@ -1514,6 +1535,12 @@ impl Station {
                     anyhow::bail!("{call:?} isn't a callsign");
                 }
                 self.stop_search("connecting");
+                self.cancel_pending_join("calling instead");
+                // A Connect by hand replaces a pending auto-answer (and its
+                // "Calling", set again below once this CONNECT is out).
+                if self.answer_at.take().is_some() {
+                    self.set(|g| g.calling = None);
+                }
                 let me = self.mycall();
                 self.tnc()?.command(&format!("CONNECT {me} {call}")).await?;
                 self.set(|g| g.calling = Some(call.clone()));
@@ -1752,6 +1779,11 @@ impl Station {
                 self.log(format!("Connecting to {call} for Depot mail…"));
             }
             Cmd::BeaconNow => self.send_beacon("by hand")?,
+            Cmd::ReconnectModem => {
+                if self.tnc.is_none() {
+                    self.connect_modem().await;
+                }
+            }
             Cmd::Qsy(hz) => {
                 let Some(peer) = self.peer.clone() else {
                     anyhow::bail!("not linked")
@@ -2216,6 +2248,7 @@ impl Station {
 
     async fn start_cq(&mut self, table: Option<String>) -> anyhow::Result<()> {
         self.stop_search("for CQ");
+        self.cancel_pending_join("calling CQ instead");
         if self.peer.is_some() {
             anyhow::bail!("already linked; disconnect first");
         }
@@ -3515,14 +3548,32 @@ impl Station {
         self.answer_at = None;
         let still = self.st.lock().unwrap().calling.as_deref() == Some(call.as_str());
         if still && self.peer.is_none() {
-            let me = self.mycall();
-            self.tnc()?.command(&format!("CONNECT {me} {call}")).await?;
+            let cmd = format!("CONNECT {} {call}", self.mycall());
+            let sent = match self.tnc() {
+                Ok(t) => t.command(&cmd).await.map(|_| ()),
+                Err(e) => Err(e),
+            };
+            if let Err(e) = sent {
+                // Not calling after all: "Calling" would otherwise stay up
+                // (and keep the watch, beacons and schedule off) for good.
+                self.set(|g| g.calling = None);
+                return Err(e.context(format!("couldn't answer {call}")));
+            }
             self.log(format!("Calling {call}…"));
         }
         Ok(())
     }
 
     /// Try a waiting Roundtable join again (every 2 s once unlinked).
+    /// Drop a waiting Roundtable join: the operator has moved on (a call,
+    /// a CQ of their own), and a late join would cut into it.
+    fn cancel_pending_join(&mut self, why: &str) {
+        if let Some((name, ..)) = self.pending_join.take() {
+            self.set(|g| g.table_pending = None);
+            self.log(format!("Roundtable join \"{name}\" cancelled ({why})"));
+        }
+    }
+
     async fn step_pending_join(&mut self) -> anyhow::Result<()> {
         let Some((name, asked, last)) = self.pending_join.clone() else {
             return Ok(());
@@ -3537,7 +3588,8 @@ impl Station {
             self.system_line(m);
             return Ok(());
         }
-        if self.peer.is_some() || last.elapsed() < Duration::from_secs(2) {
+        let calling = self.st.lock().unwrap().calling.is_some();
+        if self.peer.is_some() || calling || last.elapsed() < Duration::from_secs(2) {
             return Ok(());
         }
         self.pending_join = Some((name.clone(), asked, Instant::now()));
@@ -4842,6 +4894,76 @@ fn mercury_version_reply() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A Mercury that opens its ports after the station started (the phone
+    /// apps start the engine first): `ReconnectModem` connects to it
+    /// without restarting the station, so the radio and its shared rigctld
+    /// port (Mercury's PTT) stay up.
+    #[test]
+    fn reconnect_modem_reaches_a_late_mercury_without_a_restart() {
+        use std::net::TcpListener as StdListener;
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        // Ports for Mercury: control and data consecutive, plus broadcast.
+        let (ctl, bc) = loop {
+            let a = StdListener::bind("127.0.0.1:0").unwrap();
+            let p = a.local_addr().unwrap().port();
+            // All three held until all are picked, so they're distinct.
+            if let Ok(_d) = StdListener::bind(("127.0.0.1", p + 1)) {
+                let b = StdListener::bind("127.0.0.1:0").unwrap();
+                break (p, b.local_addr().unwrap().port());
+            }
+        };
+        let h = spawn(|| {});
+        let mut cfg = Config {
+            callsign: "N0LATE".into(),
+            demo: false,
+            rigctld: "none".into(),
+            mercury_port: ctl,
+            mercury_bcast_port: bc,
+            ..Default::default()
+        };
+        cfg.sdr.enabled = false;
+        cfg.sdr.wide_search = false;
+        h.send(Cmd::Start(cfg));
+        let log = |h: &Handle| h.state.lock().unwrap().log.iter().map(|l| l.1.clone()).collect::<Vec<_>>();
+        let t = Instant::now();
+        while !log(&h).iter().any(|l| l.contains("Radio: none")) && t.elapsed() < Duration::from_secs(10) {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        std::thread::sleep(Duration::from_millis(500));
+        assert!(!h.state.lock().unwrap().mercury_ok, "nothing listens yet");
+        // Mercury comes up: forward the reserved ports to a fake Mercury.
+        rt.block_on(async {
+            let f = crate::fake_mercury::FakeMercury::start(Default::default()).await.unwrap();
+            for (from, to) in [(ctl, f.port), (ctl + 1, f.port + 1), (bc, f.bcast_port)] {
+                let l = tokio::net::TcpListener::bind(("127.0.0.1", from))
+                    .await
+                    .unwrap_or_else(|e| panic!("port {from} ({ctl}/{bc}): {e}; fake {}/{}", f.port, f.bcast_port));
+                tokio::spawn(async move {
+                    while let Ok((mut a, _)) = l.accept().await {
+                        let mut b = tokio::net::TcpStream::connect(("127.0.0.1", to)).await.unwrap();
+                        tokio::spawn(async move {
+                            let _ = tokio::io::copy_bidirectional(&mut a, &mut b).await;
+                        });
+                    }
+                });
+            }
+        });
+        h.send(Cmd::ReconnectModem);
+        let t = Instant::now();
+        while !h.state.lock().unwrap().mercury_ok && t.elapsed() < Duration::from_secs(10) {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert!(h.state.lock().unwrap().mercury_ok, "{:#?}", log(&h));
+        h.send(Cmd::ReconnectModem);
+        std::thread::sleep(Duration::from_millis(500));
+        let l = log(&h);
+        h.send(Cmd::Stop);
+        // One station all along: started once, the radio set up once.
+        assert_eq!(l.iter().filter(|x| x.contains("Radio: none")).count(), 1, "{l:#?}");
+        // Asking again while connected does nothing.
+        assert_eq!(l.iter().filter(|x| x.starts_with("Mercury: connected")).count(), 1, "{l:#?}");
+    }
 
     /// Radio "none" (the phones' Radio → None, VOX keying) is no radio, not
     /// a rigctld host called "none".

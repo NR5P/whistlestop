@@ -136,6 +136,39 @@ building any audio stream now reports its message instead of "did not
 start". Checked with `airtest whistle`: 4/4, no false alarm in 15 s of
 quiet, then the computer heard the phone's CQ whistle 3 s in (score 0.9).
 
+## The apps against each other, and a bug hunt (2026-11-12)
+
+`--a=ios --b=android` (Simulator ↔ emulator, each app with its built-in
+Mercury): link, chat, Roundtable, encryption (same check code, sealed chat,
+6 KB file byte-exact) and the Depot all passed, 21/21 over two runs.
+
+Fixed after a review of the engine and the apps:
+
+- **The phones restarted the whole station to reach a late Mercury.** The
+  engine starts before the app's Mercury opens its ports, so
+  `connect_when_ready` sent `Start` again, which dropped the radio's shared
+  rigctld port: Mercury's one connection for keying a USB radio. Now it
+  sends `ReconnectModem`, which only connects to Mercury (test
+  `reconnect_modem_reaches_a_late_mercury_without_a_restart`).
+- **Auto-answer could leave "Calling X" up for good** when its CONNECT
+  failed (Mercury busy, or no modem), keeping the whistle watch, beacons
+  and schedule off; and a Connect by hand during its 4.5 s wait sent a
+  second CONNECT.
+- **A waiting Roundtable join kept retrying** through a call or a CQ of
+  your own; calling now cancels it, and it never retries mid-call.
+- **The bench's remote operation on a phone listened on every interface**
+  with the well-known password: now loopback only (`remote::serve_on`,
+  test `serve_on_loopback_is_not_on_the_lan`).
+- **Android: rotating the phone jumped to Chat** while linked (or to the
+  Roundtable while at one): the activity is recreated and the "new link"
+  check saw the old link as new. Checked on the emulator before and after.
+- **The bench crashed** in any scenario that sends a file (narrow, e2e,
+  resume…) when run without `files`, which made the `to-send` folder.
+
+Not changed: after a "measure again" hop in search, a silent next look
+still waits for the CQ at the re-measured frequency, which may be the
+stale one. Worth a look with the `scan` scenario.
+
 ## Cancel, resume, Require, away timeout (2026-11-11)
 
 **After the fixes: 18/18** (and the standard set 34/34 on the same build):

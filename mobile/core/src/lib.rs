@@ -284,8 +284,11 @@ fn ensure_mercury(dir: &std::path::Path, cfg: &Config) {
 
 /// The engine starts alongside Mercury and connects to it once; Mercury
 /// opens its ports a moment later (or, keying a USB radio, up to 30 s
-/// later). Restart the engine until it has connected. (Its ports aren't
-/// probed: Mercury serves one control client, and a probe could unseat it.)
+/// later). Ask the engine to connect again until it has. Only the modem
+/// connection is retried: restarting the station would drop the shared
+/// rigctld port, and with it Mercury's one connection for keying the radio.
+/// (Its ports aren't probed: Mercury serves one control client, and a probe
+/// could unseat it.)
 #[cfg(feature = "mercury")]
 fn connect_when_ready() {
     for _ in 0..8 {
@@ -293,7 +296,7 @@ fn connect_when_ready() {
         let done = with_app(|a| {
             let ok = a.h.state.lock().unwrap().mercury_ok;
             if !ok {
-                a.h.send(Cmd::Start(a.cfg.clone()));
+                a.h.send(Cmd::ReconnectModem);
             }
             ok
         });

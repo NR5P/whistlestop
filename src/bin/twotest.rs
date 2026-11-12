@@ -102,6 +102,8 @@ mod bench {
         fn start(mercury: &Path, work: PathBuf, kinds: [Kind; 2]) -> anyhow::Result<Bench> {
             std::fs::create_dir_all(&work)?;
             let work = std::fs::canonicalize(&work)?;
+            // Files the scenarios send; any of them may run without `files`.
+            std::fs::create_dir_all(work.join("to-send"))?;
             let sa = work.join("a.sock");
             let sb = work.join("b.sock");
             let ether = Ether::start(

@@ -25,6 +25,8 @@ private fun JsonObject.digits(k: String) = (this[k] as? JsonPrimitive)?.content 
 private fun JsonElement.obj() = this as? JsonObject ?: JsonObject(emptyMap())
 
 data class EngineState(
+    /** Parsed from the engine (false: the placeholder before the first poll). */
+    val loaded: Boolean = false,
     val mycall: String = "",
     val demo: Boolean = false,
     val rigOk: Boolean = false,
@@ -54,6 +56,7 @@ data class EngineState(
             val s = Json.parseToJsonElement(json).obj()
             val rig = s.o("rig")
             return EngineState(
+                loaded = true,
                 mycall = s.s("mycall") ?: "",
                 demo = s.b("demo"),
                 rigOk = s.b("rig_ok"),
