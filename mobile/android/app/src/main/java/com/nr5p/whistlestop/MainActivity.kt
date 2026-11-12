@@ -287,7 +287,9 @@ private fun OperateScreen(station: Station, s: EngineState) {
                 )
                 QuietButton("Stop search") { station.stopSearch() }
             } else {
-                BrassButton("Search current band") { station.searchCurrentBand() }
+                // A search retunes the radio away from a Roundtable.
+                val free = s.table == null
+                BrassButton("Search current band", enabled = free) { station.searchCurrentBand() }
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     Box(Modifier.weight(1f)) {
                         QuietButton("$band ▾") { bandMenu = true }
@@ -295,9 +297,9 @@ private fun OperateScreen(station: Station, s: EngineState) {
                             BANDS.forEach { b -> DropdownMenuItem(text = { Text(b) }, onClick = { band = b; bandMenu = false }) }
                         }
                     }
-                    QuietButton("Search $band", Modifier.weight(1f)) { station.searchBand(band) }
+                    QuietButton("Search $band", Modifier.weight(1f), enabled = free) { station.searchBand(band) }
                 }
-                QuietButton("Search all bands") { station.searchAllBands() }
+                QuietButton("Search all bands", enabled = free) { station.searchAllBands() }
             }
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text("Answer automatically", color = C.text, modifier = Modifier.weight(1f))
@@ -333,7 +335,7 @@ private fun OperateScreen(station: Station, s: EngineState) {
                             station.setFreq(h.dialHz / 1000)
                             station.joinTable(table)
                         }
-                    } else BrassButton("Answer", Modifier.width(110.dp), enabled = s.link == null) {
+                    } else BrassButton("Answer", Modifier.width(110.dp), enabled = s.link == null && s.table == null) {
                         station.setFreq(h.dialHz / 1000)
                         station.connect(h.call)
                     }
@@ -355,14 +357,16 @@ private fun OperateScreen(station: Station, s: EngineState) {
                 if (cqTable) Field(tableName, { tableName = it }, "Roundtable name", Modifier.fillMaxWidth(), caps = false)
                 BrassButton(
                     if (cqTable) "Whistle and host the table" else "Whistle and call CQ",
-                    enabled = s.link == null && s.mercuryOk && (!cqTable || tableName.isNotBlank()),
+                    // At a Roundtable: only a CQ for that table, as its host.
+                    enabled = s.link == null && s.mercuryOk && (!cqTable || tableName.isNotBlank())
+                        && s.table.let { t -> t == null || (cqTable && t.host && t.name.equals(tableName.trim(), ignoreCase = true)) },
                 ) { station.callCq(if (cqTable) tableName else null) }
             }
         }
         WCard("Connect", HelpTopic.connect) {
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Field(call, { call = it }, "Callsign", Modifier.weight(1f))
-                QuietButton("Connect", Modifier.width(120.dp), enabled = call.isNotBlank() && s.link == null) {
+                QuietButton("Connect", Modifier.width(120.dp), enabled = call.isNotBlank() && s.link == null && s.table == null) {
                     station.connect(call); call = ""
                 }
             }

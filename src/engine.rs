@@ -687,7 +687,9 @@ struct Station {
     e2e: Option<Channel>,
     /// Handshake packets: always sent at once, in the clear.
     ctl_queue: VecDeque<Vec<u8>>,
-    /// Packets that arrived before Mercury's CONNECTED line.
+    /// When Mercury's data port last gave us bytes.
+    last_data_in: Instant,
+    /// Packets that arrived before Mercury's CONNECTED line, with when.
     early: Vec<(Instant, Vec<u8>)>,
     /// Application packets, waiting for the modem (and for keys).
     hi_queue: VecDeque<Link>,
@@ -823,6 +825,9 @@ struct Station {
     /// An auto-answer waiting for the CQ station to stop transmitting:
     /// (callsign, when to CONNECT).
     answer_at: Option<(String, Instant)>,
+    /// The last Roundtable CALL heard: (host, table name, when). Its
+    /// CQFRAME and CALL come on two ports, in either order.
+    last_table_call: Option<(String, String, Instant)>,
     /// Library downloads we asked for (their offers are accepted at once).
     wanted: std::collections::HashSet<u64>,
     /// Library files we're sending on this link (fids): dropped when it ends.
@@ -934,6 +939,7 @@ impl Station {
             e2e: None,
             ctl_queue: VecDeque::new(),
             early: vec![],
+            last_data_in: Instant::now(),
             hi_queue: VecDeque::new(),
             outgoing: vec![],
             incoming: HashMap::new(),
@@ -949,7 +955,10 @@ impl Station {
             last_report: Instant::now(),
             table_asm: TableAssembler::default(),
             table_sent: HashMap::new(),
-            table_msg_id: 0,
+            // Random start: other members remember finished messages by
+            // (call, id) for 10 minutes, so numbers that restart at 1
+            // after a restart would be taken as already heard.
+            table_msg_id: rand::random_range(1..1u64 << 20),
             table_queue: VecDeque::new(),
             table_busy_until: Instant::now(),
             restore_calling_mode: false,
@@ -1035,6 +1044,7 @@ impl Station {
             link_ended_at: None,
             pending_join: None,
             answer_at: None,
+            last_table_call: None,
             wanted: Default::default(),
             library_out: Default::default(),
             last_sched: None,
@@ -1260,6 +1270,7 @@ impl Station {
         } else if cfg.demo {
             match FakeMercury::start(FakeOptions {
                 rig_freq: Some(vfo.clone()),
+                bot_cq_table: crate::fake_mercury::test_bot_table(&cfg.callsign),
                 ..Default::default()
             })
             .await
@@ -2113,6 +2124,7 @@ impl Station {
             anyhow::bail!("stop calling CQ first");
         }
         self.no_retune_while_linked()?;
+        self.not_at_table("search")?;
         let segs = bandplan::segments_for(&scope, &self.cfg.segments, self.dial());
         if segs.is_empty() {
             anyhow::bail!(
@@ -2467,12 +2479,35 @@ impl Station {
         if !crate::protocol::valid_call(&self.mycall()) {
             anyhow::bail!("set your own callsign first (Settings → Station): a CQ identifies you");
         }
-        self.stop_search("for CQ");
-        self.cancel_pending_join("calling CQ instead");
         if self.peer.is_some() {
             anyhow::bail!("already linked; disconnect first");
         }
-        if let Some(t) = &table {
+        // At a table, only a CQ for that same table (as its host): calling
+        // it again keeps who's there and what was said.
+        let here = self
+            .st
+            .lock()
+            .unwrap()
+            .table
+            .as_ref()
+            .map(|t| (t.name.clone(), t.host));
+        let again = match (&here, &table) {
+            (None, _) => false,
+            (Some((name, true)), Some(t)) if name.eq_ignore_ascii_case(t.trim()) => true,
+            (Some(_), Some(_)) => {
+                self.not_at_table("host another")?;
+                unreachable!()
+            }
+            (Some(_), None) => {
+                self.not_at_table("call CQ for a 1:1 chat")?;
+                unreachable!()
+            }
+        };
+        self.stop_search("for CQ");
+        self.cancel_pending_join("calling CQ instead");
+        if let Some(t) = &table
+            && !again
+        {
             self.join_table(t.clone(), true).await?;
         }
         self.cq = Some(Cq {
@@ -2701,6 +2736,15 @@ impl Station {
                 if self.peer.is_some() && !self.incoming.is_empty() && !d.is_empty() {
                     self.last_link_activity = Instant::now();
                 }
+                // With no link, a half packet left from the last one (its
+                // tail came after DISCONNECTED) would swallow the start of
+                // the next link: after a pause, start the stream afresh.
+                if self.peer.is_none()
+                    && self.last_data_in.elapsed() > Duration::from_secs(EARLY_MAX_S)
+                {
+                    self.dec = LinkDecoder::default();
+                }
+                self.last_data_in = Instant::now();
                 let bodies = match self.dec.feed_bodies(&d) {
                     Ok(b) => b,
                     // The stream has no resync point: everything after a
@@ -2728,6 +2772,12 @@ impl Station {
                 self.tnc = None;
                 self.tnc_rx = None;
                 self.set(|g| g.mercury_ok = false);
+                // Its link went with it, and no DISCONNECTED will come for
+                // it: end it here, so its keys, queues and peer don't carry
+                // over to the Mercury we reconnect to.
+                if self.peer.is_some() || self.st.lock().unwrap().calling.is_some() {
+                    self.on_line("DISCONNECTED".into()).await?;
+                }
             }
         }
         Ok(())
@@ -3013,6 +3063,12 @@ impl Station {
                         self.set(|g| g.calling = Some(call.clone()));
                         self.quiet_watch();
                         self.log(format!("Auto-answering {call} once its CQ is off the air"));
+                        // Its CALL may already be here: a Roundtable's.
+                        if let Some((_, table, _)) = self.last_table_call.clone().filter(|(h, _, at)| {
+                            *h == call && at.elapsed() < Duration::from_secs(15)
+                        }) {
+                            self.answer_by_joining(&call, table).await?;
+                        }
                     }
                 }
             }
@@ -3132,6 +3188,14 @@ impl Station {
     async fn e2e_drop(&mut self, why: String) -> anyhow::Result<()> {
         self.e2e = None;
         self.hi_queue.clear();
+        // The header stops claiming "Encrypted" (or "Negotiating") at once:
+        // Mercury's disconnect can take a while.
+        let shown = format!("encryption failed ({why}); disconnecting");
+        self.set(|g| {
+            if let Some(l) = g.link.as_mut() {
+                l.e2e = E2eView::Plain { why: shown };
+            }
+        });
         self.log(format!("⚠ Encryption: {why}. Disconnecting."));
         self.system_line(format!("⚠ Encryption: {why}. Disconnecting."));
         // Tell the other station why, in its own terms.
@@ -3260,6 +3324,24 @@ impl Station {
                     reason: "busy: ask again".into(),
                 });
             }
+            // Each fetch holds its whole file in memory until it's across:
+            // only a few at a time, however many are asked for.
+            Link::Fetch { id, .. }
+                if self
+                    .outgoing
+                    .iter()
+                    .filter(|o| self.library_out.contains(&o.fid))
+                    .count()
+                    >= MAX_LIBRARY_OUT =>
+            {
+                self.hi_queue.push_back(Link::FetchAnswer {
+                    id,
+                    ok: false,
+                    reason: format!(
+                        "busy: {MAX_LIBRARY_OUT} library files already on their way to you; ask again when one has arrived"
+                    ),
+                });
+            }
             Link::Fetch { id, path } => match self.library_file(&path) {
                 Ok((name, data)) => {
                     // Only for this link: never offered to whoever links next.
@@ -3301,7 +3383,9 @@ impl Station {
             }
             Link::Chat { id, text } => {
                 self.last_link_activity = Instant::now();
-                if self.away && !peer.is_empty() {
+                // Id 0 is the other station's automatic away greeting (typed
+                // chat starts at 1): a reply to our call, not mail for us.
+                if self.away && !peer.is_empty() && id != 0 {
                     let m = crate::depot::Mail {
                         id: crate::depot::new_id(),
                         from: peer.clone(),
@@ -3410,7 +3494,9 @@ impl Station {
             Link::Chunk { fid, offset, data } => {
                 let mut finished = None;
                 let mut progress = None;
-                if let Some(inc) = self.incoming.get_mut(&fid) {
+                // Only for an offer that was accepted: a station sending
+                // pieces before the answer can't put a file here unasked.
+                if let Some(inc) = self.incoming.get_mut(&fid).filter(|i| i.accepted) {
                     inc.chunk(offset, &data);
                     let have = inc.have();
                     if have % (16 * CHUNK as u64) < CHUNK as u64 {
@@ -3429,18 +3515,7 @@ impl Station {
                     }
                 }
                 if let Some(inc) = finished {
-                    let name = inc.name.clone();
-                    match inc.finish(&self.cfg.download_dir) {
-                        Ok(path) => {
-                            self.hi_queue.push_back(Link::Done { fid, ok: true });
-                            self.log(format!("✓ Received {name} → {}", path.display()));
-                            self.xfer(Dir::In, fid, |t| t.state = XferState::Done(Some(path)));
-                        }
-                        Err(e) => {
-                            self.hi_queue.push_back(Link::Done { fid, ok: false });
-                            self.xfer(Dir::In, fid, |t| t.state = XferState::Failed(e.to_string()));
-                        }
-                    }
+                    self.finish_incoming(inc);
                     self.pump().await?;
                 }
             }
@@ -3690,6 +3765,22 @@ impl Station {
         self.pump().await
     }
 
+    /// A file that's all here: check it, save it, tell the sender.
+    fn finish_incoming(&mut self, inc: Incoming) {
+        let (fid, name) = (inc.fid, inc.name.clone());
+        match inc.finish(&self.cfg.download_dir) {
+            Ok(path) => {
+                self.hi_queue.push_back(Link::Done { fid, ok: true });
+                self.log(format!("✓ Received {name} → {}", path.display()));
+                self.xfer(Dir::In, fid, |t| t.state = XferState::Done(Some(path)));
+            }
+            Err(e) => {
+                self.hi_queue.push_back(Link::Done { fid, ok: false });
+                self.xfer(Dir::In, fid, |t| t.state = XferState::Failed(e.to_string()));
+            }
+        }
+    }
+
     async fn answer_offer(&mut self, fid: u64, accept: bool) -> anyhow::Result<()> {
         // Only an offer on the current link can be answered; an answer queued
         // now would otherwise go out on whatever link comes next.
@@ -3706,7 +3797,11 @@ impl Station {
             });
             anyhow::bail!("that offer is no longer open: the link it came on has ended");
         };
-        if !accept {
+        if accept {
+            if let Some(i) = self.incoming.get_mut(&fid) {
+                i.accepted = true;
+            }
+        } else {
             self.incoming.remove(&fid);
         }
         self.hi_queue.push_back(Link::Answer {
@@ -3722,6 +3817,13 @@ impl Station {
             };
             t.started = Some(Instant::now());
         });
+        // Nothing left to come (an empty file, or all of it already here
+        // from an earlier try): no piece will arrive to finish it, so
+        // finish it now.
+        if accept && self.incoming.get(&fid).is_some_and(|i| i.complete()) {
+            let inc = self.incoming.remove(&fid).unwrap();
+            self.finish_incoming(inc);
+        }
         self.pump().await
     }
 
@@ -3821,6 +3923,18 @@ impl Station {
 
     /// Send a waiting auto-answer's CONNECT once the CQ is off the air,
     /// unless the call was cancelled or another link came first.
+    /// The CQ being answered is for a Roundtable: answering it is joining
+    /// the table, not a 1:1 link to its host (which would pull the host
+    /// away from everyone else at the table).
+    async fn answer_by_joining(&mut self, host: &str, table: String) -> anyhow::Result<()> {
+        self.answer_at = None;
+        self.set(|g| g.calling = None);
+        self.log(format!(
+            "Auto-answer: {host}'s CQ is for the Roundtable \"{table}\"; joining it"
+        ));
+        self.request_join(table).await
+    }
+
     async fn step_answer(&mut self) -> anyhow::Result<()> {
         let Some((call, at)) = self.answer_at.clone() else {
             return Ok(());
@@ -3904,6 +4018,10 @@ impl Station {
         }
         let id = table_id(&name);
         self.restore_calling_mode = false;
+        // A new table: parts still missing from the last one would be
+        // asked for (AGAIN) here, where nobody can send them.
+        self.table_asm = TableAssembler::default();
+        self.table_sent.clear();
         let mode = modes::mode_by_name("DATAC3").unwrap();
         self.tnc()?.command(&format!("MODE {}", mode.index)).await?;
         self.set(|g| {
@@ -4000,7 +4118,9 @@ impl Station {
                 m.name, m.payload_bps
             ));
         }
-        if Instant::now() < self.table_busy_until || self.tnc.is_none() {
+        // A 1:1 link (one that came in while at the table): broadcasts
+        // now would go out on top of it. Table traffic waits for it to end.
+        if Instant::now() < self.table_busy_until || self.tnc.is_none() || self.peer.is_some() {
             return Ok(());
         }
         // Our own CQ whistle is on the air: a table frame now would be sent
@@ -4067,6 +4187,17 @@ impl Station {
             } => {
                 // The CALL packet that follows a CQFRAME: the air is about
                 // to be free for a waiting auto-answer.
+                if *kind == CALL_TABLE {
+                    self.last_table_call =
+                        Some((fr.from.clone(), table_name.clone(), Instant::now()));
+                }
+                let answering = self.answer_at.as_ref().is_some_and(|(c, _)| *c == fr.from);
+                if answering && *kind == CALL_TABLE {
+                    let (from, name) = (fr.from.clone(), table_name.clone());
+                    self.add_heard(&from, format!("Roundtable \"{name}\""), Some(name.clone()));
+                    self.answer_by_joining(&from, name).await?;
+                    return Ok(());
+                }
                 if let Some((call, at)) = self.answer_at.as_mut()
                     && *call == fr.from
                 {
@@ -4517,7 +4648,12 @@ impl Station {
 
     /// Host only: move the table to the fastest mode everyone can copy.
     async fn ramp(&mut self) -> anyhow::Result<()> {
-        if !self.cfg.auto_ramp || self.pending_speed.is_some() || self.join_window.is_some() {
+        // No speed changes (a MODE command) in the middle of a 1:1 link.
+        if !self.cfg.auto_ramp
+            || self.pending_speed.is_some()
+            || self.join_window.is_some()
+            || self.peer.is_some()
+        {
             return Ok(());
         }
         let (host, worst, current) = {
@@ -4885,9 +5021,21 @@ impl Station {
         self.pending_join.is_some() || self.st.lock().unwrap().table.is_some()
     }
 
+    /// Nothing on: no link, no call, not at a Roundtable. Automation
+    /// (schedule, Station ID, mail delivery and collection) waits for it.
     fn quiet(&self) -> bool {
         let g = self.st.lock().unwrap();
-        !g.tx && g.link.is_none() && g.calling.is_none() && !g.incoming_call
+        !g.tx && g.link.is_none() && g.calling.is_none() && !g.incoming_call && g.table.is_none()
+    }
+
+    /// Refuse what would take the station away from its Roundtable (a
+    /// 1:1 link, a search, a chat CQ): the table's broadcasts and speed
+    /// changes would cut into a link, and a search retunes the radio.
+    fn not_at_table(&self, then: &str) -> anyhow::Result<()> {
+        if let Some(name) = self.st.lock().unwrap().table.as_ref().map(|t| t.name.clone()) {
+            anyhow::bail!("you're at the Roundtable \"{name}\": leave it first, then {then}");
+        }
+        Ok(())
     }
 
     /// Mercury's busy detector on (no link) or off (linked), if the
@@ -5252,10 +5400,15 @@ impl Station {
         if let Some(peer) = self.peer.clone() {
             let idle = self.last_link_activity.elapsed().as_secs_f64();
             let done = match self.link_auto {
-                Some(true) => self.depot.waiting_for(&peer).is_empty() && idle > 8.0,
+                // Delivering: done once all is confirmed, or after a minute
+                // with no confirmation (a station that won't take it).
+                Some(true) => {
+                    (self.depot.waiting_for(&peer).is_empty() && idle > 8.0)
+                        || idle > AUTO_LINK_IDLE_S
+                }
                 // Collecting: once mail has come, 10 s of quiet ends it; until
                 // then wait up to a minute (it took 23 s to cross on the bench).
-                Some(false) => idle > if self.link_got_mail { 10.0 } else { 60.0 },
+                Some(false) => idle > if self.link_got_mail { 10.0 } else { AUTO_LINK_IDLE_S },
                 None => self.away && idle > self.cfg.away_idle_s,
             };
             if done && self.mercury_buffer == 0 {
@@ -5545,6 +5698,17 @@ pub const ANSWER_AFTER_CQ_S: f64 = 4.5;
 /// A fine correction at least this big right after retuning onto a whistle
 /// is measured again before locking (the scan detector is good to ~10 Hz).
 pub const RECHECK_HZ: f64 = 25.0;
+
+/// Link packets that arrive before CONNECTED are kept this long for it
+/// (Mercury's data port can beat its control port by a moment).
+pub const EARLY_MAX_S: u64 = 3;
+
+/// Library files sent to one station at the same time, at most.
+pub const MAX_LIBRARY_OUT: usize = 3;
+
+/// An automatic link (Depot delivery or collection) is hung up after this
+/// long with nothing happening, done or not.
+pub const AUTO_LINK_IDLE_S: f64 = 60.0;
 
 /// How long a Roundtable join waits for Mercury to be free.
 pub const JOIN_WAIT_S: f64 = 60.0;
@@ -6060,6 +6224,79 @@ mod tests {
         std::fs::remove_dir_all(&cfg.download_dir).ok();
     }
 
+    /// A station that sends a file's pieces without waiting for the answer
+    /// can't put the file here: pieces count only once the offer is
+    /// accepted, and the file then arrives as usual.
+    #[test]
+    fn file_pieces_before_the_answer_are_not_kept() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let f = rt
+            .block_on(crate::fake_mercury::FakeMercury::start(FakeOptions {
+                fast: true,
+                bot_pushy: true,
+                bot_e2e: e2e::Policy::Off,
+                ..Default::default()
+            }))
+            .unwrap();
+        let h = spawn(|| {});
+        let mut cfg = Config {
+            callsign: "N0RCV".into(),
+            demo: false,
+            rigctld: "none".into(),
+            mercury_port: f.port,
+            mercury_bcast_port: f.bcast_port,
+            ..Default::default()
+        };
+        cfg.sdr.enabled = false;
+        cfg.sdr.wide_search = false;
+        cfg.download_dir =
+            std::env::temp_dir().join(format!("ws-pushy-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&cfg.download_dir);
+        h.send(Cmd::Start(cfg.clone()));
+        let wait = |what: &str, secs: u64, f: &dyn Fn(&State) -> bool| {
+            let t = Instant::now();
+            while t.elapsed() < Duration::from_secs(secs) {
+                if f(&h.state.lock().unwrap()) {
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            let g = h.state.lock().unwrap();
+            let log: Vec<_> = g.log.iter().map(|l| l.1.clone()).collect();
+            panic!("timed out waiting for {what}; log:\n{}", log.join("\n"));
+        };
+        wait("Mercury", 10, &|s| s.mercury_ok);
+        h.send(Cmd::Connect("K7BOT".into()));
+        wait("link", 30, &|s| s.link.is_some());
+        h.send(Cmd::Chat("send me a file please".into()));
+        wait("the offer", 30, &|s| {
+            s.transfers.iter().any(|t| t.dir == Dir::In && t.state == XferState::WaitingForYou)
+        });
+        // Its pieces came right behind the offer; give them time to land.
+        std::thread::sleep(Duration::from_secs(2));
+        let saved = |d: &std::path::Path| {
+            std::fs::read_dir(d)
+                .map(|r| r.flatten().filter(|e| e.path().is_file()).count())
+                .unwrap_or(0)
+        };
+        {
+            let g = h.state.lock().unwrap();
+            let t = g.transfers.iter().find(|t| t.dir == Dir::In).unwrap();
+            assert_eq!(t.state, XferState::WaitingForYou, "{:?}", t.state);
+            assert_eq!(t.done, 0, "pieces before the answer were taken");
+        }
+        assert_eq!(saved(&cfg.download_dir), 0, "a file was saved unasked");
+        let fid = h.state.lock().unwrap().transfers.iter().find(|t| t.dir == Dir::In).unwrap().fid;
+        h.send(Cmd::AnswerOffer { fid, accept: true });
+        wait("the file, once accepted", 30, &|s| {
+            s.transfers.iter().any(|t| t.dir == Dir::In && matches!(t.state, XferState::Done(Some(_))))
+        });
+        h.send(Cmd::Stop);
+        assert_eq!(saved(&cfg.download_dir), 1);
+        std::fs::remove_dir_all(&cfg.download_dir).ok();
+        drop(rt);
+    }
+
     /// Auto-answering a CQ that Search found is a call in progress, like
     /// Connect by hand: `calling` is set until the link comes up, so
     /// whistle watch, beacons, schedules and SDR auto-tune leave the radio
@@ -6105,6 +6342,53 @@ mod tests {
             std::thread::sleep(Duration::from_millis(50));
         }
         assert!(seen_calling, "never saw the auto-answer call in progress");
+        h.send(Cmd::Stop);
+    }
+
+    /// Answering automatically a CQ whose CALL packet says Roundtable
+    /// joins the table: no 1:1 link that would pull its host away.
+    #[test]
+    fn auto_answer_joins_a_roundtable_cq() {
+        crate::fake_mercury::TEST_BOT_TABLE
+            .lock()
+            .unwrap()
+            .push(("N0RTAB".into(), "Bot Table".into()));
+        let h = spawn(|| {});
+        let mut cfg = Config {
+            demo: true,
+            demo_real_mercury: false,
+            callsign: "N0RTAB".into(),
+            auto_answer: true,
+            ..Default::default()
+        };
+        cfg.sdr.enabled = false;
+        h.send(Cmd::Start(cfg));
+        let t = Instant::now();
+        while !h.state.lock().unwrap().mercury_ok {
+            assert!(t.elapsed() < Duration::from_secs(10), "Mercury didn't start");
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        h.send(Cmd::StartSearch(SearchScope::CurrentBand));
+        let joined = loop {
+            {
+                let g = h.state.lock().unwrap();
+                assert!(g.link.is_none(), "linked 1:1 to a Roundtable's host");
+                if g.table.as_ref().is_some_and(|t| t.name == "Bot Table" && !t.host) {
+                    break true;
+                }
+            }
+            if t.elapsed() > Duration::from_secs(150) {
+                break false;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        };
+        let log: Vec<String> = h.state.lock().unwrap().log.iter().map(|l| l.1.clone()).collect();
+        assert!(joined, "never joined; log:\n{}", log.join("\n"));
+        // And stays off a 1:1 link for a while after.
+        std::thread::sleep(Duration::from_secs(5));
+        let g = h.state.lock().unwrap();
+        assert!(g.link.is_none() && g.calling.is_none(), "{:?}", g.calling);
+        drop(g);
         h.send(Cmd::Stop);
     }
 

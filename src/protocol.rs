@@ -697,6 +697,9 @@ pub struct Incoming {
     pub sha: [u8; 32],
     pub zipped: bool,
     pub data: Vec<u8>,
+    /// Set once the operator (or a library fetch) accepted the offer:
+    /// pieces that arrive before that are not ours to keep.
+    pub accepted: bool,
     partial_path: PathBuf,
 }
 
@@ -716,6 +719,7 @@ impl Incoming {
             sha,
             zipped,
             data,
+            accepted: false,
             partial_path,
         }
     }
@@ -789,7 +793,9 @@ pub fn safe_file_name(raw: &str) -> String {
         || ((device.starts_with("COM") || device.starts_with("LPT"))
             && device.len() == 4
             && matches!(device.as_bytes()[3], b'1'..=b'9'));
-    if reserved {
+    // A leading dot would hide the file, and ".partial" would take the
+    // name of the folder that resumable downloads are kept in.
+    if reserved || name.starts_with('.') {
         name.insert(0, '_');
     }
     if name.len() > MAX_NAME_BYTES {
@@ -1355,6 +1361,34 @@ impl KissDecoder {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Names from the air are saved as plain, visible files in the
+    /// download folder and nowhere else.
+    #[test]
+    fn received_file_names_are_made_safe() {
+        assert_eq!(safe_file_name("../../etc/passwd"), "passwd");
+        assert_eq!(safe_file_name("C:\\x\\a.txt"), "a.txt");
+        assert_eq!(safe_file_name("CON.txt"), "_CON.txt");
+        assert_eq!(safe_file_name("a?b*.txt"), "a_b_.txt");
+        assert_eq!(safe_file_name("..."), "received.bin");
+        assert_eq!(safe_file_name(""), "received.bin");
+        // Hidden names, and the folder resumable downloads live in.
+        assert_eq!(safe_file_name(".partial"), "_.partial");
+        assert_eq!(safe_file_name(".bashrc"), "_.bashrc");
+        assert!(safe_file_name(&"x".repeat(300)).len() <= MAX_NAME_BYTES);
+    }
+
+    /// An empty file still arrives: nothing is left to send once it's
+    /// accepted, so it's complete at once.
+    #[test]
+    fn an_empty_file_is_complete_at_once() {
+        let dir = std::env::temp_dir().join(format!("ws-empty-{}", std::process::id()));
+        let inc = Incoming::new(&dir, 1, "empty.txt".into(), 0, sha256(b""), false);
+        assert!(inc.complete());
+        let p = inc.finish(&dir).unwrap();
+        assert_eq!(std::fs::read(&p).unwrap(), b"");
+        std::fs::remove_dir_all(&dir).ok();
+    }
 
     #[test]
     fn varints() {

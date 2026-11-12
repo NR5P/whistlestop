@@ -31,6 +31,11 @@ pub struct FakeOptions {
     pub answer_cq: bool,
     /// The bot's encryption setting (Prefer: encrypts if you do).
     pub bot_e2e: Policy,
+    /// Tests: the bot's CQs are for this Roundtable (it hosts it).
+    pub bot_cq_table: Option<String>,
+    /// Tests: the bot sends a file's pieces right after offering it,
+    /// without waiting for the answer (a misbehaving station).
+    pub bot_pushy: bool,
 }
 
 impl Default for FakeOptions {
@@ -43,6 +48,8 @@ impl Default for FakeOptions {
             bot_freq: 14_103_150.0,
             answer_cq: true,
             bot_e2e: Policy::Prefer,
+            bot_pushy: false,
+            bot_cq_table: None,
         }
     }
 }
@@ -253,6 +260,9 @@ struct Later {
 enum Act {
     Line(String),
     Connect,
+    /// The bot answering our CQ: Mercury's PENDING, then the link (both
+    /// skipped if the CQ turned out to be for a Roundtable).
+    AnswerCq { pending: bool },
     BotChat(String),
     BotBcast(Vec<u8>),
 }
@@ -287,6 +297,8 @@ struct Session {
     next_cq: f64,
     table_msg_id: u64,
     answered_cq: bool,
+    /// Our last CQ's CALL packet said Roundtable.
+    cq_is_table: bool,
     t0: std::time::Instant,
 }
 
@@ -316,6 +328,7 @@ impl Session {
             next_cq: 3.0,
             table_msg_id: 0,
             answered_cq: false,
+            cq_is_table: false,
             t0: std::time::Instant::now(),
         }
     }
@@ -391,8 +404,11 @@ impl Session {
                 self.after(3.1, Act::Line("CANCELPENDING".into()));
                 if self.o.answer_cq && self.peer.is_none() && !self.answered_cq {
                     self.answered_cq = true;
-                    self.after_link(9.0, Act::Line("PENDING".into()));
-                    self.after_link(12.0, Act::Connect);
+                    // Unless its CALL packet says it's for a Roundtable
+                    // (then the bot joins the table instead).
+                    self.cq_is_table = false;
+                    self.after_link(9.0, Act::AnswerCq { pending: true });
+                    self.after_link(12.0, Act::AnswerCq { pending: false });
                 }
             }
             "CONNECT" => {
@@ -568,6 +584,16 @@ impl Session {
                         false,
                         1,
                     );
+                    if self.o.bot_pushy {
+                        // A misbehaving station: the pieces right behind the
+                        // offer, without waiting for the answer.
+                        let mut early = Outgoing::new(out.fid, out.name.clone(), out.data.clone(), false, 1);
+                        early.next = Some(0);
+                        self.bot_send(out.offer());
+                        while let Some(c) = early.next_chunk() {
+                            self.bot_send(c);
+                        }
+                    }
                     self.offer_file(out);
                     "Sure, offering you a file now.".to_string()
                 } else if t.contains("73") || t.contains("bye") {
@@ -704,6 +730,9 @@ impl Session {
             return;
         };
         let bot = self.o.bot_call.clone();
+        if matches!(fr.body, TableBody::Call { kind: CALL_TABLE, .. }) {
+            self.cq_is_table = true;
+        }
         let reply_text = match fr.body {
             TableBody::Call {
                 kind: CALL_TABLE,
@@ -756,6 +785,15 @@ impl Session {
                         self.connect_bot()
                     }
                 }
+                Act::AnswerCq { pending } => {
+                    if self.peer.is_none() && !self.cq_is_table {
+                        if pending {
+                            self.reply("PENDING");
+                        } else {
+                            self.connect_bot()
+                        }
+                    }
+                }
                 Act::BotChat(t) => {
                     if self.peer.is_some() {
                         self.bot_chat_id += 1;
@@ -785,12 +823,16 @@ impl Session {
                 {
                     let l = format!("CQFRAME {} 2300", self.o.bot_call);
                     self.reply(&l);
+                    let (kind, table_name) = match &self.o.bot_cq_table {
+                        Some(t) => (CALL_TABLE, t.clone()),
+                        None => (CALL_CHAT, String::new()),
+                    };
                     let call = TableFrame {
                         table: 0,
                         from: self.o.bot_call.clone(),
                         body: TableBody::Call {
-                            kind: CALL_CHAT,
-                            table_name: String::new(),
+                            kind,
+                            table_name,
                             bw_code: 2,
                             grid: "DN31".into(),
                         },
@@ -874,4 +916,23 @@ impl Session {
             self.reply("SN 12.4");
         }
     }
+}
+
+/// Tests: demo stations started with this callsign get a K7BOT whose CQs
+/// are for a Roundtable (see `FakeOptions::bot_cq_table`).
+#[cfg(test)]
+pub static TEST_BOT_TABLE: std::sync::Mutex<Vec<(String, String)>> = std::sync::Mutex::new(Vec::new());
+
+pub fn test_bot_table(_mycall: &str) -> Option<String> {
+    #[cfg(test)]
+    {
+        return TEST_BOT_TABLE
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|(c, _)| c.eq_ignore_ascii_case(_mycall))
+            .map(|(_, t)| t.clone());
+    }
+    #[cfg(not(test))]
+    None
 }

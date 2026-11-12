@@ -130,6 +130,50 @@ async fn wait_port(port: u16, secs: u64) -> bool {
 }
 
 #[cfg(unix)]
+const PIDS_FILE: &str = "mercury.pids";
+
+/// What `ps` says process `pid` is running ("" once it's gone).
+#[cfg(unix)]
+fn command_of(pid: u32) -> String {
+    Command::new("ps")
+        .args(["-p", &pid.to_string(), "-o", "command="])
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_default()
+}
+
+/// Demo folders of Whistlestops that have gone without stopping their two
+/// Mercurys (each idles at a few % CPU, for ever): stop those Mercurys and
+/// remove the folder. A folder's owner is in its name; only processes it
+/// recorded, and still running Mercury in socket-audio mode, are stopped.
+#[cfg(unix)]
+fn reap_stale(base: &std::path::Path) {
+    let Ok(rd) = std::fs::read_dir(base) else { return };
+    for e in rd.flatten() {
+        let name = e.file_name().to_string_lossy().to_string();
+        let Some(owner) = name
+            .strip_prefix("whistlestop-demo-")
+            .and_then(|p| p.parse::<u32>().ok())
+        else {
+            continue;
+        };
+        if owner == std::process::id() || !command_of(owner).is_empty() {
+            continue; // ours, or its owner is still running
+        }
+        let dir = e.path();
+        if let Ok(pids) = std::fs::read_to_string(dir.join(PIDS_FILE)) {
+            for pid in pids.lines().filter_map(|l| l.trim().parse::<u32>().ok()) {
+                let c = command_of(pid);
+                if c.contains("mercury") && c.contains("-x sock") {
+                    let _ = Command::new("kill").arg(pid.to_string()).status();
+                }
+            }
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(unix)]
 pub async fn start(mercury: &std::path::Path) -> Result<RealDemo> {
     // Unix socket paths must stay under ~104 bytes; some temp folders are long.
     let base = std::env::temp_dir();
@@ -138,6 +182,7 @@ pub async fn start(mercury: &std::path::Path) -> Result<RealDemo> {
     } else {
         base
     };
+    reap_stale(&base);
     let dir = base.join(format!("whistlestop-demo-{}", std::process::id()));
     std::fs::create_dir_all(&dir)?;
     let (sa, sb) = (dir.join("you.sock"), dir.join("k7bot.sock"));
@@ -201,6 +246,10 @@ pub async fn start(mercury: &std::path::Path) -> Result<RealDemo> {
                 .with_context(|| format!("starting {}", mercury.display()))?,
         );
     }
+    // Recorded so a later start can stop them if this process dies
+    // without cleaning up (a crash, a kill, a test that ends early).
+    let pids: String = demo.mercs.iter().map(|c| format!("{}\n", c.id())).collect();
+    let _ = std::fs::write(dir.join(PIDS_FILE), pids);
     for p in [pa, pb, ba, bb] {
         if !wait_port(p, 20).await {
             return Err(anyhow!(

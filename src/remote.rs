@@ -52,10 +52,14 @@ pub const MAX_FILE: usize = 25 << 20;
 const _: () = assert!(MAX_FILE * 2 + (64 << 10) <= MAX_FRAME);
 /// Connections at once (logged in or not).
 const MAX_CONNS: usize = 8;
+/// Logins in progress from one computer at once: a stranger can't fill
+/// every slot with connections that never log in.
+const MAX_PENDING_PER_IP: usize = 2;
 /// Time to complete the login, from connecting.
 const LOGIN_TIME: Duration = Duration::from_secs(15);
-/// This many wrong passwords within `FAIL_WINDOW` (from any computers)
-/// pauses all logins for `LOCKOUT`.
+/// This many wrong passwords within `FAIL_WINDOW` from one computer
+/// pauses that computer's logins for `LOCKOUT` (only its own: a stranger
+/// guessing can't lock the owner out).
 const FAIL_LIMIT: usize = 10;
 const FAIL_WINDOW: Duration = Duration::from_secs(60);
 const LOCKOUT: Duration = Duration::from_secs(5 * 60);
@@ -302,7 +306,7 @@ pub fn merge_remote_cfg(
     (c, kept)
 }
 
-/// Wrong passwords, from every computer together.
+/// Wrong passwords from one computer.
 #[derive(Default)]
 struct LoginGuard {
     fails: VecDeque<Instant>,
@@ -355,7 +359,7 @@ struct Srv {
     clients: Arc<Mutex<Vec<String>>>,
     listeners: Listeners,
     stop: Arc<AtomicBool>,
-    guard: Mutex<LoginGuard>,
+    guard: Mutex<HashMap<std::net::IpAddr, LoginGuard>>,
 }
 
 /// Running server; stops when dropped (see `stop`).
@@ -443,6 +447,8 @@ pub fn serve_on(addr: std::net::Ipv4Addr, port: u16, password: &str, shared: Sha
 
 fn accept_loop(l: TcpListener, srv: &Arc<Srv>, conns: &Conns) {
     let mut next_id = 1u64;
+    // Logins in progress, per computer.
+    let pending: Arc<Mutex<HashMap<std::net::IpAddr, usize>>> = Default::default();
     while !srv.stop.load(Ordering::SeqCst) {
         let (mut s, peer) = match l.accept() {
             Ok(x) => x,
@@ -475,10 +481,35 @@ fn accept_loop(l: TcpListener, srv: &Arc<Srv>, conns: &Conns) {
             let Ok(k) = s.try_clone() else { continue };
             c.insert(id, k);
         }
-        let (srv, conns) = (srv.clone(), conns.clone());
+        {
+            let mut p = pending.lock().unwrap();
+            let n = p.entry(peer.ip()).or_insert(0);
+            if *n >= MAX_PENDING_PER_IP {
+                drop(p);
+                conns.lock().unwrap().remove(&id);
+                let _ = s.set_write_timeout(Some(Duration::from_secs(1)));
+                let _ = send_json(
+                    &mut s,
+                    &ToClient::Denied("too many logins from this computer at once; try again shortly".into()),
+                );
+                continue;
+            }
+            *n += 1;
+        }
+        let (srv, conns, pending) = (srv.clone(), conns.clone(), pending.clone());
         std::thread::spawn(move || {
             let who = peer.ip().to_string();
-            let res = login(&mut s, &srv).and_then(|()| {
+            let logged_in = login(&mut s, &srv, peer.ip());
+            {
+                let mut p = pending.lock().unwrap();
+                if let Some(n) = p.get_mut(&peer.ip()) {
+                    *n -= 1;
+                    if *n == 0 {
+                        p.remove(&peer.ip());
+                    }
+                }
+            }
+            let res = logged_in.and_then(|()| {
                 srv.clients.lock().unwrap().push(who.clone());
                 let r = session(s, &who, id, &srv);
                 let mut c = srv.clients.lock().unwrap();
@@ -534,10 +565,10 @@ fn pump_audio(stop: &AtomicBool, listeners: &Listeners, tap: &PcmTap) {
 
 /// The challenge and the password proof, within `LOGIN_TIME` and with
 /// small frames only. Wrong passwords are slowed and counted.
-fn login(s: &mut TcpStream, srv: &Srv) -> Result<()> {
+fn login(s: &mut TcpStream, srv: &Srv, ip: std::net::IpAddr) -> Result<()> {
     s.set_nodelay(true)?;
     s.set_write_timeout(Some(Duration::from_secs(30)))?;
-    let paused = srv.guard.lock().unwrap().locked(Instant::now());
+    let paused = srv.guard.lock().unwrap().get(&ip).and_then(|g| g.locked(Instant::now()));
     if let Some(left) = paused {
         send_json(s, &ToClient::Denied(lockout_msg(left)))?;
         bail!("refused (logins paused after too many wrong passwords)");
@@ -559,17 +590,17 @@ fn login(s: &mut TcpStream, srv: &Srv) -> Result<()> {
         _ => String::new(),
     };
     // Paused meanwhile: even the right password waits.
-    let paused = srv.guard.lock().unwrap().locked(Instant::now());
+    let paused = srv.guard.lock().unwrap().get(&ip).and_then(|g| g.locked(Instant::now()));
     if let Some(left) = paused {
         send_json(s, &ToClient::Denied(lockout_msg(left)))?;
         bail!("refused (logins paused after too many wrong passwords)");
     }
     if !mac_ok(&srv.password, &n, &mac) {
-        if srv.guard.lock().unwrap().failed(Instant::now()) {
+        if srv.guard.lock().unwrap().entry(ip).or_default().failed(Instant::now()) {
             log(
                 &srv.shared.handle.state,
                 format!(
-                    "🛰 Remote: {FAIL_LIMIT} wrong passwords within a minute; refusing all remote logins for {} minutes",
+                    "🛰 Remote: {FAIL_LIMIT} wrong passwords within a minute from {ip}; refusing its logins for {} minutes",
                     LOCKOUT.as_secs() / 60
                 ),
             );
@@ -681,6 +712,10 @@ fn session(mut s: TcpStream, who: &str, id: u64, srv: &Srv) -> Result<()> {
                 Ok(())
             })();
             alive.store(false, Ordering::Relaxed);
+            // A client that stopped reading (an app that hung, Wi-Fi gone)
+            // ends here, at the write timeout: close the connection so the
+            // reader, blocked waiting for it, ends the session too.
+            let _ = w.shutdown(std::net::Shutdown::Both);
             res
         })
     };
@@ -872,6 +907,32 @@ fn fetch(path: String, shared: &Shared) -> ToClient {
 
 // ------------------------------------------------------------------ client
 
+/// The record (in the download folder) of received files already copied
+/// from radio computers.
+const COPIED_RECORD: &str = ".whistlestop-copied";
+
+fn copied_key(station: &str, path: &str, size: u64) -> String {
+    format!("{station}\t{path}\t{size}")
+}
+
+fn load_copied(dir: &Path) -> HashSet<String> {
+    std::fs::read_to_string(dir.join(COPIED_RECORD))
+        .map(|s| s.lines().map(str::to_string).collect())
+        .unwrap_or_default()
+}
+
+fn note_copied(dir: &Path, key: &str) {
+    use std::io::Write as _;
+    let _ = std::fs::create_dir_all(dir);
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(dir.join(COPIED_RECORD))
+    {
+        let _ = writeln!(f, "{key}");
+    }
+}
+
 /// Operating a radio computer from here.
 pub struct Client {
     /// Behaves like a local engine's handle.
@@ -987,8 +1048,11 @@ pub fn connect(
             repaint.clone(),
         );
         let mut r = s.try_clone()?;
+        let station = station.clone();
         std::thread::spawn(move || {
-            let mut fetched: HashSet<String> = HashSet::new();
+            // What earlier connections already copied here (kept in the
+            // download folder), so a reconnect doesn't copy it all again.
+            let mut fetched: HashSet<String> = load_copied(&download_dir);
             while alive.load(Ordering::Relaxed) {
                 let Ok((k, d)) = read_frame(&mut r, MAX_FRAME) else {
                     break;
@@ -1002,7 +1066,7 @@ pub fn connect(
                         // Received files: copy each here once.
                         for t in st.transfers.iter().filter(|t| t.dir == Dir::In) {
                             if let XferState::Done(Some(p)) = &t.state
-                                && fetched.insert(p.to_string_lossy().to_string())
+                                && fetched.insert(copied_key(&station, &p.to_string_lossy(), t.size))
                             {
                                 let _ = send_json(
                                     &mut *writer.lock().unwrap(),
@@ -1044,10 +1108,14 @@ pub fn connect(
                                 }
                             }
                         }
-                        Ok(ToClient::File { name, hex, .. }) => {
+                        Ok(ToClient::File { name, hex, path }) => {
                             let saved = hex::decode(hex)
                                 .map_err(anyhow::Error::from)
-                                .and_then(|data| save_unique(&download_dir, &name, &data));
+                                .and_then(|data| {
+                                    let p = save_unique(&download_dir, &name, &data)?;
+                                    note_copied(&download_dir, &copied_key(&station, &path, data.len() as u64));
+                                    Ok(p)
+                                });
                             notes.lock().unwrap().push(match saved {
                                 Ok(p) => {
                                     format!("Copied {name} to this computer ({})", p.display())
@@ -1561,12 +1629,69 @@ mod tests {
         }));
     }
 
+    /// One computer can hold only a couple of logins open at once, so a
+    /// stranger can't fill every slot with connections that never log in.
+    /// A received file is copied to the operator's computer once, not
+    /// again on every reconnect.
+    #[test]
+    fn received_files_are_copied_once_across_reconnects() {
+        let (shared, _rx) = fake_shared();
+        let srv_dl = shared.cfg.lock().unwrap().1.download_dir.clone();
+        std::fs::create_dir_all(&srv_dl).unwrap();
+        let qsl = srv_dl.join(format!("qsl-{}.txt", std::process::id()));
+        std::fs::write(&qsl, "73 de N0RIG").unwrap();
+        shared.handle.state.lock().unwrap().transfers.push(crate::engine::Transfer {
+            fid: 1,
+            dir: Dir::In,
+            name: "qsl.txt".into(),
+            size: 11,
+            done: 11,
+            zipped: false,
+            files: 1,
+            original: 11,
+            state: XferState::Done(Some(qsl.clone())),
+            eta_s: 0.0,
+            started: None,
+        });
+        let srv = serve(0, "hunter22", shared).unwrap();
+        let here = std::env::temp_dir().join(format!("ws-remote-copies-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&here);
+        let copies = || {
+            std::fs::read_dir(&here)
+                .map(|r| {
+                    r.flatten()
+                        .filter(|e| e.file_name().to_string_lossy().starts_with("qsl"))
+                        .count()
+                })
+                .unwrap_or(0)
+        };
+        for round in 0..3 {
+            let c = connect(
+                &format!("127.0.0.1:{}", srv.port),
+                "hunter22",
+                here.clone(),
+                String::new(),
+                Arc::new(|| {}),
+            )
+            .unwrap();
+            if round == 0 {
+                assert!(wait_until(5.0, || copies() == 1), "first connect copies it");
+            } else {
+                std::thread::sleep(Duration::from_millis(1500));
+            }
+            drop(c);
+        }
+        assert_eq!(copies(), 1, "copied again on a reconnect");
+        std::fs::remove_dir_all(&here).ok();
+        std::fs::remove_file(&qsl).ok();
+    }
+
     #[test]
     fn connections_are_capped() {
         let (shared, _rx) = fake_shared();
         let srv = serve(0, "hunter22", shared).unwrap();
         let mut held = vec![];
-        for _ in 0..MAX_CONNS {
+        for _ in 0..MAX_PENDING_PER_IP {
             let mut s = TcpStream::connect(("127.0.0.1", srv.port)).unwrap();
             s.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
             let (_, d) = read_frame(&mut s, MAX_FRAME).unwrap();
@@ -1576,7 +1701,9 @@ mod tests {
         let mut s = TcpStream::connect(("127.0.0.1", srv.port)).unwrap();
         s.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
         let (_, d) = read_frame(&mut s, MAX_FRAME).unwrap();
-        assert!(matches!(serde_json::from_slice(&d), Ok(ToClient::Denied(_))));
+        assert!(
+            matches!(serde_json::from_slice(&d), Ok(ToClient::Denied(m)) if m.contains("this computer"))
+        );
         // One leaves: room again.
         drop(held.pop());
         assert!(wait_until(3.0, || {
@@ -1619,7 +1746,7 @@ mod tests {
     }
 
     #[test]
-    fn wrong_passwords_pause_all_logins() {
+    fn wrong_passwords_pause_that_computers_logins() {
         let mut g = LoginGuard::default();
         let t0 = Instant::now();
         // Spread out: never paused.

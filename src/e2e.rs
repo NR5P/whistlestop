@@ -330,7 +330,9 @@ impl Channel {
                         }
                         self.go_plain();
                         step.notice = Some(Notice::Plain {
-                            why: "the other station has encryption off".into(),
+                            // Said as what we know: its HELLO offered no encryption
+                            // (encryption off there, or the offer removed on the way).
+                            why: "the other station didn't offer encryption".into(),
                         });
                     }
                 }
@@ -435,6 +437,15 @@ impl Channel {
                     step.notice = Some(Notice::Plain {
                         why: "the other station sent plain text".into(),
                     });
+                }
+                // The other station gave up on encryption and said why in a
+                // plain BYE (all it can do then): report its reason, not an
+                // "unencrypted packet". Unverified, but either way the link
+                // ends.
+                if !self.plain
+                    && let Link::Bye { text } = &other
+                {
+                    bail!("the other station ended the link (unencrypted message, unverified): {text}");
                 }
                 if !self.plain {
                     bail!(
@@ -678,6 +689,22 @@ mod tests {
             .encode(),
         );
         assert!(p.run().unwrap_err().to_string().contains("unencrypted"));
+    }
+
+    /// A station that gave up on encryption says why in a plain BYE; the
+    /// other side reports that reason (as unverified), not "unencrypted
+    /// packet", and still ends the link.
+    #[test]
+    fn plain_bye_after_a_failure_gives_its_reason() {
+        let mut p = secure_pair();
+        p.to_b.extend(
+            Link::Bye {
+                text: "encryption problem, disconnecting".into(),
+            }
+            .encode(),
+        );
+        let e = p.run().unwrap_err().to_string();
+        assert!(e.contains("encryption problem") && e.contains("unverified"), "{e}");
     }
 
     #[test]

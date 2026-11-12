@@ -113,6 +113,11 @@ final class WhistlestopUITests: XCTestCase {
         waitFor(app.staticTexts["you host"], 30, "hosting")
         let hello = app.staticTexts.containing(NSPredicate(format: "label CONTAINS 'Good evening all'")).firstMatch
         waitFor(hello, 150, "K7BOT joining")
+        // At the table, nothing on Operate may take the station away.
+        app.tabBars.buttons["Operate"].tap()
+        let search = app.buttons["Search current band"]
+        waitFor(search, 5, "the Search button")
+        XCTAssertFalse(search.isEnabled, "Search is off while hosting a Roundtable")
     }
 
     func testEncryptionShowsCheckCode() {

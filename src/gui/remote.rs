@@ -12,6 +12,8 @@ pub struct RemoteWin {
     pub addr: String,
     pub password: String,
     pub error: Option<String>,
+    /// A connection is being made: Connect waits.
+    pub connecting: bool,
 }
 
 /// What the window asks the app to do.
@@ -60,11 +62,16 @@ impl RemoteWin {
                             ui.add(egui::TextEdit::singleline(&mut self.password).password(true).hint_text("its remote password").desired_width(260.0)).help(&help::RM_PASSWORD);
                             ui.end_row();
                         });
-                        let ok = !self.addr.trim().is_empty() && !self.password.is_empty();
+                        let ok = !self.addr.trim().is_empty() && !self.password.is_empty() && !self.connecting;
                         if ui.add_enabled(ok, egui::Button::new(RichText::new("Connect to the radio computer").strong()).fill(TEAL.linear_multiply(0.4))).help(&help::RM_CONNECT).clicked() {
                             act = Some(RemoteAction::Connect { addr: self.addr.trim().to_string(), password: self.password.clone() });
                         }
-                        if let Some(e) = &self.error {
+                        if self.connecting {
+                            ui.horizontal(|ui| {
+                                ui.spinner();
+                                ui.label(RichText::new("Connecting…").color(DIM));
+                            });
+                        } else if let Some(e) = &self.error {
                             ui.label(RichText::new(e).color(RED));
                         }
                     }
@@ -100,7 +107,7 @@ impl RemoteWin {
                         None => {}
                     }
                     ui.label(RichText::new("Only computers on your home network (private addresses) can connect, and only with the password. The connection isn't encrypted: don't open this port to the internet.").small().color(DIM));
-                    ui.label(RichText::new("Turning sharing off or changing the password disconnects anyone operating. After 10 wrong passwords within a minute, all logins are refused for 5 minutes.").small().color(DIM));
+                    ui.label(RichText::new("Turning sharing off or changing the password disconnects anyone operating. After 10 wrong passwords within a minute from one computer, that computer's logins are refused for 5 minutes.").small().color(DIM));
                     if changed {
                         act = Some(RemoteAction::Serve);
                     }

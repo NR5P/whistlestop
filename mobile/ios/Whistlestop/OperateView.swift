@@ -12,6 +12,14 @@ struct OperateView: View {
 
     private let bands = ["160m", "80m", "60m", "40m", "30m", "20m", "17m", "15m", "12m", "10m"]
 
+    /// At a Roundtable, only a CQ for that table (as its host) is allowed:
+    /// anything else would take the station away from it.
+    private func awayFromTable(_ s: EngineState) -> Bool {
+        guard let t = s.table else { return false }
+        let name = tableName.trimmingCharacters(in: .whitespaces)
+        return !(cqTable && t.host && t.name.caseInsensitiveCompare(name) == .orderedSame)
+    }
+
     var body: some View {
         let s = core.state
         ScrollView {
@@ -71,6 +79,8 @@ struct OperateView: View {
                             Button("Search all bands") { core.startSearch(.allBands) }
                                 .buttonStyle(QuietButtonStyle())
                         }
+                        // A search retunes the radio away from the table.
+                        .disabled(s.table != nil)
                     }
                     HStack {
                         Toggle("Answer automatically", isOn: Binding(
@@ -126,7 +136,7 @@ struct OperateView: View {
                                     }
                                     .buttonStyle(BrassButtonStyle())
                                     .frame(width: 110)
-                                    .disabled(s.link != nil)
+                                    .disabled(s.link != nil || s.table != nil)
                                 }
                             }
                         }
@@ -157,7 +167,8 @@ struct OperateView: View {
                         }
                         .buttonStyle(BrassButtonStyle())
                         .disabled(s.link != nil || s.mercuryOk != true
-                                  || (cqTable && tableName.trimmingCharacters(in: .whitespaces).isEmpty))
+                                  || (cqTable && tableName.trimmingCharacters(in: .whitespaces).isEmpty)
+                                  || awayFromTable(s))
                     }
                 }
 
@@ -170,7 +181,7 @@ struct OperateView: View {
                         }
                         .buttonStyle(QuietButtonStyle())
                         .frame(width: 110)
-                        .disabled(call.trimmingCharacters(in: .whitespaces).isEmpty || s.link != nil)
+                        .disabled(call.trimmingCharacters(in: .whitespaces).isEmpty || s.link != nil || s.table != nil)
                     }
                 }
             }

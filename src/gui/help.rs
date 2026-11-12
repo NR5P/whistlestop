@@ -137,14 +137,14 @@ pub const CQ_WHISTLE: Topic = (
 );
 pub const CQ_CALL: Topic = (
     "Call CQ",
-    "Starts the cycle: key up and whistle, then Mercury's CQFRAME with your callsign, a CALL packet, then listen for answers. Repeats (5 cycles by default) until someone answers or you press Stop. When a station calls in, the CQ goes on hold so nothing is sent over Mercury's answer.",
+    "Starts the cycle: key up and whistle, then Mercury's CQFRAME with your callsign, a CALL packet, then listen for answers. Repeats (5 cycles by default) until someone answers or you press Stop. When a station calls in, the CQ goes on hold so nothing is sent over Mercury's answer. At a Roundtable it's off, except a CQ for your own table: leave the table first.",
     "Calling CQ",
 );
 pub const CQ_STOP: Topic = ("Stop CQ", "Stops calling at once, mid-whistle if necessary, and unkeys.", "Calling CQ");
 
 pub const S_CURRENT: Topic = (
     "Search current band",
-    "Steps your radio through the digital segment(s) of the band you're on: half a second per channel (up to 2 s where something looks whistle-like), 2 kHz apart, about 6–8 s per pass on 20 m. Stops on a whistle, retunes onto it to within a few Hz, and waits for the CQ.",
+    "Steps your radio through the digital segment(s) of the band you're on: half a second per channel (up to 2 s where something looks whistle-like), 2 kHz apart, about 6–8 s per pass on 20 m. Stops on a whistle, retunes onto it to within a few Hz, and waits for the CQ. Off while you're at a Roundtable (it would take the radio away from the table).",
     "Finding stations",
 );
 pub const S_ALL: Topic = (
@@ -166,7 +166,7 @@ pub const S_AUTOTUNE: Topic = (
 );
 pub const S_AUTOANSWER: Topic = (
     "Answer automatically",
-    "When a search locks onto a whistle and Mercury decodes the caller's CQ, connect by itself instead of waiting for you to press Answer. It calls as soon as the caller's CALL packet that follows the CQ is over (4.5 s at most), so the call isn't sent on top of the caller's own transmission.",
+    "When a search locks onto a whistle and Mercury decodes the caller's CQ, connect by itself instead of waiting for you to press Answer. It calls as soon as the caller's CALL packet that follows the CQ is over (4.5 s at most), so the call isn't sent on top of the caller's own transmission. If that CALL packet says the CQ is for a Roundtable, it joins the table instead.",
     "Finding stations",
 );
 
@@ -175,7 +175,7 @@ pub const H_TUNE_TO: Topic = (
     "A whistle was heard near your frequency (whistle watch). This retunes by the measured offset so you're right on the caller.",
     "Finding stations",
 );
-pub const H_ANSWER: Topic = ("Answer", "Connect to this station: Mercury places the call, and the Chat tab opens when the link is up.", "Chat");
+pub const H_ANSWER: Topic = ("Answer", "Connect to this station: Mercury places the call, and the Chat tab opens when the link is up. Not offered while you're at a Roundtable: leave it first.", "Chat");
 pub const H_JOIN: Topic =
     ("Join", "Join this Roundtable on the current frequency. The host hears your report and may adjust the table's speed. Not offered during a 1:1 link (joining would cut it).", "Roundtables");
 pub const H_LOCK: Topic = ("Lock on", "Tune the radio to this SDR hit and fine-lock using the radio's own audio, then wait for the CQ.", "Finding stations");

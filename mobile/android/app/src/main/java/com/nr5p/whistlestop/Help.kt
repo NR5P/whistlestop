@@ -20,7 +20,7 @@ enum class HelpTopic(val title: String, val body: String) {
     ),
     search(
         "Search",
-        "Steps the radio through the digital segment(s): half a second per channel (up to 2 s where something looks whistle-like), 2 kHz apart. It stops on a whistle, retunes onto it to within a few Hz and waits for the caller's CQ. Current band searches the band you're on; All bands goes band after band.",
+        "Steps the radio through the digital segment(s): half a second per channel (up to 2 s where something looks whistle-like), 2 kHz apart. It stops on a whistle, retunes onto it to within a few Hz and waits for the caller's CQ. Current band searches the band you're on; All bands goes band after band. Off while you're at a Roundtable: leave it first.",
     ),
     whistle(
         "Whistle",
@@ -28,15 +28,15 @@ enum class HelpTopic(val title: String, val body: String) {
     ),
     heard(
         "Heard",
-        "Stations whose CQ (or beacon) Mercury decoded. Tap Answer to connect.",
+        "Stations whose CQ (or beacon) Mercury decoded. Tap Answer to connect (not while you're at a Roundtable: leave it first).",
     ),
     cq(
         "Call CQ",
-        "Starts the cycle: key up and whistle so searching stations find you, then send Mercury's CQ with your callsign, then listen for answers. Repeats until someone answers or you tap Stop.",
+        "Starts the cycle: key up and whistle so searching stations find you, then send Mercury's CQ with your callsign, then listen for answers. Repeats until someone answers or you tap Stop. While you're at a Roundtable, only a CQ for your own table is allowed.",
     ),
     connect(
         "Connect",
-        "Call a station directly by callsign on the current frequency, without a CQ.",
+        "Call a station directly by callsign on the current frequency, without a CQ. Off while you're at a Roundtable: leave it first.",
     ),
     link(
         "Link",
@@ -88,7 +88,7 @@ enum class HelpTopic(val title: String, val body: String) {
     ),
     autoAnswer(
         "Answer automatically",
-        "When a search locks onto a whistle and the caller's CQ is decoded, connect at once instead of waiting for you to tap Answer.",
+        "When a search locks onto a whistle and the caller's CQ is decoded, connect at once instead of waiting for you to tap Answer. A CQ for a Roundtable is answered by joining the table.",
     ),
     encryption(
         "Encryption",

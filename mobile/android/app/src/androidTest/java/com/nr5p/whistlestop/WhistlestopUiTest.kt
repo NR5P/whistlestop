@@ -2,6 +2,7 @@ package com.nr5p.whistlestop
 
 import android.content.Intent
 import androidx.compose.ui.test.ExperimentalTestApi
+import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.hasContentDescription
 import androidx.compose.ui.test.hasSetTextAction
 import androidx.compose.ui.test.hasText
@@ -123,6 +124,9 @@ class WhistlestopUiTest {
         // Hosting switches to the table; K7BOT hears the call and joins.
         rule.waitUntilAtLeastOneExists(hasText("you host"), 30_000)
         rule.waitUntilAtLeastOneExists(hasText("Good evening all", substring = true), 150_000)
+        // At the table, nothing on Operate may take the station away.
+        tap("Operate")
+        rule.onNode(hasText("Search current band")).performScrollTo().assertIsNotEnabled()
     }
 
     @Test

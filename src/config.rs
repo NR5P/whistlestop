@@ -434,13 +434,16 @@ impl Config {
     pub fn save(&self) -> anyhow::Result<()> {
         let p = path();
         std::fs::create_dir_all(p.parent().unwrap())?;
-        std::fs::write(p, toml::to_string_pretty(self)?)?;
+        let tmp = p.with_extension("toml.tmp");
+        std::fs::write(&tmp, toml::to_string_pretty(self)?)?;
+        std::fs::rename(&tmp, &p)?;
         Ok(())
     }
 }
 
 #[cfg(test)]
 mod tests {
+
     #[test]
     fn roundtrips_toml() {
         let c = super::Config::default();

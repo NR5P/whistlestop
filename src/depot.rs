@@ -82,8 +82,21 @@ impl Depot {
     /// `load_problem` says so.
     pub fn load(path: PathBuf) -> Depot {
         let mut problem = None;
+        let mut keep_path = true;
         let mut d: Depot = match std::fs::read(&path) {
-            Err(_) => Depot::default(), // none yet
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Depot::default(), // none yet
+            // There, but not readable (permissions, a disk error): its mail
+            // is still in it. Never save over it this session.
+            Err(e) => {
+                keep_path = false;
+                problem = Some(format!(
+                    "The Depot file {} couldn't be opened ({e}). Its mail is left as it is; \
+                     until it can be opened (fix its permissions, then restart), mail this \
+                     session is kept in memory only",
+                    path.display()
+                ));
+                Depot::default()
+            }
             Ok(bytes) => match serde_json::from_slice(&bytes) {
                 Ok(d) => d,
                 Err(e) => {
@@ -106,7 +119,7 @@ impl Depot {
                 }
             },
         };
-        d.path = Some(path);
+        d.path = keep_path.then_some(path);
         d.load_problem = problem;
         d
     }
@@ -249,6 +262,35 @@ impl Depot {
 
 #[cfg(test)]
 mod tests {
+    /// A Depot file that exists but can't be opened is reported and never
+    /// saved over: its mail survives.
+    #[cfg(unix)]
+    #[test]
+    fn unreadable_depot_is_not_overwritten() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("ws-depot-ro-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("depot.json");
+        let mut d = Depot::load(p.clone());
+        d.post("N0ME", "K7BOT", "keep me").unwrap();
+        d.save();
+        let before = std::fs::read(&p).unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o000)).unwrap();
+        if std::fs::read(&p).is_ok() {
+            // Running as root: permissions don't stop reads.
+            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o644)).unwrap();
+            return;
+        }
+        let mut d = Depot::load(p.clone());
+        assert!(d.load_problem.as_deref().unwrap_or("").contains("couldn't be opened"));
+        d.post("N0ME", "K7BOT", "new").unwrap();
+        d.save();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert_eq!(std::fs::read(&p).unwrap(), before);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     use super::*;
 
     #[test]

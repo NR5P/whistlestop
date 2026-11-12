@@ -170,6 +170,9 @@ pub struct App {
     rm: remote::RemoteWin,
     /// Operating a radio computer from here.
     client: Option<whistlestop::remote::Client>,
+    /// A connection to a radio computer being made (off the window's
+    /// thread: a wrong address can take seconds to give up).
+    connecting: Option<(String, std::sync::mpsc::Receiver<anyhow::Result<whistlestop::remote::Client>>)>,
     /// This computer's own engine and settings, kept while operating
     /// another.
     local_h: Option<Handle>,
@@ -247,6 +250,7 @@ impl App {
             audio_seen: 0,
             rm: remote::RemoteWin { addr: cfg.remote_addr.clone(), ..Default::default() },
             client: None,
+            connecting: None,
             local_h: None,
             local_cfg: None,
             server: None,
@@ -338,7 +342,29 @@ impl App {
             let ctx = ctx.clone();
             std::sync::Arc::new(move || ctx.request_repaint()) as std::sync::Arc<dyn Fn() + Send + Sync>
         };
-        match whistlestop::remote::connect(&addr, &password, self.cfg.download_dir.clone(), self.cfg.monitor_device.clone(), repaint) {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let (a, dl, mon) = (addr.clone(), self.cfg.download_dir.clone(), self.cfg.monitor_device.clone());
+        let ctx2 = ctx.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(whistlestop::remote::connect(&a, &password, dl, mon, repaint));
+            ctx2.request_repaint();
+        });
+        self.connecting = Some((addr, rx));
+        self.rm.connecting = true;
+        self.rm.error = None;
+    }
+
+    /// The connection being made: done yet?
+    fn poll_connecting(&mut self) {
+        let Some((_, rx)) = &self.connecting else { return };
+        let res = match rx.try_recv() {
+            Ok(r) => r,
+            Err(std::sync::mpsc::TryRecvError::Empty) => return,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => Err(anyhow::anyhow!("the connection attempt stopped")),
+        };
+        let addr = self.connecting.take().unwrap().0;
+        self.rm.connecting = false;
+        match res {
             Ok(c) => {
                 self.cfg.remote_addr = addr;
                 let _ = self.cfg.save();
@@ -826,9 +852,17 @@ impl App {
                 }
             });
             ui.label(RichText::new("Whistle ≥ searchers' scan cycle. Then Mercury sends your CQFRAME (ID) and listens.").small().color(DIM));
-            let dis = s.link.is_some() || !s.mercury_ok;
+            // At a Roundtable: only a CQ for that table, as its host.
+            let away_from_table = s.table.as_ref().is_some_and(|t| {
+                !(self.cq_table && t.host && t.name.eq_ignore_ascii_case(self.cq_table_name.trim()))
+            });
+            let dis = s.link.is_some() || !s.mercury_ok || away_from_table;
             ui.add_enabled_ui(!dis, |ui| {
-                let call = big_button(ui, "🚂  Call CQ", BRASS).help(&help::CQ_CALL);
+                let mut call = big_button(ui, "🚂  Call CQ", BRASS);
+                if away_from_table {
+                    call = call.on_disabled_hover_text("You're at a Roundtable: leave it first (or call CQ for your own table)");
+                }
+                let call = call.help(&help::CQ_CALL);
                 self.call_cq_at = Some(call.rect.center());
                 self.call_cq_hovered = call.hovered();
                 if call.clicked() {
@@ -861,8 +895,10 @@ impl App {
                     .small()
                     .color(DIM),
             );
+            let at_table = s.table.is_some();
+            ui.add_enabled_ui(!at_table, |ui| {
             ui.horizontal(|ui| {
-                if ui.button("Current band").help(&help::S_CURRENT).clicked() {
+                if ui.button("Current band").on_disabled_hover_text("You're at a Roundtable: leave it first").help(&help::S_CURRENT).clicked() {
                     self.send(Cmd::StartSearch(SearchScope::CurrentBand));
                 }
                 if ui.button("All bands").help(&help::S_ALL).clicked() {
@@ -885,6 +921,7 @@ impl App {
                 if ui.button("Search band").help(&help::S_BAND).clicked() {
                     self.send(Cmd::StartSearch(SearchScope::Band(self.search_band.clone())));
                 }
+            });
             });
             let sdr_on = self.h.sdr.lock().unwrap().running;
             ui.separator();
@@ -989,7 +1026,7 @@ impl App {
                                 self.send(Cmd::JoinTable(t.clone()));
                                 self.tab = Tab::Roundtable;
                             }
-                        } else if s.link.is_none() && ui.small_button("Answer").help(&help::H_ANSWER).clicked() {
+                        } else if s.link.is_none() && s.table.is_none() && ui.small_button("Answer").help(&help::H_ANSWER).clicked() {
                             self.send(Cmd::Connect(h.call.clone()));
                             self.tab = Tab::Chat;
                         }
@@ -1106,7 +1143,7 @@ impl App {
                             .on_disabled_hover_text("Leave the Roundtable first: a 1:1 link and a Roundtable don't mix")
                             .clicked();
                         let r = ui.add(egui::TextEdit::singleline(&mut self.connect_to).hint_text("Callsign").desired_width(120.0)).help(&help::L_CONNECT);
-                        if (go || (r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)))) && !self.connect_to.trim().is_empty() {
+                        if s.table.is_none() && (go || (r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)))) && !self.connect_to.trim().is_empty() {
                             self.send(Cmd::Connect(self.connect_to.trim().to_string()));
                         }
                     });
@@ -2385,6 +2422,7 @@ impl eframe::App for App {
             self.tab = Tab::Files;
         }
         // Remote operation.
+        self.poll_connecting();
         if let Some(c) = &self.client {
             let notes: Vec<String> = c.notes.lock().unwrap().drain(..).collect();
             let lost = !c.alive.load(std::sync::atomic::Ordering::Relaxed);

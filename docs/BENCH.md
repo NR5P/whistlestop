@@ -137,6 +137,97 @@ building any audio stream now reports its message instead of "did not
 start". Checked with `airtest whistle`: 4/4, no false alarm in 15 s of
 quiet, then the computer heard the phone's CQ whistle 3 s in (score 0.9).
 
+## Second bug hunt (2026-11-12, evening)
+
+A read-through of the protocol, encryption, Depot, settings, remote and
+phone-bridge code (four reviewers, every finding checked against the code),
+then fixes with a test each where one can be written. Made alongside the
+"Busy-channel listening…", "Fix hand calls vs auto-answer…" and "Schedule
+and Station ID leave a Roundtable alone…" commits, and merged onto them:
+where both made the same fix (settings checks, Connect at a table, the
+schedule and Station ID at a table, stale packets before CONNECTED), theirs
+was kept.
+
+- **File pieces before the answer were kept**: a station that sent a
+  file's pieces without waiting for Accept got the file saved in your
+  Downloads unasked. Pieces now count only once the offer is accepted
+  (`file_pieces_before_the_answer_are_not_kept`, with a fake station that
+  does exactly that; fails without the fix).
+- **An empty file never finished** (nor one already fully on disk from an
+  earlier try): no piece ever came to complete it. Accepting finishes it.
+- **Roundtable messages vanished after a restart**: message numbers
+  restarted at 1, and the other members ignore numbers they finished in the
+  last 10 minutes. They now start at a random point, like file numbers.
+- **Nothing kept a 1:1 link off a Roundtable**: Connect, Answer, Search, a
+  chat CQ, the schedule (it retuned a host off its own table), Station ID
+  and the Depot's automatic connects all went ahead at a table, and an
+  incoming link then had the table's broadcasts and speed changes (MODE
+  commands) cut into it. All are refused or greyed out at a table, and table
+  traffic waits while a link is up. Calling CQ again for your own table no
+  longer wipes its members and lines. Resend requests from the last table
+  aren't sent to the next.
+- **Answering a Roundtable CQ automatically linked 1:1 with its host**
+  instead of joining the table (found by the phone UI test: the simulated
+  K7BOT did the same, so hosting a table in the demo got a 1:1 link).
+  Auto-answer now joins (`auto_answer_joins_a_roundtable_cq`, fails without
+  the fix), and the simulated bot no longer connects to a table's CQ.
+- **Mercury closing mid-link left the link half alive**: keys, queues and
+  the peer stayed, so a reconnect started with a dead encrypted session.
+  It's now ended as a disconnect. Packets left over from a previous link
+  (or half of one) are no longer fed into the next link's security layer.
+- **Encryption failures**: the header kept saying "Encrypted" while the
+  link was being dropped; a station's plain goodbye explaining the failure
+  was itself reported as "unencrypted packet"; and "the other station has
+  encryption off" stated as fact what may have been tampering ("didn't
+  offer encryption").
+- **Settings out of range crashed the station**: a negative CQ listen time
+  or an infinite beacon interval (by hand in the file, or from a remote
+  operator) panicked when used. (Fixed upstream too; its `sanitize` is
+  kept.) Added here: the settings file is also checked when it's loaded,
+  and it's written to a temporary file and moved into place.
+- **An unreadable `depot.json` was overwritten with an empty Depot** on the
+  next mail. It's now left alone and reported.
+- **Depot automation**: a delivery link to a station that never confirms
+  stayed up indefinitely (now 60 s idle); another away station's automatic
+  away message was filed as mail.
+- **Library**: a peer could make the station hold any number of copies of
+  a library file in memory by asking repeatedly; at most 3 at a time now.
+  A received file named `.partial` broke resume for good; names starting
+  with a dot now get a `_`.
+- **Remote operation**: ten wrong passwords from anyone locked the owner out
+  too, and connections that never logged in could fill every slot. The
+  lockout is now per computer, with at most 2 logins in progress from one.
+  Every reconnect copied all received files again (`qsl.txt`, `qsl-2.txt`
+  …); a record in the Download folder stops that. A client that stopped
+  answering was never dropped. Connecting from the desktop froze the window
+  for up to ~15 s on a wrong address; it now connects in the background.
+- **Demo left Mercury running**: a Whistlestop that ended without quitting
+  (a crash, a force-quit, a test run) left its two demo Mercurys running
+  for good; 20 had piled up here, using 32 % CPU together. The next Demo
+  start now stops those of any Whistlestop that's gone (checked by killing
+  a run mid-way: 2 orphans, then 0 after the next start).
+
+Not changed: the remote login proof (HMAC of a challenge) can be cracked
+offline by someone who records a login on the same network; the guide
+already says the stream isn't encrypted and the port must stay on the LAN.
+A `Tnc::command` that times out can have its late reply taken by the next
+command. Mercury could still start after `ws_stop` on a phone (only the UI
+tests stop the station).
+
+**Results after the fixes** (before the merge): the standard bench on
+two real Mercurys 33/34 (the miss, "scan speed, weak signal" 3/4 while this
+computer was compiling, passed 4/4 alone right after); after the auto-answer
+fix `watch link chat table e2e` 11/11 and `link chat table` 6/6; phone UI
+tests 7/7 on the iPhone Simulator and 7/7 on the Android emulator.
+
+**After merging onto the upstream commits**: the full standard bench on two
+real Mercurys **34/34**; phone apps rebuilt, UI tests **7/7** on the iPhone
+Simulator and **7/7** on the Android emulator; `cargo test` all pass
+(including the soak suites and the desktop window tests) except
+`sdr_hit_interrupts_stepping_search`, which fails now and then when the whole
+library suite runs at once, upstream's code without these changes included,
+and passes on its own (3/3).
+
 ## The apps against each other, and a bug hunt (2026-11-12)
 
 `--a=ios --b=android` (Simulator ↔ emulator, each app with its built-in
