@@ -911,17 +911,20 @@ pub fn connect(
         }
         serde_json::from_slice(&d).map_err(|_| anyhow!("unexpected reply"))
     };
+    let mut version_note = None;
     let (nonce, station) = match read_json(&mut s) {
         Ok(ToClient::Challenge {
             nonce,
             station,
             version,
         }) => {
+            // Different versions may still work together (unknown requests
+            // and settings are skipped with a note), so warn, don't refuse.
             let ours = env!("CARGO_PKG_VERSION");
             if version != ours {
-                bail!(
-                    "{station} runs Whistlestop {version} and this computer runs {ours}: install the same version on both computers"
-                );
+                version_note = Some(format!(
+                    "{station} runs Whistlestop {version} and this computer runs {ours}: some things may not work until both run the same version"
+                ));
             }
             (nonce, station)
         }
@@ -952,6 +955,7 @@ pub fn connect(
     };
     let alive = Arc::new(AtomicBool::new(true));
     let notes: Arc<Mutex<Vec<String>>> = Default::default();
+    notes.lock().unwrap().extend(version_note);
     let listening = Arc::new(AtomicBool::new(false));
     let writer = Arc::new(Mutex::new(s.try_clone()?));
 

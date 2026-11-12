@@ -335,6 +335,8 @@ pub fn human_bytes(b: usize) -> String {
 #[derive(Default, Debug)]
 pub struct ThroughputEstimator {
     last: Option<(std::time::Instant, usize)>,
+    /// Bytes Mercury has sent since this moment, while it had a backlog.
+    drain: Option<(std::time::Instant, usize)>,
     bps_ewma: Option<f64>,
     pub reported_bps: Option<f64>,
     pub reported_mode: Option<&'static Mode>,
@@ -343,6 +345,37 @@ pub struct ThroughputEstimator {
 }
 
 impl ThroughputEstimator {
+    /// Mercury sent `bytes` more of a backlog it still had. Speed is
+    /// measured over at least 5 s of continuous backlog, so neither
+    /// turnaround nor idle time counts.
+    pub fn on_drain(&mut self, now: std::time::Instant, bytes: usize) {
+        match self.drain {
+            Some((t0, acc)) if now.duration_since(t0).as_secs_f64() <= 60.0 => {
+                let acc = acc + bytes;
+                let dt = now.duration_since(t0).as_secs_f64();
+                if dt >= 5.0 && acc >= 512 {
+                    let bps = acc as f64 * 8.0 / dt;
+                    self.bps_ewma = Some(match self.bps_ewma {
+                        Some(e) => 0.7 * e + 0.3 * bps,
+                        None => bps,
+                    });
+                    self.samples += 1;
+                    self.drain = Some((now, 0));
+                } else {
+                    self.drain = Some((t0, acc));
+                }
+            }
+            // The first drain starts the clock (we don't know when its bytes
+            // started going out).
+            _ => self.drain = Some((now, 0)),
+        }
+    }
+
+    /// Mercury's backlog is empty: the next drain starts a new measurement.
+    pub fn on_idle(&mut self) {
+        self.drain = None;
+    }
+
     pub fn on_buffer(&mut self, now: std::time::Instant, queued: usize) {
         if let Some((t0, q0)) = self.last {
             let dt = now.duration_since(t0).as_secs_f64();
@@ -454,6 +487,16 @@ mod tests {
         let mut e = ThroughputEstimator::default();
         let t0 = std::time::Instant::now();
         e.on_buffer(t0, 10_000);
+        // Drains while the backlog lasts: 1000 bytes every 5 s = 1600 bps.
+        let mut g = ThroughputEstimator::default();
+        g.on_drain(t0, 400);
+        g.on_drain(t0 + std::time::Duration::from_secs(5), 1000);
+        g.on_drain(t0 + std::time::Duration::from_secs(10), 1000);
+        assert!((g.bps_ewma.unwrap() - 1600.0).abs() < 1.0, "{:?}", g.bps_ewma);
+        // Idle in between doesn't count.
+        g.on_idle();
+        g.on_drain(t0 + std::time::Duration::from_secs(300), 100);
+        assert_eq!(g.samples, 2);
         e.on_buffer(t0 + std::time::Duration::from_secs(10), 9_000);
         e.on_buffer(t0 + std::time::Duration::from_secs(20), 8_000);
         assert!((e.bps(Bandwidth::Hz2300) - 800.0).abs() < 1e-6);

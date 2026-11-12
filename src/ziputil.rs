@@ -1,8 +1,9 @@
 //! Built-in zip: bundle files and folders before sending them.
 
 use anyhow::{Context, Result};
+use std::collections::HashSet;
 use std::io::{Cursor, Write};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use zip::write::SimpleFileOptions;
 
 pub struct Zipped {
@@ -30,15 +31,27 @@ pub fn zip_paths(paths: &[PathBuf], name_hint: Option<&str>) -> Result<Zipped> {
         .compression_level(Some(9));
     let mut original = 0u64;
     let mut files = 0;
+    // Entry names used so far, lowercased (unzipping on Windows or macOS
+    // folds case).
+    let mut used: HashSet<String> = HashSet::new();
     for p in paths {
+        // "dir/sub/.." names "dir": resolve it, so the entries are named
+        // after the real folder, not "../...".
+        let p = if p.components().any(|c| matches!(c, Component::ParentDir)) {
+            p.canonicalize()
+                .with_context(|| format!("reading {}", p.display()))?
+        } else {
+            p.clone()
+        };
         let base = p.parent().unwrap_or(Path::new(""));
-        for entry in walkdir::WalkDir::new(p).follow_links(false) {
+        for entry in walkdir::WalkDir::new(&p).follow_links(false) {
             let entry = entry?;
             if !entry.file_type().is_file() {
                 continue;
             }
             let rel = entry.path().strip_prefix(base).unwrap_or(entry.path());
-            let rel = rel.to_string_lossy().replace('\\', "/");
+            let rel = entry_name(rel, entry.path());
+            let rel = unique_entry(&mut used, rel);
             let bytes = std::fs::read(entry.path())
                 .with_context(|| format!("reading {}", entry.path().display()))?;
             original += bytes.len() as u64;
@@ -65,6 +78,51 @@ pub fn zip_paths(paths: &[PathBuf], name_hint: Option<&str>) -> Result<Zipped> {
         original_bytes: original,
         files,
     })
+}
+
+/// A zip entry name for `rel`: only its ordinary components, joined with
+/// '/' (never "..", a root or a drive). Falls back to the file's own name.
+fn entry_name(rel: &Path, full: &Path) -> String {
+    let parts: Vec<String> = rel
+        .components()
+        .filter_map(|c| match c {
+            Component::Normal(n) => Some(n.to_string_lossy().replace('\\', "/")),
+            _ => None,
+        })
+        .flat_map(|s| {
+            s.split('/')
+                .filter(|c| !c.is_empty() && *c != "." && *c != "..")
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    if parts.is_empty() {
+        full.file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .filter(|n| n != "..")
+            .unwrap_or_else(|| "file".into())
+    } else {
+        parts.join("/")
+    }
+}
+
+/// `name`, or "name-1.ext", "name-2.ext", ... if already in the zip.
+fn unique_entry(used: &mut HashSet<String>, name: String) -> String {
+    if used.insert(name.to_lowercase()) {
+        return name;
+    }
+    let (dir, file) = match name.rfind('/') {
+        Some(i) => (&name[..=i], &name[i + 1..]),
+        None => ("", name.as_str()),
+    };
+    let (stem, ext) = match file.rfind('.') {
+        Some(i) if i > 0 => (&file[..i], &file[i..]),
+        _ => (file, ""),
+    };
+    (1..)
+        .map(|i| format!("{dir}{stem}-{i}{ext}"))
+        .find(|c| used.insert(c.to_lowercase()))
+        .unwrap()
 }
 
 #[cfg(test)]

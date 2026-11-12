@@ -215,7 +215,7 @@ Chat is a 1:1 conversation over Mercury's ARQ, which retransmits until everythin
 - **The link header** shows the other station's call, name and grid (from their HELLO), the agreed bandwidth, how they hear you ("hears you +7 dB", from their reports), the time since linking, and **Disconnect (73)**.
 - **Messages** show **"… sending"** until the other station's app confirms they arrived, then **"✓ delivered"**. There are no read receipts and no typing indicators: they would cost airtime.
 - **Time estimate**: under the input, "N bytes on air · ≈ T at R bps" tells you how long a message will take at the current link speed.
-- **Chat never waits behind a file.** Files go in 1 KB pieces and at most two pieces wait inside Mercury, so a line you type during a big transfer goes out within a couple of pieces.
+- **Chat never waits behind a file.** Files go in 1 KB pieces and at most two pieces wait inside Mercury, so a line you type during a big transfer goes out within a couple of pieces. (Whistlestop counts what it has handed to Mercury itself and takes off only what Mercury reports as sent, so a burst of Mercury's status reports can't make it hand over the rest of the file early.) The same limit is what lets **Cancel** stop a file going out.
 
 **Disconnect (73)** sends a short goodbye, then Mercury delivers anything still queued before hanging up. When the other station says 73, Whistlestop waits up to 30 s for its disconnect; if that never arrives (say, it was lost after a QSY), Whistlestop ends the link at once without a goodbye exchange, so Mercury doesn't keep calling a station that has gone.
 
@@ -226,14 +226,14 @@ The **Files** tab sends and receives files over a 1:1 link.
 ### Sending
 
 - **+ Files…** picks one or more files; **+ Folder…** picks a folder; or **drop** files and folders anywhere on the window.
-- **Zip before sending** (on by default) packs everything into one zip with maximum compression. Folders are always zipped. Text and logs often shrink to a few percent; photos and already-compressed files don't shrink.
+- **Zip before sending** (on by default) packs everything into one zip with maximum compression. Folders are always zipped. Two files with the same name (from different folders) are both kept, the second as `name-1.ext`. Text and logs often shrink to a few percent; photos and already-compressed files don't shrink.
 - Each transfer is **offered** first: the other station sees the name, size, zip contents and predicted time, and presses **Accept** or **Decline**.
 - Progress shows bytes done, the measured speed, and the time left. **Cancel** stops a transfer on either side. (Each station numbers its own files from a random starting point, so a cancel from either end always names the right one.)
 - If the link ends while an offer is still waiting for an answer, it shows **link ended before you answered**. The sender offers it again on the next link (with resume).
 
 ### Receiving
 
-An incoming offer shows the predicted time with **Accept** / **Decline**. Received files go to your **download folder** (Settings → Files; default `~/Downloads/Whistlestop`). **Show** reveals a received file in Finder. File names from the air are cleaned so they can't write anywhere else, and an existing file is never overwritten (`name-1.ext`, …).
+An incoming offer shows the predicted time with **Accept** / **Decline**. Received files go to your **download folder** (Settings → Files; default `~/Downloads/Whistlestop`). **Show** reveals a received file in Finder. File names from the air are cleaned so they can't write anywhere else: only the name itself is kept (no folders), control characters are dropped, characters Windows forbids (`< > : " | ? *`) become `_`, a Windows device name such as `CON` or `NUL` gets a `_` in front, and a name longer than 200 bytes is shortened (keeping its extension). An existing file is never overwritten (`name-1.ext`, …).
 
 ### Integrity and resume
 
@@ -263,7 +263,7 @@ Type in the Roundtable tab and press Enter. Messages go out over Mercury's **bro
 
 Broadcast frames are not acknowledged, so Whistlestop adds:
 
-- **Asking again**: if a station is missing parts of a message, it asks for just those parts every 20 s, and the sender repeats them.
+- **Asking again**: if a station is missing parts of a message, it asks for just those parts every 20 s, and the sender repeats them. A message already complete isn't shown twice when its parts are repeated for someone else, and a message still incomplete after 10 minutes is given up.
 - **Speed ramp-up**: each member reports how well it hears the host. The host picks the fastest mode that the **weakest** member can copy, with **3 dB** of margin, within your bandwidth setting. It announces the change twice in the current mode, waits until both announcements are on the air, then everyone switches together. It slows down at once if someone reports worse, and speeds up only after 2 minutes without a downgrade. Turn this off in Settings ("Roundtable speed ramp-up").
 - **The floor**: click a member's name to pass them the floor (the "talking stick"). It's a courtesy, not a lock.
 
@@ -282,7 +282,7 @@ The **🏤 Depot** tab is Whistlestop's mailbox: messages that wait for a statio
 
 **Via**: to reach a station through someone else, put the relay's callsign in **Via**. The mail is handed to the relay when you next link with them, and they carry it on (if they have relaying turned on). Leave Via empty to wait for the station itself.
 
-The Depot is saved in `depot.json` beside the settings, so mail survives restarts. Repeat deliveries are ignored, so a link that drops mid-handover is harmless: unconfirmed mail is simply handed over again next time.
+The Depot is saved in `depot.json` beside the settings, so mail survives restarts. Repeat deliveries are ignored, so a link that drops mid-handover is harmless: unconfirmed mail is simply handed over again next time. If `depot.json` is ever damaged (cut short by a crash, or edited by hand) it is never overwritten: Whistlestop keeps it as `depot.json.bad`, starts a new Depot and says so in the Log, so the old mail can still be recovered from that file. The **To** and **Via** fields take callsigns only (1–12 letters, digits, `/` or `-`).
 
 ## Away
 
@@ -317,7 +317,7 @@ Every automatic transmission is written to the Log (🤖 and 📣 lines), so you
 
 With **Carry mail for other stations** on (off by default), your Depot accepts mail addressed to someone else: a station that links with you can hand you mail for a third station, and you carry it in **In Transit** until you link with (or, while away, hear) that station. It's then delivered like your own mail and moves to Delivered with the callsign that took it. With relaying off, such mail is declined (logged) and stays with the sender.
 
-Loop guards: each message carries a hop count, and a message is relayed at most **3** times; a message you've already carried or delivered is never taken twice. Your Station ID and notices include the calls you're carrying mail for, so their owners can come and collect it.
+Loop guards: each message carries a hop count, and at most **3** relay stations may carry a message on its way (sender → relay → relay → relay → the station it's for); a message you've already carried or delivered is never taken twice. Your Station ID and notices include the calls you're carrying mail for, so their owners can come and collect it.
 
 ## QSY (moving a link)
 
@@ -353,7 +353,7 @@ Share a folder of files that linked stations can browse and download, even while
 **Sharing** (Settings → File library, **off by default**):
 
 - **Share a file library**, and **Folder** (Choose…): the folder others may see. Put only files you're happy to share in it.
-- Nothing outside the folder can be reached: no `..`, no absolute paths, no hidden files (names starting with `.`), and no links that lead outside it.
+- Nothing outside the folder can be reached: no `..`, no absolute paths, no hidden files (names starting with `.`), and no links that lead outside it or to a hidden file or folder.
 - **Only while I'm away**: open it only while you're Away.
 - **Largest file** (default 5 MB): bigger files are listed but refused. At a few hundred bytes a second, a big file ties up the frequency for a long time.
 - Each browse and download is noted in the Log.
@@ -370,7 +370,7 @@ Settings → Schedule (**off by default**):
 
 - **Follow the schedule**, and **Only while I'm away** (on by default, so it never moves the radio under you).
 - **+ Add a time slot**, then set:
-  - **from–to** (HH:MM, **UTC**; a slot may cross midnight, e.g. 22:00–02:00);
+  - **from–to** (HH:MM, **UTC**; a slot may cross midnight, e.g. 22:00–02:00; the same time for both, e.g. 08:00–08:00, means all day);
   - **days** (every day, Mon–Fri, Sat–Sun);
   - the **dial frequency** (kHz);
   - **Station ID**: send the Station ID beacon (every *N* minutes, as set under Automation) while the slot is on.
@@ -395,7 +395,7 @@ The window then shows the address to connect to, for example `192.168.1.20:7373`
 - **🔊 Listen**: plays the radio's received audio on this computer's speakers (Settings → Audio → Listen on and Listen volume are this computer's). It's 8 kHz audio, about 16 KB/s, nothing for a home network.
 - **Files**: files you send are picked here and uploaded, up to **25 MB** each; only files uploaded this way can be sent from the radio computer. Files you receive are saved on the radio computer and also copied to this computer's Download folder (only files in its own Download folder are ever copied back).
 
-**Disconnect** (in the Remote window) goes back to this computer's own station; the radio computer carries on as it was. If the connection drops, this computer goes back to its own station and says so. Turning sharing off or changing the password on the radio computer disconnects anyone operating at once. Both computers must run the same Whistlestop version; **Connect** says which versions differ if they don't.
+**Disconnect** (in the Remote window) goes back to this computer's own station; the radio computer carries on as it was. If the connection drops, this computer goes back to its own station and says so. Turning sharing off or changing the password on the radio computer disconnects anyone operating at once. Run the same Whistlestop version on both computers. If they differ, **Connect** still works but says which versions differ: requests or settings one side doesn't know are skipped with a note.
 
 **Security.** Only computers with private (home network) addresses can connect: 192.168.x.x, 10.x.x.x, 172.16–31.x.x, link-local and IPv6 unique-local. The password is never sent: the radio computer sends a fresh challenge and the other computer answers with an HMAC-SHA256 of it. A wrong password is refused, slowly, and after **10 wrong passwords within a minute** (from any computers together) every remote login is refused for **5 minutes**, the right password included; the radio computer's Log says so. At most **8** connections are accepted at once, and a login must finish within **15 s**. The stream itself isn't encrypted, so **don't forward the port to the internet**; use a VPN to reach home from outside. Anyone who knows the password can transmit with your station, under your callsign: choose it accordingly. On macOS, allow incoming connections for Whistlestop when the firewall asks.
 
@@ -485,7 +485,7 @@ Encryption protects **1:1 chat and files**. It is **off by default**. In **Setti
 
 - **Off**: never encrypt.
 - **Prefer**: encrypt when the other station also wants to; otherwise plain text, clearly marked "🔓 Not encrypted".
-- **Require**: encrypt or hang up. Never falls back to plain text. If the other station doesn't take part within 120 s, Whistlestop disconnects and says why.
+- **Require**: encrypt or hang up. Never falls back to plain text. If the other station doesn't take part within 120 s, Whistlestop disconnects and says why; a station with encryption off is told in the goodbye that this one requires it. Nothing (chat, files, mail) is ever sent in plain text first.
 
 Turning it on asks you to confirm the legal warning.
 
@@ -635,7 +635,7 @@ They're stored in the settings file (`segments`), so you can change or add them.
 
 ## Settings reference
 
-Settings are saved to `~/Library/Application Support/Whistlestop/whistlestop.toml` (macOS). **Save & connect** applies them and reconnects. Closing the Settings window without it throws your edits away.
+Settings are saved to `~/Library/Application Support/Whistlestop/whistlestop.toml` (macOS). **Save & connect** applies them and reconnects. Closing the Settings window without it throws your edits away. If the settings file has a value Whistlestop can't read (edited by hand, say), only that setting falls back to its default: the rest are kept, and the Log names each one ("⚠ Settings file: …"). A file that can't be read at all is kept as `whistlestop.toml.bad` and the default settings are used.
 
 | Setting | What it does | Default |
 |---|---|---|
@@ -655,7 +655,7 @@ Settings are saved to `~/Library/Application Support/Whistlestop/whistlestop.tom
 | Audio in / out | The radio's sound device | system default |
 | Wide receiver | Use an RTL-SDR; RX OUT or IF OUT; IF Hz and inversion; crystal ppm | off |
 | Dwell per channel | How long search first listens on each channel (a promising channel gets up to 2 s) | 0.5 s |
-| Channel step | Distance between search channels (capped to the whistle's reach) | 2000 Hz |
+| Channel step | Distance between search channels (at least 100 Hz, capped to the whistle's reach) | 2000 Hz |
 | CQ cycles | How many whistle/CQ/listen cycles before giving up | 5 |
 | Listen after CQ | How long to wait for answers each cycle | 20 s |
 | Whistle watch | Report whistles while parked | on |

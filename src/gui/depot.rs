@@ -41,9 +41,15 @@ pub fn fmt_utc(secs: u64) -> String {
 }
 
 impl DepotTab {
-    fn tab_button(&mut self, ui: &mut Ui, b: Box_, label: String, topic: &help::Topic) {
+    /// A box tab. It's as wide as `widest` (its label with the largest count
+    /// expected), so the row doesn't shift as mail comes and goes.
+    fn tab_button(&mut self, ui: &mut Ui, b: Box_, label: String, widest: &str, topic: &help::Topic) {
         let on = self.tab == b;
-        let btn = egui::Button::new(RichText::new(label).color(if on { Color32::from_rgb(20, 16, 10) } else { TEXT })).fill(if on { TEAL } else { CARD_HI });
+        let font = egui::TextStyle::Button.resolve(ui.style());
+        let w = ui.painter().layout_no_wrap(widest.to_string(), font, TEXT).size().x + 2.0 * ui.spacing().button_padding.x;
+        let btn = egui::Button::new(RichText::new(label).color(if on { Color32::from_rgb(20, 16, 10) } else { TEXT }))
+            .fill(if on { TEAL } else { CARD_HI })
+            .min_size(egui::vec2(w, 0.0));
         if ui.add(btn).help(topic).clicked() {
             self.tab = b;
         }
@@ -96,7 +102,10 @@ impl DepotTab {
                     self.text.clear();
                     self.tab = Box_::Departures;
                 }
-                ui.label(RichText::new(format!("{} bytes", self.text.len())).small().color(DIM));
+                ui.add_sized(
+                    egui::vec2(90.0, ui.spacing().interact_size.y),
+                    egui::Label::new(RichText::new(format!("{:>5} bytes", self.text.len())).small().monospace().color(DIM)),
+                );
             });
         });
         ui.add_space(8.0);
@@ -107,11 +116,12 @@ impl DepotTab {
                 ui,
                 Box_::Arrivals,
                 if unread > 0 { format!("📬 Arrivals ({unread} new)") } else { format!("📬 Arrivals ({})", d.arrivals.len()) },
+                "📬 Arrivals (88 new)",
                 &help::D_ARRIVALS,
             );
-            self.tab_button(ui, Box_::Departures, format!("📮 Departures ({})", d.departures.len()), &help::D_DEPARTURES);
-            self.tab_button(ui, Box_::Transit, format!("🚚 In Transit ({})", d.transit.len()), &help::D_TRANSIT);
-            self.tab_button(ui, Box_::Delivered, format!("✓ Delivered ({})", d.delivered.len()), &help::D_DELIVERED);
+            self.tab_button(ui, Box_::Departures, format!("📮 Departures ({})", d.departures.len()), "📮 Departures (888)", &help::D_DEPARTURES);
+            self.tab_button(ui, Box_::Transit, format!("🚚 In Transit ({})", d.transit.len()), "🚚 In Transit (888)", &help::D_TRANSIT);
+            self.tab_button(ui, Box_::Delivered, format!("✓ Delivered ({})", d.delivered.len()), "✓ Delivered (888)", &help::D_DELIVERED);
         });
         ui.add_space(6.0);
         let linked = s.link.as_ref().map(|l| l.peer.clone());

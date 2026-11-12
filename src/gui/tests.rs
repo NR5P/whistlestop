@@ -360,6 +360,7 @@ fn click_library_and_qsy_row() {
     type_into(&mut h, "kHz, e.g. 14106.5", "14106.5");
     click_exact(&mut h, "Ask");
     wait(&mut h, 40.0, "moved", |_, s| s.rig.freq_hz == 14_106_500.0 && s.qsy.is_some());
+    frames(&mut h, 3); // draw the new state before reading the screen
     assert!(has_text(&h, "back to"));
     click(&mut h, "Disconnect");
     wait(&mut h, 60.0, "home", |_, s| s.link.is_none() && s.qsy.is_none());

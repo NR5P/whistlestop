@@ -2,8 +2,9 @@
 
 use anyhow::{Result, bail};
 use sha2::{Digest, Sha256};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 pub const VERSION: u8 = 1;
 pub const CAP_RESUME: u8 = 1;
@@ -133,15 +134,21 @@ impl<'a> Reader<'a> {
     }
 }
 
-fn read_varint_prefix(b: &[u8]) -> Option<(usize, usize)> {
+/// The length prefix at the start of `b`: Ok(Some((length, prefix bytes))),
+/// Ok(None) if more bytes are needed, or an error if no valid prefix can
+/// start here (more than 4 bytes; MAX_PACKET needs only 3).
+fn read_varint_prefix(b: &[u8]) -> Result<Option<(usize, usize)>> {
     let mut v = 0usize;
     for (i, &byte) in b.iter().enumerate().take(4) {
         v |= ((byte & 0x7f) as usize) << (7 * i);
         if byte & 0x80 == 0 {
-            return Some((v, i + 1));
+            return Ok(Some((v, i + 1)));
         }
     }
-    None
+    if b.len() >= 4 {
+        bail!("corrupt link stream (length prefix too long)");
+    }
+    Ok(None)
 }
 
 // -------------------------------------------------------------- link plane
@@ -530,12 +537,27 @@ impl Link {
 }
 
 /// Splits Mercury's ARQ byte stream into WSP link packets.
+///
+/// The stream has no resync marker, so once a length prefix is corrupt
+/// nothing after it can be trusted: the decoder drops what it buffered and
+/// refuses everything until `reset` (or a new decoder for the next link).
 #[derive(Default)]
 pub struct LinkDecoder {
     buf: Vec<u8>,
+    corrupt: bool,
 }
 
 impl LinkDecoder {
+    /// Whether the stream has been found corrupt (see the type's docs).
+    pub fn is_corrupt(&self) -> bool {
+        self.corrupt
+    }
+
+    /// Start over, as for a new link.
+    pub fn reset(&mut self) {
+        *self = Self::default();
+    }
+
     pub fn feed(&mut self, data: &[u8]) -> Result<Vec<Link>> {
         self.feed_bodies(data)?
             .iter()
@@ -546,10 +568,24 @@ impl LinkDecoder {
     /// Like `feed`, but hands back the raw packet bodies (the E2E handshake
     /// hashes the HELLOs exactly as they were sent).
     pub fn feed_bodies(&mut self, data: &[u8]) -> Result<Vec<Vec<u8>>> {
+        if self.corrupt {
+            bail!("corrupt link stream");
+        }
         self.buf.extend_from_slice(data);
         let mut out = vec![];
-        while let Some((n, hdr)) = read_varint_prefix(&self.buf) {
+        loop {
+            let (n, hdr) = match read_varint_prefix(&self.buf) {
+                Ok(Some(x)) => x,
+                Ok(None) => break,
+                Err(e) => {
+                    self.buf = vec![];
+                    self.corrupt = true;
+                    return Err(e);
+                }
+            };
             if n > MAX_PACKET {
+                self.buf = vec![];
+                self.corrupt = true;
                 bail!("corrupt link stream (packet length {n})");
             }
             if self.buf.len() < hdr + n {
@@ -706,18 +742,65 @@ impl Incoming {
             bail!("checksum mismatch on {}", self.name);
         }
         std::fs::create_dir_all(dir)?;
-        // Never trust a path from the air: keep only the file name.
-        let name = Path::new(&self.name)
-            .file_name()
-            .map(|s| s.to_string_lossy().into_owned());
-        let name = name
-            .filter(|n| !n.is_empty() && n != "..")
-            .unwrap_or_else(|| "received.bin".into());
-        let path = unique_path(&dir.join(name));
+        let path = unique_path(&dir.join(safe_file_name(&self.name)));
         std::fs::write(&path, &self.data)?;
         let _ = std::fs::remove_file(&self.partial_path);
         Ok(path)
     }
+}
+
+/// Longest received file name kept, in bytes (filesystems allow 255; this
+/// leaves room for the "-N" that `unique_path` may add).
+pub const MAX_NAME_BYTES: usize = 200;
+
+/// A file name from the air made safe to save on any of our platforms:
+/// only the last path component (either separator), no control characters
+/// or characters Windows refuses, no trailing dots or spaces, Windows
+/// device names (CON, NUL, COM1.txt, ...) prefixed with '_', at most
+/// `MAX_NAME_BYTES` (keeping the extension), and "received.bin" if
+/// nothing is left.
+pub fn safe_file_name(raw: &str) -> String {
+    const FALLBACK: &str = "received.bin";
+    let last = raw.rsplit(['/', '\\']).next().unwrap_or("");
+    let mut name: String = last
+        .chars()
+        .filter(|c| !c.is_control())
+        .map(|c| match c {
+            '<' | '>' | ':' | '"' | '|' | '?' | '*' => '_',
+            c => c,
+        })
+        .collect();
+    let trimmed = name.trim_end_matches(['.', ' ']).len();
+    name.truncate(trimmed);
+    if name.trim().is_empty() {
+        return FALLBACK.into();
+    }
+    // Windows device names, with or without an extension.
+    let device = name.split('.').next().unwrap_or("").trim_end().to_ascii_uppercase();
+    let reserved = matches!(device.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+        || ((device.starts_with("COM") || device.starts_with("LPT"))
+            && device.len() == 4
+            && matches!(device.as_bytes()[3], b'1'..=b'9'));
+    if reserved {
+        name.insert(0, '_');
+    }
+    if name.len() > MAX_NAME_BYTES {
+        // Keep a sensible extension (".txt", ".tar"), shorten the rest.
+        let ext = match name.rfind('.') {
+            Some(i) if i > 0 && name.len() - i <= 16 => name[i..].to_string(),
+            _ => String::new(),
+        };
+        let mut cut = MAX_NAME_BYTES - ext.len();
+        while !name.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        let stem = name[..cut].trim_end_matches(['.', ' ']).to_string();
+        if stem.trim().is_empty() {
+            return FALLBACK.into();
+        }
+        name = stem + &ext;
+    }
+    name
 }
 
 fn unique_path(p: &Path) -> PathBuf {
@@ -1004,43 +1087,127 @@ pub fn table_text_frames(
         .collect())
 }
 
-/// (total parts, parts received by number), per (sender, message id).
-type Partial = (u8, HashMap<u8, Vec<u8>>);
+/// How long an unfinished message waits for its missing parts.
+pub const TABLE_PARTIAL_TTL: Duration = Duration::from_secs(10 * 60);
+/// How long (and how many) finished messages are remembered, so parts
+/// resent later for another member are recognised and ignored.
+pub const TABLE_DONE_TTL: Duration = Duration::from_secs(10 * 60);
+pub const TABLE_DONE_MAX: usize = 256;
+
+/// One unfinished message: total parts, parts received by number, and
+/// when the last part arrived.
+struct Partial {
+    total: u8,
+    got: HashMap<u8, Vec<u8>>,
+    last: Instant,
+}
 
 /// Reassembles TEXT parts and reports what is missing (for AGAIN).
+///
+/// A message is delivered once. Parts of a message finished in the last
+/// `TABLE_DONE_TTL` (at most the last `TABLE_DONE_MAX` messages) are
+/// ignored: in a Roundtable parts are resent whenever *any* member asks
+/// AGAIN, and those must neither show the message twice nor make this
+/// station ask AGAIN itself. Unfinished messages are given up after
+/// `TABLE_PARTIAL_TTL` without a new part.
 #[derive(Default)]
 pub struct TableAssembler {
     parts: HashMap<(String, u64), Partial>,
+    done: HashMap<(String, u64), Instant>,
+    done_order: VecDeque<((String, u64), Instant)>,
 }
 
 impl TableAssembler {
     pub fn add(&mut self, from: &str, id: u64, part: u8, total: u8, data: &[u8]) -> Option<String> {
+        self.add_at(Instant::now(), from, id, part, total, data)
+    }
+
+    /// `add` with an explicit clock (for tests).
+    pub fn add_at(
+        &mut self,
+        now: Instant,
+        from: &str,
+        id: u64,
+        part: u8,
+        total: u8,
+        data: &[u8],
+    ) -> Option<String> {
+        self.expire(now);
+        if total == 0 || total > 64 || part == 0 || part > total {
+            return None;
+        }
         let key = (from.to_string(), id);
-        let e = self
-            .parts
-            .entry(key.clone())
-            .or_insert_with(|| (total, HashMap::new()));
-        e.1.insert(part, data.to_vec());
-        if e.1.len() == total as usize {
-            let (_, got) = self.parts.remove(&key).unwrap();
+        if self.done.contains_key(&key) {
+            return None;
+        }
+        let e = self.parts.entry(key.clone()).or_insert_with(|| Partial {
+            total,
+            got: HashMap::new(),
+            last: now,
+        });
+        if total != e.total || part > e.total {
+            // Disagrees with the parts already here (corrupt or forged):
+            // keep what we have.
+            return None;
+        }
+        e.got.insert(part, data.to_vec());
+        e.last = now;
+        if (1..=e.total).all(|i| e.got.contains_key(&i)) {
+            let p = self.parts.remove(&key)?;
             let mut all = vec![];
-            for i in 1..=total {
-                all.extend_from_slice(got.get(&i)?);
+            for i in 1..=p.total {
+                all.extend_from_slice(p.got.get(&i)?);
             }
+            self.remember_done(key, now);
             return Some(String::from_utf8_lossy(&all).into_owned());
         }
         None
     }
 
+    fn remember_done(&mut self, key: (String, u64), now: Instant) {
+        self.done.insert(key.clone(), now);
+        self.done_order.push_back((key, now));
+        while self.done_order.len() > TABLE_DONE_MAX {
+            if let Some((k, t)) = self.done_order.pop_front()
+                && self.done.get(&k) == Some(&t)
+            {
+                self.done.remove(&k);
+            }
+        }
+    }
+
+    /// Forget unfinished messages that have waited too long, and finished
+    /// ones old enough that their parts won't be resent.
+    pub fn expire(&mut self, now: Instant) {
+        self.parts
+            .retain(|_, p| now.saturating_duration_since(p.last) < TABLE_PARTIAL_TTL);
+        while let Some((k, t)) = self.done_order.front() {
+            if now.saturating_duration_since(*t) < TABLE_DONE_TTL {
+                break;
+            }
+            if self.done.get(k) == Some(t) {
+                self.done.remove(k);
+            }
+            self.done_order.pop_front();
+        }
+    }
+
     /// Messages with gaps: (from, id, bitmap of missing parts).
     pub fn missing(&self) -> Vec<(String, u64, u64)> {
+        self.missing_at(Instant::now())
+    }
+
+    /// `missing` with an explicit clock (for tests): messages that have
+    /// waited longer than `TABLE_PARTIAL_TTL` are not asked for.
+    pub fn missing_at(&self, now: Instant) -> Vec<(String, u64, u64)> {
         self.parts
             .iter()
-            .map(|((from, id), (total, got))| {
+            .filter(|(_, p)| now.saturating_duration_since(p.last) < TABLE_PARTIAL_TTL)
+            .map(|((from, id), p)| {
                 let mut m = 0u64;
-                for p in 1..=*total {
-                    if !got.contains_key(&p) {
-                        m |= 1 << (p - 1);
+                for n in 1..=p.total.min(64) {
+                    if !p.got.contains_key(&n) {
+                        m |= 1 << (n - 1);
                     }
                 }
                 (from.clone(), *id, m)

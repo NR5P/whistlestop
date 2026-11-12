@@ -235,8 +235,13 @@ impl App {
         style(&cc.egui_ctx);
         let ctx = cc.egui_ctx.clone();
         let h = engine::spawn(move || ctx.request_repaint());
-        let cfg = Config::load();
+        let mut cfg = Config::load();
+        if !cfg.load_problems.is_empty() {
+            eprintln!("Some settings couldn't be read; see the Log");
+        }
         h.send(Cmd::Start(cfg.clone()));
+        // Logged once, by the engine starting with them.
+        let problems = std::mem::take(&mut cfg.load_problems);
         let first_run = !whistlestop::config::path().exists();
         let mut app = Self {
             audio_seen: 0,
@@ -286,6 +291,12 @@ impl App {
             tour: std::env::var_os("WHISTLESTOP_SHOTS").map(|d| Tour { dir: d.into(), step: 0, at: Instant::now(), started: Instant::now() }),
         };
         app.start_server();
+        if !problems.is_empty() {
+            app.toast(format!(
+                "{} setting(s) in the settings file couldn't be read and use their defaults: see the Log",
+                problems.len()
+            ));
+        }
         app
     }
 

@@ -254,7 +254,10 @@ pub struct WhistleSeen {
     pub score: f64,
 }
 
+/// Fields missing from a serialized State take their defaults, so a remote
+/// client can still show a radio computer running another version.
 #[derive(Default, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct State {
     pub running: bool,
     pub demo: bool,
@@ -606,6 +609,10 @@ struct Station {
     outgoing: Vec<Outgoing>,
     incoming: HashMap<u64, Incoming>,
     mercury_buffer: usize,
+    /// Mercury's last BUFFER figure (see the BUFFER handler).
+    mercury_reported: usize,
+    /// When we last wrote to Mercury's data port.
+    last_data_write: Instant,
     next_fid: u64,
     next_chat_id: u64,
     est: ThroughputEstimator,
@@ -789,6 +796,8 @@ impl Station {
             outgoing: vec![],
             incoming: HashMap::new(),
             mercury_buffer: 0,
+            mercury_reported: 0,
+            last_data_write: Instant::now(),
             // Each station numbers its own files. Starting at a random point
             // keeps the two stations' numbers apart, so a CANCEL (which
             // either side may send) can't name the wrong file.
@@ -910,6 +919,12 @@ impl Station {
             (None, true) => "Whistlestop starting in Demo mode (simulated radio, band and Mercury; install Mercury for a real-Mercury demo)".to_string(),
             _ => "Whistlestop starting".to_string(),
         });
+        if let Some(p) = s.depot.load_problem.take() {
+            s.log(format!("⚠ {p}"));
+        }
+        for p in &cfg.load_problems {
+            s.log(format!("⚠ Settings file: {p}"));
+        }
 
         // Radio.
         if cfg.demo && real.is_none() {
@@ -1655,7 +1670,7 @@ impl Station {
                 let via = via
                     .map(|v| v.trim().to_uppercase())
                     .filter(|v| !v.is_empty() && *v != to);
-                self.depot.post_via(&me, &to, via.as_deref(), text.trim());
+                self.depot.post_via(&me, &to, via.as_deref(), text.trim())?;
                 self.log(match &via {
                     Some(v) => format!("📮 Mail for {to} waits in Departures, to be handed to {v}"),
                     None => format!("📮 Mail for {to} waits in Departures"),
@@ -1815,10 +1830,12 @@ impl Station {
     }
 
     fn step_hz(&self) -> f64 {
-        // Neighbouring channels overlap so every caller is within reach.
-        self.cfg
-            .step_hz
-            .min(1.8 * self.whistle_params().scan_reach_hz())
+        // Neighbouring channels overlap so every caller is within reach. A
+        // step from a hand-edited settings file is kept sane (0 would make
+        // infinitely many channels).
+        let reach = 1.8 * self.whistle_params().scan_reach_hz();
+        let s = self.cfg.step_hz;
+        if s.is_finite() { s.clamp(100.0, reach) } else { reach }
     }
 
     /// The fine offset from a matched-filter measurement, choosing between
@@ -2359,7 +2376,24 @@ impl Station {
         match e {
             TncEvent::Line(l) => self.on_line(l).await?,
             TncEvent::Data(d) => {
-                let bodies = self.dec.feed_bodies(&d)?;
+                // A file coming in moves only a piece at a time (one 1 KB
+                // piece can take over a minute on a slow mode): its bytes
+                // keep the link from counting as idle, though the signal
+                // reports alone don't.
+                if self.peer.is_some() && !self.incoming.is_empty() && !d.is_empty() {
+                    self.last_link_activity = Instant::now();
+                }
+                let bodies = match self.dec.feed_bodies(&d) {
+                    Ok(b) => b,
+                    // The stream has no resync point: everything after a
+                    // broken length is the middle of a packet. End the link.
+                    Err(e) if self.peer.is_some() => {
+                        self.log(format!("⚠ The link's data stream is corrupt ({e}); hanging up"));
+                        self.tnc()?.command("DISCONNECT").await?;
+                        return Ok(());
+                    }
+                    Err(e) => return Err(e),
+                };
                 if self.peer.is_none() {
                     // Mercury's data port can beat the CONNECTED line on the
                     // control port: keep these for when it arrives.
@@ -2424,6 +2458,7 @@ impl Station {
                 self.peer = Some(peer.clone());
                 self.est = ThroughputEstimator::default();
                 self.mercury_buffer = 0;
+                self.mercury_reported = 0;
                 self.set(|g| {
                     g.incoming_call = false;
                     g.calling = None;
@@ -2501,6 +2536,7 @@ impl Station {
                 self.ctl_queue.clear();
                 self.early.clear();
                 self.dec = LinkDecoder::default();
+                self.mercury_reported = 0;
                 if let Some(p) = self.peer.take() {
                     self.log(format!("Link with {p} ended"));
                     self.set(|g| {
@@ -2628,9 +2664,29 @@ impl Station {
                 }
             }
             "BUFFER" => {
-                let n = l[6..].trim().parse().unwrap_or(0);
-                self.mercury_buffer = n;
-                self.est.on_buffer(Instant::now(), n);
+                // Mercury reports its backlog after every read of the data
+                // socket (128 bytes at a time), so a count can trail what's
+                // been written and is still in the socket. Taken as the whole
+                // backlog, every low count let another chunk go, and whole
+                // files were handed over at once (no cancel, chat behind
+                // 8 KB, wrong progress). So bytes are counted when written,
+                // and only Mercury's decreases (bytes sent) are taken off.
+                let n: usize = l[6..].trim().parse().unwrap_or(0);
+                let now = Instant::now();
+                let prev = std::mem::replace(&mut self.mercury_reported, n);
+                if n < prev {
+                    let sent = prev - n;
+                    self.mercury_buffer = self.mercury_buffer.saturating_sub(sent);
+                    self.est.on_drain(now, sent);
+                }
+                self.mercury_buffer = self.mercury_buffer.max(n);
+                // Drift guard: empty, and nothing written for a moment.
+                if n == 0 && self.last_data_write.elapsed() > Duration::from_secs(2) {
+                    self.mercury_buffer = 0;
+                }
+                if self.mercury_buffer == 0 {
+                    self.est.on_idle();
+                }
                 self.pump().await?;
             }
             "BITRATE" => {
@@ -2690,6 +2746,10 @@ impl Station {
                 E2eView::Plain { why: why.clone() },
                 format!("🔓 Not encrypted: {why}"),
             ),
+            Notice::Skipped { why } => {
+                self.log(format!("⚠ Skipped a packet from {peer} that didn't make sense ({why})"));
+                return;
+            }
         };
         self.log(line.clone());
         self.system_line(line);
@@ -2707,12 +2767,13 @@ impl Station {
         self.hi_queue.clear();
         self.log(format!("⚠ Encryption: {why}. Disconnecting."));
         self.system_line(format!("⚠ Encryption: {why}. Disconnecting."));
-        self.ctl_queue.push_back(
-            Link::Bye {
-                text: "encryption problem, disconnecting".into(),
-            }
-            .encode(),
-        );
+        // Tell the other station why, in its own terms.
+        let text = if why.contains("requires it") {
+            "this station requires encryption: turn it on (Settings → Encryption) to link"
+        } else {
+            "encryption problem, disconnecting"
+        };
+        self.ctl_queue.push_back(Link::Bye { text: text.into() }.encode());
         self.pump().await?;
         self.tnc()?.command("DISCONNECT").await?;
         Ok(())
@@ -3019,6 +3080,10 @@ impl Station {
             Link::Done { fid, ok } => {
                 self.outgoing.retain(|o| o.fid != fid);
                 self.xfer(Dir::Out, fid, |t| {
+                    // Cancelled here before their DONE arrived: stays so.
+                    if matches!(t.state, XferState::Failed(_)) {
+                        return;
+                    }
                     t.state = if ok {
                         XferState::Done(None)
                     } else {
@@ -3295,6 +3360,7 @@ impl Station {
         while let Some(p) = self.ctl_queue.pop_front() {
             self.mercury_buffer += p.len();
             self.tnc()?.send_data(&p).await?;
+            self.last_data_write = Instant::now();
         }
         // Chat and files wait until the link is plain or keys are agreed.
         while let Some(p) = self.hi_queue.front() {
@@ -3304,6 +3370,7 @@ impl Station {
             self.hi_queue.pop_front();
             self.mercury_buffer += bytes.len();
             self.tnc()?.send_data(&bytes).await?;
+            self.last_data_write = Instant::now();
         }
         if !self.e2e.as_ref().is_some_and(|c| c.ready()) {
             return Ok(());
@@ -3325,6 +3392,7 @@ impl Station {
             };
             self.mercury_buffer += bytes.len();
             self.tnc()?.send_data(&bytes).await?;
+            self.last_data_write = Instant::now();
             self.last_link_activity = Instant::now();
             let eta = self
                 .est
@@ -4511,7 +4579,7 @@ pub fn qsy_verdict(cfg: &Config, home: f64, hz: f64) -> Result<(), String> {
         if Some(there) != here {
             return Err(format!("I only QSY within {}", here.unwrap_or("this band")));
         }
-    } else if !cfg.qsy_bands.iter().any(|b| b == there) {
+    } else if !cfg.qsy_bands.iter().any(|b| b.trim().eq_ignore_ascii_case(there)) {
         return Err(format!("{there} isn't one of my QSY bands"));
     }
     if cfg.qsy_max_khz > 0.0 && (hz - home).abs() > cfg.qsy_max_khz * 1000.0 {

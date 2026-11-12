@@ -55,18 +55,35 @@ pub fn band_of(hz: f64) -> Option<&'static str> {
         .map(|b| b.0)
 }
 
+/// Smallest search step `channels` uses, Hz.
+pub const MIN_STEP_HZ: f64 = 100.0;
+/// Step used when the configured one is not a number (Config's default).
+pub const DEFAULT_STEP_HZ: f64 = 2000.0;
+/// Most channels `channels` returns for one segment.
+pub const MAX_CHANNELS: usize = 10_000;
+
 /// USB dial frequencies that cover `seg` with receive passbands
 /// (`audio_lo..audio_hi` above the dial) stepped by `step_hz`.
 /// Every RF frequency in the segment is heard on at least one channel.
+///
+/// `step_hz` comes from the settings file: below `MIN_STEP_HZ` (zero,
+/// negative) it is raised to that, and NaN/infinite means
+/// `DEFAULT_STEP_HZ`. At most `MAX_CHANNELS` channels are returned.
 pub fn channels(seg: &Segment, step_hz: f64, audio_lo: f64, audio_hi: f64) -> Vec<f64> {
+    let step_hz = if step_hz.is_finite() {
+        step_hz.max(MIN_STEP_HZ)
+    } else {
+        DEFAULT_STEP_HZ
+    };
     let first = seg.lo_hz - audio_lo;
     let last = seg.hi_hz - audio_hi;
-    if last <= first {
+    let span = last - first;
+    if !span.is_finite() || span <= 0.0 {
         // Narrow segment: one channel centred on it.
         let mid_audio = 0.5 * (audio_lo + audio_hi);
         return vec![(0.5 * (seg.lo_hz + seg.hi_hz) - mid_audio).round()];
     }
-    let n = ((last - first) / step_hz).ceil() as usize;
+    let n = ((span / step_hz).ceil() as usize).min(MAX_CHANNELS - 1);
     (0..=n)
         .map(|i| (first + (last - first) * i as f64 / n.max(1) as f64).round())
         .collect()
@@ -92,7 +109,11 @@ pub fn segments_for(scope: &SearchScope, all: &[Segment], dial_hz: f64) -> Vec<S
             .cloned()
             .collect(),
         SearchScope::CurrentBand => match band_of(dial_hz) {
-            Some(b) => all.iter().filter(|s| s.band == b).cloned().collect(),
+            Some(b) => all
+                .iter()
+                .filter(|s| s.band.eq_ignore_ascii_case(b))
+                .cloned()
+                .collect(),
             None => vec![],
         },
     }

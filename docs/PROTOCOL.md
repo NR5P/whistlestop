@@ -61,7 +61,7 @@ body   := type(u8) fields...
 | `0x0B` | KEYC | `u8 suite`, `hash32 commit` | Encryption only: commitment to this link's public key. |
 | `0x0C` | KEYX | `u8 suite`, `32 bytes pubkey` | Encryption only: the public key, sent after the peer's KEYC arrives. |
 | `0x0D` | SEALED | `ciphertext + 16-byte tag` (rest of body) | Encryption only: one encrypted inner packet. |
-| `0x0E` | MAIL | `uv id`, `call from`, `call to`, `uv created`, `u8 hops`, `str text` | Depot mail, handed over when linked. `to` = this station: it goes to Arrivals; otherwise (relaying on) In Transit. `hops` counts relays (at most 3). |
+| `0x0E` | MAIL | `uv id`, `call from`, `call to`, `uv created`, `u8 hops`, `str text` | Depot mail, handed over when linked. `to` = this station: it goes to Arrivals; otherwise (relaying on) In Transit. `hops` counts the relays that have carried it: a relay stores `hops + 1` and refuses mail once that exceeds 3. `from`/`to` are callsigns (see `call`); posting to anything else is refused. |
 | `0x0F` | MAILACK | `uv id` | Mail `id` is safely stored; the sender moves it to Delivered. |
 | `0x20` | QSY | `uv id`, `uv dial_hz`, `str why` | "Let's both move to `dial_hz`." The other station decides by its own rules. |
 | `0x21` | QSYANS | `uv id`, `u8 accept`, `str reason` | The answer. When accepted, the asker moves 3 s after it arrives and the answerer once Mercury has sent everything (plus 2 s). Both return to where they were when the link ends. |
@@ -215,4 +215,8 @@ has reported worse for 2 minutes.
 
 HELLO carries `version`. A station that receives a higher version uses the
 lower one. Unknown packet types are skipped: link packets by their length,
-table frames whole.
+table frames whole. A known packet with a field that doesn't decode (say, a
+bad callsign) is skipped too, on a plain link and inside an authenticated
+SEALED; only during the encryption handshake does it end the link. The length
+prefix is at most 4 bytes and 1 MiB: anything else means the stream is
+corrupt, and since it has no resync point the receiver ends the link.

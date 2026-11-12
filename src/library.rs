@@ -14,11 +14,24 @@ use std::path::{Component, Path, PathBuf};
 pub const MAX_ENTRIES: usize = 200;
 
 /// The real path of `rel` inside `root`, or why not.
+///
+/// The name is tried exactly as given first (" notes.txt" can be a real,
+/// listed name), then with surrounding spaces trimmed (a typed
+/// " readme.txt " still finds readme.txt).
 pub fn resolve(root: &Path, rel: &str) -> Result<PathBuf> {
     let root = root
         .canonicalize()
         .map_err(|_| anyhow::anyhow!("the library folder isn't there"))?;
-    let rel = rel.trim().trim_start_matches('/').trim_end_matches('/');
+    match resolve_in(&root, rel) {
+        Err(e) if rel.trim() != rel => resolve_in(&root, rel.trim()).map_err(|_| e),
+        r => r,
+    }
+}
+
+/// `resolve` for one spelling of the name, `root` already canonical.
+fn resolve_in(root: &Path, rel: &str) -> Result<PathBuf> {
+    let root = root.to_path_buf();
+    let rel = rel.trim_matches('/');
     let mut p = root.clone();
     for c in Path::new(rel).components() {
         match c {
@@ -35,10 +48,22 @@ pub fn resolve(root: &Path, rel: &str) -> Result<PathBuf> {
     let real = p
         .canonicalize()
         .map_err(|_| anyhow::anyhow!("no such file"))?;
-    if !real.starts_with(&root) {
+    if !inside_visible(&root, &real) {
         bail!("no such file");
     }
     Ok(real)
+}
+
+/// Whether `real` (a canonical path) is inside `root` (canonical) and no
+/// part of it below `root` is hidden: a link with an ordinary name must
+/// not lead to a hidden file or folder.
+fn inside_visible(root: &Path, real: &Path) -> bool {
+    match real.strip_prefix(root) {
+        Ok(below) => below
+            .components()
+            .all(|c| !c.as_os_str().to_string_lossy().starts_with('.')),
+        Err(_) => false,
+    }
 }
 
 /// What's in folder `rel` of the library: folders first, then files, by name.
@@ -55,9 +80,9 @@ pub fn list(root: &Path, rel: &str) -> Result<Vec<LibEntry>> {
             if name.starts_with('.') {
                 return None;
             }
-            // Follow links, but only to things inside the library.
+            // Follow links, but only to visible things inside the library.
             let real = e.path().canonicalize().ok()?;
-            if !real.starts_with(&croot) {
+            if !inside_visible(&croot, &real) {
                 return None;
             }
             let md = std::fs::metadata(&real).ok()?;

@@ -136,6 +136,10 @@ pub struct Config {
     pub remote_password: String,
     /// The radio computer this one last operated ("192.168.1.20").
     pub remote_addr: String,
+    /// What was wrong with the settings file when it was loaded (never
+    /// saved): the engine logs these when it starts with them.
+    #[serde(skip)]
+    pub load_problems: Vec<String>,
 }
 
 impl Default for Config {
@@ -203,6 +207,7 @@ impl Default for Config {
             remote_port: crate::remote::DEFAULT_PORT,
             remote_password: String::new(),
             remote_addr: String::new(),
+            load_problems: vec![],
         }
     }
 }
@@ -219,13 +224,60 @@ pub fn path() -> PathBuf {
 }
 
 impl Config {
+    /// The settings file, or defaults. Problems are logged to stderr; use
+    /// `load_with_report` to show them.
     pub fn load() -> Self {
-        let mut c: Config = std::fs::read_to_string(path())
-            .ok()
-            .and_then(|s| toml::from_str(&s).ok())
-            .unwrap_or_default();
+        Self::load_with_report().0
+    }
+
+    /// The settings file, plus a line for every problem with it.
+    ///
+    /// A missing file is not a problem (defaults). In a readable file every
+    /// readable value is kept and only the bad ones fall back to their
+    /// defaults (see `from_toml_lenient`). A file that isn't TOML (or
+    /// UTF-8) at all is copied to `whistlestop.toml.bad` before anything can
+    /// save over it, and defaults are used.
+    pub fn load_with_report() -> (Self, Vec<String>) {
+        let p = path();
+        let (mut c, problems) = match std::fs::read(&p) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => (Config::default(), vec![]),
+            Err(e) => (
+                Config::default(),
+                vec![format!("can't read {} ({e}); using the default settings", p.display())],
+            ),
+            Ok(bytes) => match String::from_utf8(bytes) {
+                Err(_) => (Config::default(), vec![keep_bad_copy(&p, "isn't a text (UTF-8) file")]),
+                Ok(s) => match s.parse::<toml::Table>() {
+                    Err(e) => {
+                        let why = format!("isn't valid TOML ({})", e.message());
+                        (Config::default(), vec![keep_bad_copy(&p, &why)])
+                    }
+                    Ok(t) => salvage(t),
+                },
+            },
+        };
         c.upgrade();
-        c
+        for m in &problems {
+            eprintln!("whistlestop settings: {m}");
+        }
+        c.load_problems = problems.clone();
+        (c, problems)
+    }
+
+    /// Parse settings text like `toml::from_str`, but never all-or-nothing:
+    /// every readable value is kept, each bad one falls back to its default
+    /// and is reported ("e2e = \"Prefer\": unknown variant ..."). For arrays
+    /// of tables (segments, schedule) the readable elements are kept; if
+    /// none is, the default list is used. Text that isn't TOML at all gives
+    /// the defaults and one problem. `upgrade` is not applied.
+    pub fn from_toml_lenient(s: &str) -> (Self, Vec<String>) {
+        match s.parse::<toml::Table>() {
+            Ok(t) => salvage(t),
+            Err(e) => (
+                Config::default(),
+                vec![format!("not valid TOML ({}); using the default settings", e.message())],
+            ),
+        }
     }
 
     /// Settings saved for the first whistle: move scan settings still at
@@ -273,6 +325,134 @@ mod tests {
 
 fn whistle_v1() -> u32 {
     1
+}
+
+// ------------------------------------------------- lenient settings loading
+
+/// Copy an unreadable settings file to "<name>.bad" (so a later save can't
+/// lose it) and say so.
+fn keep_bad_copy(p: &std::path::Path, why: &str) -> String {
+    let mut bad = p.as_os_str().to_owned();
+    bad.push(".bad");
+    let bad = PathBuf::from(bad);
+    match std::fs::copy(p, &bad) {
+        Ok(_) => format!(
+            "{} {why}; kept a copy as {}, using the default settings",
+            p.display(),
+            bad.display()
+        ),
+        Err(e) => format!(
+            "{} {why}; using the default settings (couldn't keep a copy: {e})",
+            p.display()
+        ),
+    }
+}
+
+fn try_config(t: &toml::Table) -> Result<Config, String> {
+    toml::Value::Table(t.clone())
+        .try_into::<Config>()
+        .map_err(|e| e.message().trim().to_string())
+}
+
+/// The table at `path` (made by `salvage_into`, so always a table).
+fn table_at<'a>(root: &'a mut toml::Table, path: &[String]) -> &'a mut toml::Table {
+    let mut t = root;
+    for k in path {
+        t = match t.get_mut(k) {
+            Some(toml::Value::Table(sub)) => sub,
+            _ => unreachable!("salvage path {path:?} is not a table"),
+        };
+    }
+    t
+}
+
+/// A value as written, shortened for a message.
+fn shown(v: &toml::Value) -> String {
+    let s = v.to_string();
+    if s.chars().count() > 60 {
+        format!("{}…", s.chars().take(60).collect::<String>())
+    } else {
+        s
+    }
+}
+
+/// Settings from a parsed file, keeping every value that reads.
+fn salvage(file: toml::Table) -> (Config, Vec<String>) {
+    if let Ok(c) = try_config(&file) {
+        return (c, vec![]);
+    }
+    let mut good = toml::Table::new();
+    let mut problems = vec![];
+    salvage_into(&mut good, &[], &file, &mut problems);
+    match try_config(&good) {
+        Ok(c) => (c, problems),
+        Err(e) => {
+            // Can't happen (every step above was checked), but never fail.
+            problems.push(format!("settings unreadable ({e}); using the defaults"));
+            (Config::default(), problems)
+        }
+    }
+}
+
+/// Copy the keys of `src` (the file's table at `path`) into `root`'s table
+/// at `path` one at a time, keeping each only if the whole Config still
+/// reads. Tables are salvaged key by key, arrays of tables element by
+/// element.
+fn salvage_into(root: &mut toml::Table, path: &[String], src: &toml::Table, problems: &mut Vec<String>) {
+    use toml::Value;
+    for (k, v) in src {
+        let label = path
+            .iter()
+            .chain(std::iter::once(k))
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(".");
+        table_at(root, path).insert(k.clone(), v.clone());
+        let err = match try_config(root) {
+            Ok(_) => continue,
+            Err(e) => e,
+        };
+        match v {
+            Value::Table(sub) => {
+                table_at(root, path).insert(k.clone(), Value::Table(toml::Table::new()));
+                if try_config(root).is_ok() {
+                    let mut p = path.to_vec();
+                    p.push(k.clone());
+                    salvage_into(root, &p, sub, problems);
+                    continue;
+                }
+            }
+            Value::Array(items) if !items.is_empty() && items.iter().all(Value::is_table) => {
+                table_at(root, path).insert(k.clone(), Value::Array(vec![]));
+                if try_config(root).is_ok() {
+                    let mut kept = 0;
+                    for (i, item) in items.iter().enumerate() {
+                        // Push, test, pop if it doesn't read.
+                        if let Some(Value::Array(a)) = table_at(root, path).get_mut(k) {
+                            a.push(item.clone());
+                        }
+                        match try_config(root) {
+                            Ok(_) => kept += 1,
+                            Err(e) => {
+                                if let Some(Value::Array(a)) = table_at(root, path).get_mut(k) {
+                                    a.pop();
+                                }
+                                problems.push(format!("{label} entry {}: {e}; left out", i + 1));
+                            }
+                        }
+                    }
+                    if kept == 0 {
+                        table_at(root, path).remove(k);
+                        problems.push(format!("{label}: no entry could be read; using the default"));
+                    }
+                    continue;
+                }
+            }
+            _ => {}
+        }
+        table_at(root, path).remove(k);
+        problems.push(format!("{label} = {}: {err}; using the default", shown(v)));
+    }
 }
 
 #[cfg(test)]

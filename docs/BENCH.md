@@ -29,6 +29,67 @@ Add scenario names to run only some of them: `watch link chat files table
 narrow weak e2e depot scan qsylib`. Results go to `bench-run/REPORT.md`; Mercury and Whistlestop
 logs are written beside it.
 
+Slower scenarios run only when named (not part of a run with no names):
+
+| Name | What it checks |
+|---|---|
+| `cancel` | 12 KB files both ways at once; one cancelled mid-transfer, first by its receiver, then by its sender. The other finishes byte-exact, the cancelled one reads "cancelled…" at both ends, no other transfer row changes. |
+| `chat_during` | A chat typed during a 16 KB transfer waits for at most ~2 file pieces (3 KB of file may go first). |
+| `resume` | 12 KB A→B, BRAVO hangs up mid-transfer, they link again: ALPHA re-offers, "already has … resuming", the rest arrives byte-exact. |
+| `e2e_require` | ALPHA on encryption Require, BRAVO Off. ALPHA queues a chat and a file as soon as the link is up; ALPHA must end the link with a reason, and neither may reach BRAVO. |
+| `away_long` | BRAVO away, `away_idle_s` 60 (Settings' minimum), 500 Hz: a 4 KB file takes several minutes. No hang-up mid-transfer; hang-up about 60 s after it ends (the 30 s signal reports don't count). |
+| `away_weak` | The same with 20 dB more noise and a 3 KB file. |
+
+For example `... bench-run cancel chat_during resume e2e_require away_long away_weak`
+(about 30 min).
+
+## Cancel, resume, Require, away timeout (2026-11-11)
+
+**After the fixes: 18/18** (and the standard set 34/34 on the same build):
+
+| Test | Result |
+|---|---|
+| A→B cancelled by its receiver / by its sender | both PASS: "cancelled…" at both ends, B→A unaffected |
+| Chat during a 16 KB transfer | PASS: arrived in 13 s, 2 KB of file went first |
+| Link dropped mid-transfer, then relinked | PASS: same fid, "already has 2.0 KB — resuming", the rest byte-exact |
+| Encryption Require vs Off | PASS: ended 34 s after linking with the reason; nothing reached BRAVO in plain text |
+| Away (idle 60 s), 4 KB and 3 KB (weak) at 500 Hz | PASS: no hang-up mid-transfer (215 s, 165 s); hung up at idle 63 s / 60 s afterwards |
+
+Fixed: Whistlestop now counts what it writes to Mercury and takes off only
+the decreases Mercury reports (bytes sent), so at most two pieces wait in
+Mercury; the transfer speed is measured from those decreases. Bytes of a file
+coming in count as link activity. A late DONE no longer overwrites a
+cancelled row.
+
+First runs, before the fixes:
+
+| Test | Result |
+|---|---|
+| Files both ways, A→B cancelled by its receiver | PASS ×2: both ends "cancelled…", B→A byte-exact, no other row touched; the cancel took 52 s to show at both ends |
+| Files both ways, A→B cancelled by its sender | **FAIL ×2**: the file was already all in Mercury's buffer; it arrived complete and both rows ended Done |
+| Chat during a 16 KB transfer | **FAIL**: 8 KB of file went ahead of the chat (34 s), not ≤ 2 pieces |
+| Link dropped mid-transfer, then relinked | PASS: 3 KB kept on B's disk, "BRAVO already has 3.0 KB — resuming", the rest byte-exact in 45 s |
+| Encryption Require vs Off | PASS: ALPHA hung up 35 s after linking ("the other station does not have encryption on, and this station requires it"); the chat and file ALPHA queued never reached BRAVO |
+| Away (idle 60 s), 4 KB at 500 Hz | PASS: no hang-up during the 215 s transfer; hung up at idle 64 s afterwards |
+| Away (idle 60 s), 3 KB at 500 Hz, channel SNR ≈ +7 dB | PASS: 169 s transfer, hung up at idle 60 s afterwards (Mercury stayed on DATAC3, ~33 s per 1 KB piece) |
+| Away (idle 40 s), 3 KB at 500 Hz (first run) | **FAIL**: BRAVO hung up "idle 43 s" with Mercury handing it 120 bytes every 3.5 s of the first piece |
+
+What they found:
+
+- **Flow control to Mercury doesn't hold.** `pump()` means to keep at most
+  2 × CHUNK in Mercury's buffer, but each `BUFFER n` line *replaces*
+  `mercury_buffer`. Mercury reads the data socket 128 bytes at a time and
+  reports `BUFFER` after every read, so the count it reports trails what
+  Whistlestop has written, and pump() writes more. Mercury's log shows the
+  whole 12 KB file written within one second (and a 4 KB file at 500 Hz).
+  So a sender's cancel can't stop it, a chat waits behind the file, the
+  sender's progress bar runs ahead (9.7 KB "sent" while B had 2 KB), and the
+  transfer estimate on the same link drops to "about 5 s" for 12 KB.
+- **The away timeout counts whole packets only.** Bytes arriving from
+  Mercury don't count as activity until a whole link packet (a 1 KB file
+  piece) is in; when a piece takes longer than `away_idle_s` (slow modes,
+  retries) an away station hangs up mid-transfer.
+
 ## Whistle v2 against the first whistle (2026-11-11)
 
 Scenario `scan`: BRAVO scans the 20 m segment (10 channels), starting from a

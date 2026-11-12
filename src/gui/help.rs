@@ -596,7 +596,7 @@ pub const ST_SCHED_AWAY: Topic =
     ("Only while I'm away", "Follow the schedule only while you're Away, so it never moves the radio under you. On by default.", "Schedule");
 pub const ST_SCHED_SLOT: Topic = (
     "Time slot",
-    "From–to (HH:MM, UTC; may cross midnight), which days, the dial frequency, and whether to send Station ID while it's on. The first slot listed that is on wins.",
+    "From–to (HH:MM, UTC; may cross midnight; the same time twice means all day), which days, the dial frequency, and whether to send Station ID while it's on. The first slot listed that is on wins.",
     "Schedule",
 );
 pub const ST_SCHED_ADD: Topic = ("Add a time slot", "Adds a slot you can then edit.", "Schedule");

@@ -30,7 +30,8 @@ pub struct Mail {
     /// Hand this to a relay station rather than waiting for `to`.
     #[serde(default)]
     pub via: Option<String>,
-    /// How many relays have carried it (a loop guard: at most MAX_HOPS).
+    /// How many relays have carried it (a loop guard: at most MAX_HOPS
+    /// relays may carry a message).
     #[serde(default)]
     pub hops: u8,
     /// Who handed it to us (In Transit), or who took it (Delivered).
@@ -49,6 +50,9 @@ pub struct Depot {
     pub delivered: Vec<Mail>,
     #[serde(skip)]
     path: Option<PathBuf>,
+    /// The file couldn't be read as a Depot (set aside, see `load`).
+    #[serde(skip)]
+    pub load_problem: Option<String>,
 }
 
 pub fn now_s() -> u64 {
@@ -72,12 +76,38 @@ pub fn default_path() -> PathBuf {
 }
 
 impl Depot {
+    /// Load the Depot. A file that can't be read as one (cut short by a
+    /// crash, edited by hand) is never overwritten: it's moved aside to
+    /// `depot.json.bad` (or `.bad-2`, …) so its mail can be recovered, and
+    /// `load_problem` says so.
     pub fn load(path: PathBuf) -> Depot {
-        let mut d: Depot = std::fs::read_to_string(&path)
-            .ok()
-            .and_then(|s| serde_json::from_str(&s).ok())
-            .unwrap_or_default();
+        let mut problem = None;
+        let mut d: Depot = match std::fs::read(&path) {
+            Err(_) => Depot::default(), // none yet
+            Ok(bytes) => match serde_json::from_slice(&bytes) {
+                Ok(d) => d,
+                Err(e) => {
+                    let mut bad = path.with_extension("json.bad");
+                    let mut n = 2;
+                    while bad.exists() {
+                        bad = path.with_extension(format!("json.bad-{n}"));
+                        n += 1;
+                    }
+                    let moved = std::fs::rename(&path, &bad).is_ok();
+                    problem = Some(if moved {
+                        format!(
+                            "The Depot file couldn't be read ({e}); it was kept as {} and a new Depot started",
+                            bad.display()
+                        )
+                    } else {
+                        format!("The Depot file couldn't be read ({e}) or set aside; a new Depot started")
+                    });
+                    Depot::default()
+                }
+            },
+        };
         d.path = Some(path);
+        d.load_problem = problem;
         d
     }
 
@@ -95,18 +125,27 @@ impl Depot {
 
     /// Write a message to `to`; it waits in Departures. With `via`, it's
     /// handed to that relay station instead.
-    pub fn post(&mut self, from: &str, to: &str, text: &str) -> &Mail {
+    pub fn post(&mut self, from: &str, to: &str, text: &str) -> anyhow::Result<&Mail> {
         self.post_via(from, to, None, text)
     }
 
-    pub fn post_via(&mut self, from: &str, to: &str, via: Option<&str>, text: &str) -> &Mail {
+    /// Refused unless `to` (and `via`) are callsigns the protocol carries
+    /// intact (`protocol::valid_call`): anything else would be cut short or
+    /// refused by every station on the air.
+    pub fn post_via(&mut self, from: &str, to: &str, via: Option<&str>, text: &str) -> anyhow::Result<&Mail> {
+        let to = to.trim().to_uppercase();
         let via = via
             .map(|v| v.trim().to_uppercase())
             .filter(|v| !v.is_empty());
+        for c in std::iter::once(&to).chain(via.iter()) {
+            if !crate::protocol::valid_call(c) {
+                anyhow::bail!("{c:?} isn't a callsign (1–12 letters, digits, / or -)");
+            }
+        }
         self.departures.push(Mail {
             id: new_id(),
             from: from.to_uppercase(),
-            to: to.trim().to_uppercase(),
+            to,
             created: now_s(),
             text: text.to_string(),
             read: true,
@@ -116,7 +155,7 @@ impl Depot {
             handed: None,
         });
         self.save();
-        self.departures.last().unwrap()
+        Ok(self.departures.last().expect("just pushed"))
     }
 
     /// Everything we'd hand to `call` when linked: our own mail for them or
@@ -144,7 +183,8 @@ impl Depot {
     /// Carry mail for someone else (relaying). False if we already have it
     /// or it has been relayed too often.
     pub fn take_in_transit(&mut self, m: Mail, from_station: &str) -> bool {
-        if m.hops >= MAX_HOPS
+        // `hops` already counts us: at most MAX_HOPS relays carry it.
+        if m.hops > MAX_HOPS
             || self
                 .transit
                 .iter()
@@ -216,9 +256,9 @@ mod tests {
         let p = std::env::temp_dir().join(format!("depot-test-{}.json", std::process::id()));
         let _ = std::fs::remove_file(&p);
         let mut d = Depot::load(p.clone());
-        let id = d.post("n0call", "k7bot", "Meet on 40 m tonight").id;
-        d.post("n0call", "K7BOT", "Second note");
-        d.post("n0call", "W1AW", "Hello");
+        let id = d.post("n0call", "k7bot", "Meet on 40 m tonight").unwrap().id;
+        d.post("n0call", "K7BOT", "Second note").unwrap();
+        d.post("n0call", "W1AW", "Hello").unwrap();
         assert_eq!(d.waiting_for("K7BOT").len(), 2);
         assert_eq!(
             d.waiting_calls(),
@@ -252,7 +292,7 @@ mod tests {
     fn relaying_with_a_loop_guard() {
         let mut d = Depot::default();
         // Mail for W1AW routed via K7BOT is handed to K7BOT.
-        d.post_via("N0CALL", "W1AW", Some("k7bot"), "via relay");
+        d.post_via("N0CALL", "W1AW", Some("k7bot"), "via relay").unwrap();
         assert_eq!(d.waiting_for("K7BOT").len(), 1);
         assert_eq!(d.waiting_calls(), vec!["W1AW".to_string()]);
         // Carrying mail for someone else, then forwarding it.
@@ -277,7 +317,7 @@ mod tests {
             !d.take_in_transit(
                 Mail {
                     id: 10,
-                    hops: MAX_HOPS,
+                    hops: MAX_HOPS + 1,
                     ..m
                 },
                 "X"

@@ -682,6 +682,404 @@ mod bench {
             });
         }
 
+        // ------------------------------------------- transfers, cancel, resume
+
+        /// Incompressible bytes (what a photo would be), different per seed.
+        fn noise_bytes(n: usize, seed: u64) -> Vec<u8> {
+            let mut s = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
+            (0..n)
+                .map(|_| {
+                    s ^= s << 13;
+                    s ^= s >> 7;
+                    s ^= s << 17;
+                    (s >> 24) as u8
+                })
+                .collect()
+        }
+
+        fn row(s: &State, fid: u64, dir: Dir) -> Option<&engine::Transfer> {
+            s.transfers.iter().rev().find(|t| t.fid == fid && t.dir == dir)
+        }
+
+        fn rows(s: &State) -> Vec<(u64, Dir, String, XferState)> {
+            s.transfers.iter().map(|t| (t.fid, t.dir, t.name.clone(), t.state.clone())).collect()
+        }
+
+        fn state_of(s: &State, fid: u64, dir: Dir) -> String {
+            Self::row(s, fid, dir).map(|t| format!("{:?} ({}/{} B)", t.state, t.done, t.size)).unwrap_or("no row".into())
+        }
+
+        fn received(s: &State, fid: u64) -> Option<PathBuf> {
+            match &Self::row(s, fid, Dir::In)?.state {
+                XferState::Done(Some(p)) => Some(p.clone()),
+                _ => None,
+            }
+        }
+
+        fn sent_ok(s: &State, fid: u64) -> bool {
+            Self::row(s, fid, Dir::Out).is_some_and(|t| t.state == XferState::Done(None))
+        }
+
+        fn cancelled(s: &State, fid: u64, dir: Dir) -> bool {
+            Self::row(s, fid, dir).is_some_and(|t| matches!(&t.state, XferState::Failed(w) if w.starts_with("cancelled")))
+        }
+
+        /// Wait for an offer of `name` at the receiver, accept it, and return
+        /// (fid, bytes the receiver already had).
+        fn accept_named(&self, rx_is_b: bool, name: &str, secs: f64) -> Option<(u64, u64)> {
+            let rx = if rx_is_b { &self.b } else { &self.a };
+            self.wait(secs, |a, b| {
+                let r = if rx_is_b { b } else { a };
+                r.transfers.iter().any(|t| t.dir == Dir::In && t.name == name && t.state == XferState::WaitingForYou)
+            })?;
+            let (fid, have) = {
+                let r = self.st(rx);
+                let t = r.transfers.iter().rev().find(|t| t.dir == Dir::In && t.name == name && t.state == XferState::WaitingForYou)?;
+                (t.fid, t.done)
+            };
+            rx.send(Cmd::AnswerOffer { fid, accept: true });
+            Some((fid, have))
+        }
+
+        fn out_fid(&self, h: &Handle, name: &str) -> Option<u64> {
+            self.st(h).transfers.iter().rev().find(|t| t.dir == Dir::Out && t.name == name).map(|t| t.fid)
+        }
+
+        /// A log line containing `pat` written after line `from`.
+        fn log_line(&self, h: &Handle, from: usize, pat: &str) -> Option<String> {
+            self.st(h).log.iter().skip(from).find(|l| l.1.contains(pat)).map(|l| l.1.clone())
+        }
+
+        /// A calls B (B on A's frequency).
+        fn link_a_calls_b(&mut self, label: &str) -> bool {
+            self.b.send(Cmd::SetFreq(A_DIAL));
+            std::thread::sleep(Duration::from_secs(2));
+            self.a.send(Cmd::Connect(B.into()));
+            let t = self.wait(180.0, |a, b| a.link.is_some() && b.link.is_some());
+            let bw = self.st(&self.a).link.as_ref().map(|l| l.bw).unwrap_or(0);
+            self.record(&format!("{label}: connect"), t.is_some(), format!("linked in {:.0} s at {bw} Hz", t.map(|d| d.as_secs_f64()).unwrap_or(-1.0)));
+            t.is_some()
+        }
+
+        /// Files both ways at once, then one cancelled mid-transfer: first by
+        /// its receiver, then by its sender. The other must finish byte-exact,
+        /// the cancelled one must read "cancelled…" at both ends, and no
+        /// other transfer row may change.
+        fn s_cancel(&mut self) {
+            self.disconnect_both();
+            self.wait_air_quiet(10.0, 120.0);
+            if !self.direct_link("cancel") {
+                return;
+            }
+            let dir = self.work.join("to-send");
+            std::fs::create_dir_all(&dir).unwrap();
+            for (round, by_receiver) in [(1u64, true), (2, false)] {
+                let who = if by_receiver { "receiver (BRAVO)" } else { "sender (ALPHA)" };
+                let name = format!("cancel {round}, by the {who}");
+                let (na, nb) = (format!("cancel-a{round}.bin"), format!("cancel-b{round}.bin"));
+                let (pa, pb) = (dir.join(&na), dir.join(&nb));
+                std::fs::write(&pa, Self::noise_bytes(12_000, 10 * round)).unwrap();
+                std::fs::write(&pb, Self::noise_bytes(12_000, 10 * round + 1)).unwrap();
+                let (a0, b0) = (Self::rows(&self.st(&self.a)), Self::rows(&self.st(&self.b)));
+                self.a.send(Cmd::SendFiles { paths: vec![pa.clone()], zip: false });
+                self.b.send(Cmd::SendFiles { paths: vec![pb.clone()], zip: false });
+                let ab = self.accept_named(true, &na, 120.0);
+                let ba = self.accept_named(false, &nb, 120.0);
+                let (Some((ab, _)), Some((ba, _))) = (ab, ba) else {
+                    self.record(&name, false, format!("offers: A→B {:?}, B→A {:?}", ab, ba));
+                    continue;
+                };
+                let (a_out_ab, b_out_ba) = (self.out_fid(&self.a, &na), self.out_fid(&self.b, &nb));
+                println!("   round {round}: A→B fid {ab} (A's out row {a_out_ab:?}), B→A fid {ba} (B's out row {b_out_ba:?})");
+                // Mid-transfer: B holds a couple of pieces of A's file.
+                let mid = self.wait(400.0, |_, b| Self::row(b, ab, Dir::In).is_some_and(|t| t.done >= 2048 && t.done < t.size));
+                let at_cancel = {
+                    let (a, b) = (self.st(&self.a), self.st(&self.b));
+                    format!("A→B at B {}; B→A at A {}", Self::state_of(&b, ab, Dir::In), Self::state_of(&a, ba, Dir::In))
+                };
+                if by_receiver {
+                    self.b.send(Cmd::Cancel { fid: ab, dir: Dir::In });
+                } else {
+                    self.a.send(Cmd::Cancel { fid: ab, dir: Dir::Out });
+                }
+                let both_cancelled = self.wait(240.0, |a, b| Self::cancelled(a, ab, Dir::Out) && Self::cancelled(b, ab, Dir::In));
+                let other_done = self.wait(600.0, |a, b| Self::sent_ok(b, ba) && Self::received(a, ba).is_some());
+                // Give stray pieces time to show up.
+                std::thread::sleep(Duration::from_secs(5));
+                let (a, b) = (self.st(&self.a), self.st(&self.b));
+                let exact = Self::received(&a, ba).and_then(|p| std::fs::read(p).ok()) == std::fs::read(&pb).ok();
+                // Rows from before this round are untouched; this round
+                // added one out and one in row at each station.
+                let (a1, b1) = (Self::rows(&a), Self::rows(&b));
+                let untouched = a1.len() == a0.len() + 2 && b1.len() == b0.len() + 2 && a1[..a0.len()] == a0[..] && b1[..b0.len()] == b0[..];
+                let cancelled_file_absent = Self::received(&b, ab).is_none();
+                let detail = format!(
+                    "at cancel: {at_cancel}. After: A→B at A {} / at B {}; B→A at B {} / at A {}; B→A byte-exact {exact}; \
+                     cancelled both ends {} ; other rows untouched {untouched} (A {}→{} rows, B {}→{}); mid-transfer reached {}",
+                    Self::state_of(&a, ab, Dir::Out),
+                    Self::state_of(&b, ab, Dir::In),
+                    Self::state_of(&b, ba, Dir::Out),
+                    Self::state_of(&a, ba, Dir::In),
+                    both_cancelled.map(|d| format!("in {:.0} s", d.as_secs_f64())).unwrap_or("NO".into()),
+                    a0.len(),
+                    a1.len(),
+                    b0.len(),
+                    b1.len(),
+                    mid.is_some()
+                );
+                drop((a, b));
+                self.record(
+                    &name,
+                    mid.is_some() && both_cancelled.is_some() && other_done.is_some() && exact && untouched && cancelled_file_absent,
+                    detail,
+                );
+            }
+            self.disconnect_both();
+        }
+
+        /// A chat typed during a file transfer should wait for at most two
+        /// file pieces (pump() keeps no more than 2 × CHUNK in Mercury's
+        /// buffer), not for the rest of the file.
+        fn s_chat_during(&mut self) {
+            self.disconnect_both();
+            self.wait_air_quiet(10.0, 120.0);
+            if !self.direct_link("chat during a transfer") {
+                return;
+            }
+            let p = self.work.join("to-send/chat-during.bin");
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(&p, Self::noise_bytes(16_000, 33)).unwrap();
+            self.a.send(Cmd::SendFiles { paths: vec![p], zip: false });
+            let Some((fid, _)) = self.accept_named(true, "chat-during.bin", 120.0) else {
+                self.record("chat during a transfer", false, "offer never arrived".into());
+                return;
+            };
+            self.wait(300.0, |_, b| Self::row(b, fid, Dir::In).is_some_and(|t| t.done >= 1024));
+            let at_send = Self::row(&self.st(&self.b), fid, Dir::In).map(|t| t.done).unwrap_or(0);
+            self.a.send(Cmd::Chat("typed during the transfer".into()));
+            let got = self.wait(400.0, |_, b| b.chat.iter().any(|c| c.text == "typed during the transfer"));
+            let at_got = Self::row(&self.st(&self.b), fid, Dir::In).map(|t| t.done).unwrap_or(0);
+            let behind = at_got.saturating_sub(at_send);
+            self.record(
+                "chat during a transfer waits ≤ 2 file pieces",
+                got.is_some() && behind <= 3 * 1024,
+                format!(
+                    "chat arrived after {:.0} s; B had {at_send} B of the file when it was typed and {at_got} B when it arrived ({behind} B of file went first)",
+                    got.map(|d| d.as_secs_f64()).unwrap_or(-1.0)
+                ),
+            );
+            self.wait(300.0, |a, b| Self::sent_ok(a, fid) && Self::received(b, fid).is_some());
+            self.disconnect_both();
+        }
+
+        /// A file A→B, the link dropped mid-transfer (BRAVO hangs up), then a
+        /// new link: ALPHA offers it again and it carries on from where it
+        /// stopped, byte-exact.
+        fn s_resume(&mut self) {
+            self.disconnect_both();
+            self.wait_air_quiet(10.0, 120.0);
+            if !self.direct_link("resume") {
+                return;
+            }
+            let p = self.work.join("to-send/resume.bin");
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            let data = Self::noise_bytes(12_000, 77);
+            std::fs::write(&p, &data).unwrap();
+            let (ma, mb) = (self.st(&self.a).log.len(), self.st(&self.b).log.len());
+            self.a.send(Cmd::SendFiles { paths: vec![p.clone()], zip: false });
+            let Some((fid, _)) = self.accept_named(true, "resume.bin", 120.0) else {
+                self.record("resume: offer", false, "offer never arrived".into());
+                return;
+            };
+            let mid = self.wait(300.0, |_, b| Self::row(b, fid, Dir::In).is_some_and(|t| t.done >= 2048));
+            let had = Self::row(&self.st(&self.b), fid, Dir::In).map(|t| t.done).unwrap_or(0);
+            self.b.send(Cmd::Disconnect);
+            let down = self.wait(150.0, |a, b| a.link.is_none() && b.link.is_none());
+            let (sa, sb) = (Self::state_of(&self.st(&self.a), fid, Dir::Out), Self::state_of(&self.st(&self.b), fid, Dir::In));
+            let finished_anyway = Self::received(&self.st(&self.b), fid).is_some();
+            let partial: u64 = std::fs::read_dir(self.work.join("BRAVO-downloads/.partial"))
+                .map(|d| d.flatten().filter_map(|e| e.metadata().ok()).map(|m| m.len()).filter(|&l| l > 0 && l < data.len() as u64).max().unwrap_or(0))
+                .unwrap_or(0);
+            self.record(
+                "resume: link dropped mid-transfer",
+                mid.is_some() && down.is_some() && !finished_anyway && partial >= 1024,
+                format!(
+                    "B had {had} B when it hung up; both idle after {:.0} s; A {sa}; B {sb}; partial on B's disk {partial} B; finished before the link went: {finished_anyway}",
+                    down.map(|d| d.as_secs_f64()).unwrap_or(-1.0)
+                ),
+            );
+            if finished_anyway || down.is_none() {
+                self.disconnect_both();
+                return;
+            }
+            self.wait_air_quiet(10.0, 120.0);
+            if !self.direct_link("resume: link again") {
+                return;
+            }
+            let Some((fid2, have)) = self.accept_named(true, "resume.bin", 120.0) else {
+                self.record("resume: offered again", false, "no new offer on the new link".into());
+                self.disconnect_both();
+                return;
+            };
+            let t = Instant::now();
+            let done = self.wait(400.0, |a, b| Self::sent_ok(a, fid2) && Self::received(b, fid2).is_some());
+            let exact = Self::received(&self.st(&self.b), fid2).and_then(|p| std::fs::read(p).ok()).is_some_and(|d| d == data);
+            let a_says = self.log_line(&self.a, ma, "already has");
+            let b_says = self.log_line(&self.b, mb, "will resume");
+            let a_rows = self.st(&self.a).transfers.iter().filter(|t| t.dir == Dir::Out && t.name == "resume.bin").count();
+            self.record(
+                "resume: carries on after relinking, byte-exact",
+                done.is_some() && exact && have > 0 && a_says.is_some() && fid2 == fid,
+                format!(
+                    "re-offered with fid {fid2} (was {fid}), B already had {have} B; rest took {:.0} s; byte-exact {exact}; \
+                     ALPHA: {:?}; BRAVO: {:?}; ALPHA shows {a_rows} row(s) for it, now {}",
+                    t.elapsed().as_secs_f64(),
+                    a_says,
+                    b_says,
+                    Self::state_of(&self.st(&self.a), fid2, Dir::Out)
+                ),
+            );
+            self.disconnect_both();
+        }
+
+        /// ALPHA requires encryption, BRAVO has it off. ALPHA must end the
+        /// link with a clear reason, and nothing ALPHA queued (a chat and a
+        /// file) may cross in the clear.
+        fn s_e2e_require(&mut self) {
+            self.disconnect_both();
+            self.wait_air_quiet(10.0, 120.0);
+            self.update(&self.a, |c| c.e2e = whistlestop::e2e::Policy::Require);
+            self.update(&self.b, |c| c.e2e = whistlestop::e2e::Policy::Off);
+            std::thread::sleep(Duration::from_secs(1));
+            let (ma, mb) = (self.st(&self.a).log.len(), self.st(&self.b).log.len());
+            let (ca, cb) = (self.st(&self.a).chat.len(), self.st(&self.b).chat.len());
+            let p = self.work.join("to-send/require.bin");
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(&p, Self::noise_bytes(2000, 5)).unwrap();
+            self.b.send(Cmd::SetFreq(A_DIAL));
+            std::thread::sleep(Duration::from_secs(2));
+            self.b.send(Cmd::Connect(A.into()));
+            // Queue the chat and the file the moment ALPHA sees the link,
+            // before BRAVO's HELLO can arrive.
+            let linked = self.wait(180.0, |a, _| a.link.is_some());
+            if linked.is_some() {
+                self.a.send(Cmd::Chat("plaintext must not leak".into()));
+                self.a.send(Cmd::SendFiles { paths: vec![p.clone()], zip: false });
+            }
+            let t = Instant::now();
+            let ended = self.wait(240.0, |a, b| a.link.is_none() && b.link.is_none());
+            // Anything still on its way would have arrived by now.
+            std::thread::sleep(Duration::from_secs(20));
+            let (a, b) = (self.st(&self.a), self.st(&self.b));
+            let queued = a.chat.iter().skip(ca).any(|c| c.who == Who::Me && c.text.contains("must not leak"));
+            let leaked_chat = b.chat.iter().any(|c| c.text.contains("must not leak"));
+            let leaked_file = b.transfers.iter().any(|t| t.dir == Dir::In && t.name == "require.bin");
+            let leaked_mail = b.depot.arrivals.iter().any(|m| m.text.contains("must not leak"));
+            let reason = a.log.iter().skip(ma).find(|l| l.1.contains("Encryption")).map(|l| l.1.clone());
+            let b_saw: Vec<String> = b.chat.iter().skip(cb).filter(|c| c.who != Who::Me).map(|c| c.text.clone()).collect();
+            let b_log: Vec<String> = b.log.iter().skip(mb).filter(|l| l.1.contains("ncrypt")).map(|l| l.1.clone()).collect();
+            let fid = a.transfers.iter().rev().find(|t| t.dir == Dir::Out && t.name == "require.bin").map(|t| t.fid);
+            drop((a, b));
+            self.record(
+                "encryption Require vs Off: link refused with a reason",
+                linked.is_some() && ended.is_some_and(|d| d.as_secs_f64() <= 150.0) && reason.is_some(),
+                format!(
+                    "linked {}; ended {:.0} s after linking; ALPHA says {:?}; BRAVO sees {:?} / log {:?}",
+                    linked.is_some(),
+                    ended.map(|d| d.as_secs_f64()).unwrap_or(-1.0),
+                    reason,
+                    b_saw,
+                    b_log
+                ),
+            );
+            self.record(
+                "encryption Require vs Off: nothing sent in the clear",
+                linked.is_some() && queued && !leaked_chat && !leaked_file && !leaked_mail,
+                format!("chat queued at ALPHA {queued}; reached BRAVO: chat {leaked_chat}, file offer {leaked_file}, depot {leaked_mail} ({:.0} s watched)", t.elapsed().as_secs_f64()),
+            );
+            // Don't let the queued file go out on a later (plain) link.
+            if let Some(fid) = fid {
+                self.a.send(Cmd::Cancel { fid, dir: Dir::Out });
+            }
+            self.update(&self.a, |c| c.e2e = whistlestop::e2e::Policy::Off);
+            self.disconnect_both();
+        }
+
+        /// BRAVO away with a short idle timeout receives a file that takes
+        /// much longer than that (500 Hz). It must not hang up mid-transfer,
+        /// and must hang up about `away_idle_s` after it ends (the signal
+        /// reports every 30 s don't count as activity).
+        fn s_away_long(&mut self, label: &str, idle: f64, extra_noise_db: f64, size: usize) {
+            #[allow(non_snake_case)]
+            let IDLE = idle;
+            self.disconnect_both();
+            self.wait_air_quiet(10.0, 120.0);
+            let base = self.ether.channel.lock().unwrap().noise_dbfs;
+            self.ether.channel.lock().unwrap().noise_dbfs = base + extra_noise_db;
+            println!("   {label}: {}", self.snr_note());
+            self.a.send(Cmd::SetBandwidth(Bandwidth::Hz500));
+            self.b.send(Cmd::SetBandwidth(Bandwidth::Hz500));
+            self.update(&self.b, |c| c.away_idle_s = IDLE);
+            self.b.send(Cmd::SetAway(true));
+            std::thread::sleep(Duration::from_secs(2));
+            if self.link_a_calls_b(label) {
+                let p = self.work.join("to-send/away-long.bin");
+                std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+                let data = Self::noise_bytes(size, 9);
+                std::fs::write(&p, &data).unwrap();
+                let mb = self.st(&self.b).log.len();
+                self.a.send(Cmd::SendFiles { paths: vec![p.clone()], zip: false });
+                if let Some((fid, _)) = self.accept_named(true, "away-long.bin", 180.0) {
+                    let t = Instant::now();
+                    let end = self.wait(900.0, |a, b| (Self::sent_ok(a, fid) && Self::received(b, fid).is_some()) || b.link.is_none());
+                    let took = t.elapsed().as_secs_f64();
+                    let (ok, sb, sa) = {
+                        let (a, b) = (self.st(&self.a), self.st(&self.b));
+                        let ok = Self::received(&b, fid).and_then(|p| std::fs::read(p).ok()).is_some_and(|d| d == data) && b.link.is_some();
+                        (ok, Self::state_of(&b, fid, Dir::In), Self::state_of(&a, fid, Dir::Out))
+                    };
+                    let hung = self.log_line(&self.b, mb, "Hanging up");
+                    self.record(
+                        &format!("{label}: no hang-up mid-transfer"),
+                        end.is_some() && ok && took > 2.0 * IDLE,
+                        format!(
+                            "transfer {:.0} s with away_idle_s {IDLE:.0}; byte-exact with link still up {ok}; B {sb}; A {sa}; B's hang-up: {:?}",
+                            took, hung
+                        ),
+                    );
+                    if ok {
+                        let mb2 = self.st(&self.b).log.len();
+                        let h = self.wait(IDLE + 120.0, |_, b| b.log.iter().skip(mb2).any(|l| l.1.contains("Hanging up")));
+                        let gone = self.wait(120.0, |a, b| a.link.is_none() && b.link.is_none());
+                        let line = self.log_line(&self.b, mb2, "Hanging up");
+                        let hs = h.map(|d| d.as_secs_f64()).unwrap_or(-1.0);
+                        // BRAVO counts from the last piece it got, a few
+                        // seconds before the bench saw ALPHA's Done: judge
+                        // by the idle time BRAVO reports.
+                        let idle_said: f64 = line
+                            .as_deref()
+                            .and_then(|l| l.split("idle ").nth(1))
+                            .and_then(|r| r.split(' ').next())
+                            .and_then(|n| n.parse().ok())
+                            .unwrap_or(-1.0);
+                        self.record(
+                            &format!("{label}: hangs up when idle afterwards"),
+                            h.is_some() && idle_said >= IDLE && idle_said <= IDLE + 15.0 && hs <= IDLE + 20.0 && gone.is_some(),
+                            format!("hang-up {hs:.0} s after the file arrived ({line:?}); link gone {:.0} s later", gone.map(|d| d.as_secs_f64()).unwrap_or(-1.0)),
+                        );
+                    }
+                } else {
+                    self.record(&format!("{label}: offer"), false, "offer never arrived".into());
+                }
+            }
+            self.disconnect_both();
+            self.ether.channel.lock().unwrap().noise_dbfs = base;
+            self.b.send(Cmd::SetAway(false));
+            self.update(&self.b, |_| {});
+            self.a.send(Cmd::SetBandwidth(Bandwidth::Hz2300));
+            self.b.send(Cmd::SetBandwidth(Bandwidth::Hz2300));
+        }
+
         fn report(&self) -> String {
             let mut s = String::from("# Whistlestop two-station bench (real Mercury 1.9.23 ×2)\n\n");
             s += &format!("Run time {:.0} s. {}\n\n| Result | Test | Details |\n|---|---|---|\n", self.started.elapsed().as_secs_f64(), self.snr_note());
@@ -748,6 +1146,27 @@ mod bench {
         }
         if run("depot") {
             b.s_depot();
+        }
+        // Slow ones, run only when named.
+        let named = |n: &str| only.iter().any(|o| o == n);
+        if named("cancel") {
+            b.s_cancel();
+        }
+        if named("chat_during") {
+            b.s_chat_during();
+        }
+        if named("resume") {
+            b.s_resume();
+        }
+        if named("e2e_require") {
+            b.s_e2e_require();
+        }
+        // 60 s is the shortest away timeout Settings offers.
+        if named("away_long") {
+            b.s_away_long("away, long transfer", 60.0, 0.0, 4000);
+        }
+        if named("away_weak") {
+            b.s_away_long("away, long transfer, weak signal", 60.0, 27.0, 3000);
         }
         b.dump_logs();
         let rep = b.report();

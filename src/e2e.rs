@@ -177,6 +177,9 @@ pub enum Notice {
     Secure { sas: String },
     /// Policy Prefer, but this link runs in plain text.
     Plain { why: String },
+    /// A packet that didn't decode (bad field, or from a newer version) was
+    /// skipped; the link carries on.
+    Skipped { why: String },
 }
 
 /// What the channel made of one incoming packet.
@@ -300,7 +303,17 @@ impl Channel {
     /// be trusted (or policy refuses it) and should be dropped.
     pub fn on_body(&mut self, body: &[u8]) -> Result<Step> {
         let mut step = Step::default();
-        let p = Link::decode(body)?;
+        let p = match Link::decode(body) {
+            Ok(p) => p,
+            // In plain text there is nothing to protect: a packet that
+            // doesn't decode is dropped, not a reason to hang up. (While
+            // setting up encryption it is: the handshake must be exact.)
+            Err(e) if self.plain => {
+                step.notice = Some(Notice::Skipped { why: e.to_string() });
+                return Ok(step);
+            }
+            Err(e) => return Err(e),
+        };
         match p {
             Link::Hello { caps, .. } => {
                 if self.peer_hello.is_some() {
@@ -395,7 +408,14 @@ impl Channel {
                     .as_mut()
                     .ok_or_else(|| anyhow!("encrypted packet, but no keys were agreed"))?;
                 let inner = Zeroizing::new(s.open(&data)?);
-                let q = Link::decode(&inner)?;
+                // Authentic, but malformed (a bad field): skip it.
+                let q = match Link::decode(&inner) {
+                    Ok(q) => q,
+                    Err(e) => {
+                        step.notice = Some(Notice::Skipped { why: e.to_string() });
+                        return Ok(step);
+                    }
+                };
                 if matches!(
                     q,
                     Link::Hello { .. }
