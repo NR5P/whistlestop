@@ -566,3 +566,32 @@ fn demo_stale_call_timeout_does_not_end_the_next_link() {
     link_up(&stn, 30.0);
     assert!(holds_for(&stn.h, 45.0, |s| s.link.is_some()), "the link ended by itself\n{}", dump(&stn.h));
 }
+
+/// The schedule (and its Station ID) leave a Roundtable alone: an all-day
+/// slot elsewhere doesn't pull the radio off the table's frequency.
+#[test]
+fn schedule_does_not_retune_away_from_a_roundtable() {
+    let stn = fast("N0SCH", FakeOptions::default(), |c| {
+        c.schedule_on = true;
+        c.schedule_only_away = false;
+        c.schedule = vec![whistlestop::schedule::Slot {
+            from: "00:00".into(),
+            to: "00:00".into(),
+            days: whistlestop::schedule::Days::Every,
+            khz: 7_103.0,
+            beacon: true,
+        }];
+    });
+    // Within 20 s the schedule moves an idle station to its slot.
+    stn.wait("schedule tuned the idle station", 25.0, |s| s.rig.freq_hz == 7_103_000.0);
+    stn.send(Cmd::SetFreq(14_103_150.0));
+    stn.send(Cmd::JoinTable("schedtable".into()));
+    stn.wait("at the table", 5.0, |s| s.table.is_some() && s.rig.freq_hz == 14_103_150.0);
+    std::thread::sleep(Duration::from_secs(25));
+    let (freq, at_table) = {
+        let st = stn.st();
+        (st.rig.freq_hz, st.table.is_some())
+    };
+    assert!(freq == 14_103_150.0 && at_table, "the schedule retuned away from the Roundtable
+{}", dump(&stn.h));
+}

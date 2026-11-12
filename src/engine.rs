@@ -4880,6 +4880,11 @@ impl Station {
         library_file(&self.cfg, self.away, path)
     }
 
+    /// At a Roundtable, or waiting to join one.
+    fn at_table_or_joining(&self) -> bool {
+        self.pending_join.is_some() || self.st.lock().unwrap().table.is_some()
+    }
+
     fn quiet(&self) -> bool {
         let g = self.st.lock().unwrap();
         !g.tx && g.link.is_none() && g.calling.is_none() && !g.incoming_call
@@ -5166,11 +5171,15 @@ impl Station {
             let follow = !self.cfg.schedule_only_away || self.away;
             let slot = crate::schedule::active(&self.cfg.schedule, crate::depot::now_s())
                 .map(|(i, s)| (i, s.clone()));
+            // Not at (or joining) a Roundtable either: retuning would leave
+            // it; nor with an automatic call about to go out here.
             let idle = self.quiet()
                 && self.cq.is_none()
                 && self.search.is_none()
                 && self.peer.is_none()
-                && self.qsy.is_none();
+                && self.qsy.is_none()
+                && !self.at_table_or_joining()
+                && self.auto_pending.is_none();
             match slot {
                 Some((i, sl)) if follow => {
                     let hz = sl.khz * 1000.0;
@@ -5216,6 +5225,9 @@ impl Station {
             && self.cq.is_none()
             && self.search.is_none()
             && self.table_queue.is_empty()
+            // At a Roundtable it would go out at the table's speed, in the
+            // middle of its traffic: it waits until the table is left.
+            && !self.at_table_or_joining()
             && self.clear_to_send("Station ID")
         {
             if self.auto_allowed() {

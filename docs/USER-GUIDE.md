@@ -317,7 +317,7 @@ Away is a convenience, not a licence to leave a station running unattended where
 
 ## Station ID beacon
 
-The **Station ID beacon** (Settings → Automation, off by default) sends one short broadcast frame every N minutes (10 to 120, default 30) when the band is quiet: your callsign, grid, whether you're away, and the callsigns you hold mail for (up to what fits in one 120-byte frame). It has **no whistle**: it's an ID, not a call, so it doesn't stop scanning stations.
+The **Station ID beacon** (Settings → Automation, off by default) sends one short broadcast frame every N minutes (10 to 120, default 30) when the band is quiet and you're not at a Roundtable (it would go out at the table's speed, in the middle of its traffic): your callsign, grid, whether you're away, and the callsigns you hold mail for (up to what fits in one 120-byte frame). It has **no whistle**: it's an ID, not a call, so it doesn't stop scanning stations.
 
 Stations on your frequency in the calling mode decode it. If your beacon lists their callsign, their Whistlestop shows **📬 … has mail for you** in the Heard card (and collects it, if they're away with automatic collection on). **Send one now** sends one immediately. A beacon (like a CQ and the automatic calls) waits while someone else is transmitting on the frequency (see "Listen before transmitting"), and is never sent during a link, a CQ, a search or a Roundtable, and (with the segment guard on) never outside the automatic-control segments: you'll see "Station ID skipped" in the Log instead.
 
@@ -395,7 +395,7 @@ Settings → Schedule (**off by default**):
   - the **dial frequency** (kHz);
   - **Station ID**: send the Station ID beacon (every *N* minutes, as set under Automation) while the slot is on.
 - The first slot in the list that is on wins. Between slots the radio stays where it is.
-- Whistlestop checks every 20 seconds, and moves only when you're not linked, calling or searching. Each move is noted in the Log (🗓).
+- Whistlestop checks every 20 seconds, and moves only when you're not linked, calling, searching, or at (or joining) a Roundtable. Each move is noted in the Log (🗓).
 - Station ID follows the same segment rule as all automatic transmissions.
 
 ## Remote operation

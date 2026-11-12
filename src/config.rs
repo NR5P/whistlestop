@@ -353,7 +353,7 @@ impl Config {
         num32(&mut n, "swr_limit", &mut self.swr_limit, 1.1, 10.0, d.swr_limit);
         num32(&mut n, "monitor_volume", &mut self.monitor_volume, 0.0, 1.5, d.monitor_volume);
         num(&mut n, "away_idle_s", &mut self.away_idle_s, 0.5, 86_400.0, d.away_idle_s);
-        num(&mut n, "beacon_minutes", &mut self.beacon_minutes, 10.0, 1440.0, d.beacon_minutes);
+        num(&mut n, "beacon_minutes", &mut self.beacon_minutes, 10.0, 120.0, d.beacon_minutes);
         // Negative would mean "anywhere" (0): a typo mustn't widen it.
         if self.qsy_max_khz < 0.0 {
             n.push(format!(
