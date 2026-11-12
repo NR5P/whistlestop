@@ -48,7 +48,20 @@ fn rounded_box(p: (f32, f32), h: f32, rad: f32) -> f32 {
 /// The app icon as RGBA pixels: a deep navy rounded square (with the
 /// transparent margin macOS icons have) holding the mark.
 pub fn icon_rgba(size: u32) -> Vec<u8> {
-    let s = size as f32;
+    render(size, None)
+}
+
+/// The icon for phones: opaque and full-bleed (iOS and Android round the
+/// corners themselves), the navy square scaled to span `span` of the image
+/// (1.0 for iOS; 72/108 for an Android adaptive icon's visible area).
+pub fn icon_rgba_square(size: u32, span: f32) -> Vec<u8> {
+    render(size, Some(span))
+}
+
+fn render(size: u32, square: Option<f32>) -> Vec<u8> {
+    // The macOS square spans 0.82 of its image; a phone icon maps it to `span`.
+    let zoom = square.map_or(1.0, |span| 0.82 / span);
+    let s = size as f32 / zoom;
     let brass = (242.0f32, 169.0f32, 59.0f32);
     let wave = curve();
     let mut px = vec![0u8; (size * size * 4) as usize];
@@ -57,8 +70,9 @@ pub fn icon_rgba(size: u32) -> Vec<u8> {
     let mix = |a: (f32, f32, f32), b: (f32, f32, f32), m: f32| (a.0 + (b.0 - a.0) * m, a.1 + (b.1 - a.1) * m, a.2 + (b.2 - a.2) * m);
     for y in 0..size {
         for x in 0..size {
-            let (u, v) = ((x as f32 + 0.5) / s, (y as f32 + 0.5) / s);
-            let alpha = cov(rounded_box((u - 0.5, v - 0.5), 0.41, 0.095));
+            let (u, v) = ((x as f32 + 0.5) / size as f32, (y as f32 + 0.5) / size as f32);
+            let (u, v) = (0.5 + (u - 0.5) * zoom, 0.5 + (v - 0.5) * zoom);
+            let alpha = if square.is_some() { 1.0 } else { cov(rounded_box((u - 0.5, v - 0.5), 0.41, 0.095)) };
             if alpha <= 0.0 {
                 continue;
             }

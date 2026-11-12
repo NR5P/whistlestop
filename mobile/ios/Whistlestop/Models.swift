@@ -28,6 +28,9 @@ struct EngineState: Decodable {
     var away: Bool? = nil
     var qsyNote: String? = nil
     var mailAlerts: [MailAlert]? = nil
+    var table: TableState? = nil
+    /// A Roundtable we'll join as soon as Mercury is free.
+    var tablePending: String? = nil
 
     var freqHz: Double { rig?.freqHz ?? 0 }
 }
@@ -59,6 +62,72 @@ struct Link: Decodable {
     var peerApp: String? = nil
     var mode: String? = nil
     var bps: Double? = nil
+    var e2e: E2e? = nil
+}
+
+/// End-to-end encryption on the link (Rust `engine::E2eView`): `"Off"`,
+/// `"Negotiating"`, `{"Encrypted":{"sas":…}}` or `{"Plain":{"why":…}}`.
+enum E2e: Decodable, Equatable {
+    case off, negotiating
+    case encrypted(sas: String)
+    case plain(why: String)
+
+    private struct Key: CodingKey {
+        var stringValue: String
+        var intValue: Int? { nil }
+        init(stringValue: String) { self.stringValue = stringValue }
+        init?(intValue: Int) { nil }
+    }
+    private struct Sas: Decodable { var sas: String }
+    private struct Why: Decodable { var why: String }
+
+    init(from decoder: Decoder) throws {
+        if let s = try? decoder.singleValueContainer().decode(String.self) {
+            self = s == "Negotiating" ? .negotiating : .off
+            return
+        }
+        let c = try decoder.container(keyedBy: Key.self)
+        if let v = try? c.decode(Sas.self, forKey: Key(stringValue: "Encrypted")) {
+            self = .encrypted(sas: v.sas)
+        } else if let v = try? c.decode(Why.self, forKey: Key(stringValue: "Plain")) {
+            self = .plain(why: v.why)
+        } else {
+            self = .off
+        }
+    }
+}
+
+/// The Roundtable we're at (Rust `engine::TableState`).
+struct TableState: Decodable {
+    var name: String
+    var id: Int
+    var host: Bool
+    /// Mercury's broadcast mode, e.g. "DATAC3".
+    var mode: String
+    /// Callsign → how well they hear the host.
+    var members: [String: Member] = [:]
+    /// Who holds the floor (the talking stick).
+    var floor: String? = nil
+    var lines: [TableLine] = []
+    /// Air time still to go for frames being sent.
+    var sendingEtaS: Double = 0
+}
+
+struct Member: Decodable {
+    var snrOfHost: Int? = nil
+}
+
+/// `[unix seconds, from, text]`; `from` is empty for the table's own notices.
+struct TableLine: Decodable {
+    var at: UInt64
+    var from: String
+    var text: String
+    init(from decoder: Decoder) throws {
+        var c = try decoder.unkeyedContainer()
+        at = try c.decode(UInt64.self)
+        from = try c.decode(String.self)
+        text = try c.decode(String.self)
+    }
 }
 
 /// Listed with `ForEach(Array(chat.enumerated()), id: \.offset)`: lines are

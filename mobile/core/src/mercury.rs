@@ -68,10 +68,16 @@ pub fn start(
     if g.is_some() {
         return Ok(());
     }
+    // The two-station bench (`bench.rs`): Mercury's audio is the simulated
+    // band, over its framed-socket backend.
+    let (sound, input, output) = match input.strip_prefix("sock:") {
+        Some(path) => ("sock", path, ""),
+        None => (SOUND, input, output),
+    };
     let mut args: Vec<String> = vec![
         "mercury".into(),
         "-x".into(),
-        SOUND.into(),
+        sound.into(),
         "-p".into(),
         port.to_string(),
         "-b".into(),

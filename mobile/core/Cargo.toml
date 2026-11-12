@@ -21,3 +21,5 @@ anyhow = "1.0.104"
 
 [target.'cfg(target_os = "android")'.dependencies]
 jni = "0.21.1"
+# The same crate cpal's Android backend reads the app's JavaVM and Context from.
+ndk-context = "0.1.1"

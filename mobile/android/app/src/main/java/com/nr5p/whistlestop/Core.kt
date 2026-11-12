@@ -28,6 +28,8 @@ object Core {
         System.loadLibrary("whistlestop_mobile")
     }
 
+    /** The app's Context for the engine's audio (cpal); call before [start]. */
+    @JvmStatic external fun initAndroid(context: Context)
     @JvmStatic external fun start(dir: String): Int
     @JvmStatic external fun changes(): Long
     @JvmStatic external fun state(): String
@@ -82,6 +84,7 @@ class Station(private val scope: CoroutineScope) {
                 )
             }
         }
+        Core.initAndroid(context.applicationContext)
         Core.setAudioDevices(audioDevices(context))
         val (inDev, outDev) = radioSoundCard(context)
         Core.setRadioAudio(inDev, outDev)
@@ -141,7 +144,14 @@ class Station(private val scope: CoroutineScope) {
     fun searchAllBands() = send("StartSearch", JsonPrimitive("AllBands"))
     fun searchBand(band: String) = send("StartSearch", buildJsonObject { put("Band", band) })
     fun stopSearch() = send("StopSearch")
-    fun callCq() = send("CallCq", buildJsonObject { put("table", JsonNull) })
+    /** Call CQ for a 1:1 chat (`table` null) or to host a named Roundtable. */
+    fun callCq(table: String? = null) = send("CallCq", buildJsonObject {
+        put("table", table?.trim()?.takeIf { it.isNotEmpty() }?.let { JsonPrimitive(it) } ?: JsonNull)
+    })
+    fun joinTable(name: String) = send("JoinTable", JsonPrimitive(name.trim()))
+    fun leaveTable() = send("LeaveTable")
+    fun tableSay(text: String) = send("TableSay", JsonPrimitive(text))
+    fun passFloor(call: String) = send("PassFloor", JsonPrimitive(call))
     fun stopCq() = send("StopCq")
     fun setAway(on: Boolean) = send("SetAway", JsonPrimitive(on))
     fun qsy(khz: Double) = send("Qsy", JsonPrimitive(khz * 1000))

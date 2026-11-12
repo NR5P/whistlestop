@@ -1,9 +1,12 @@
 //! Two-station test bench: two real Mercury modems and two Whistlestop
 //! engines on one computer, joined by the ether (a simulated HF band).
 //!
-//!   cargo run --release --bin twotest -- <path/to/mercury> [workdir] [scenario...]
+//!   cargo run --release --bin twotest -- <path/to/mercury> [workdir] [--a=KIND] [--b=KIND] [scenario...]
 //!
-//! Scenarios run in order; name some to run only those.
+//! Scenarios run in order; name some to run only those. KIND picks what runs
+//! each station: `engine` (default, in this process), `desktop` (the desktop
+//! app), `ios` (the iPhone app in the booted Simulator) or `android` (the
+//! Android app in the emulator); the apps run their own real Mercury.
 
 #[cfg(unix)]
 fn main() -> anyhow::Result<()> {
@@ -20,6 +23,7 @@ mod bench {
 
     use std::path::{Path, PathBuf};
     use std::process::{Child, Command, Stdio};
+    use std::sync::Arc;
     use std::time::{Duration, Instant};
     use whistlestop::bandplan::SearchScope;
     use whistlestop::config::Config;
@@ -36,6 +40,7 @@ mod bench {
         a: Handle,
         b: Handle,
         mercs: Vec<Child>,
+        stations: Vec<Station>,
         work: PathBuf,
         results: Vec<(String, bool, String)>,
         started: Instant,
@@ -45,6 +50,9 @@ mod bench {
 
     impl Drop for Bench {
         fn drop(&mut self) {
+            for s in self.stations.iter_mut() {
+                s.stop();
+            }
             for c in self.mercs.iter_mut() {
                 let _ = c.kill();
                 let _ = c.wait();
@@ -91,42 +99,22 @@ mod bench {
     }
 
     impl Bench {
-        fn start(mercury: &Path, work: PathBuf) -> anyhow::Result<Bench> {
+        fn start(mercury: &Path, work: PathBuf, kinds: [Kind; 2]) -> anyhow::Result<Bench> {
             std::fs::create_dir_all(&work)?;
             let work = std::fs::canonicalize(&work)?;
             let sa = work.join("a.sock");
             let sb = work.join("b.sock");
             let ether = Ether::start(
                 vec![
-                    StationCfg { name: A.into(), sock_path: sa.clone(), rig_port: 4632, audio_port: 7300, dial_hz: A_DIAL, hear_own_tx: false },
-                    StationCfg { name: B.into(), sock_path: sb.clone(), rig_port: 4642, audio_port: 7310, dial_hz: 14_100_200.0, hear_own_tx: false },
+                    StationCfg { name: A.into(), sock_path: sa.clone(), rig_port: 4632 + off(), audio_port: 7300 + off(), dial_hz: A_DIAL, hear_own_tx: false },
+                    StationCfg { name: B.into(), sock_path: sb.clone(), rig_port: 4642 + off(), audio_port: 7310 + off(), dial_hz: 14_100_200.0, hear_own_tx: false },
                 ],
                 Channel::default(),
             )?;
             let mut mercs = vec![];
-            for (sock, port, bport, log) in [(&sa, 8300u16, 8100u16, "mercury-A.log"), (&sb, 8310, 8110, "mercury-B.log")] {
-                let out = std::fs::File::create(work.join(log))?;
-                mercs.push(
-                    Command::new(mercury)
-                        .args(["-x", "sock", "-p", &port.to_string(), "-b", &bport.to_string(), "-v"])
-                        .env("MERCURY_AUDIO_SOCK", sock)
-                        .current_dir(&work)
-                        .stdout(Stdio::from(out.try_clone()?))
-                        .stderr(Stdio::from(out))
-                        .spawn()?,
-                );
-            }
-            for p in [8300, 8310, 8100, 8110] {
-                anyhow::ensure!(wait_port(p, 20), "Mercury did not open port {p} (see mercury-*.log)");
-            }
-            for c in [A, B] {
-                let _ = std::fs::remove_file(work.join(format!("{c}-depot.json")));
-            }
-            let a = engine::spawn(|| {});
-            let b = engine::spawn(|| {});
-            a.send(Cmd::Start(cfg_for(A, 8300, 8100, 4632, 7300, &work)));
-            b.send(Cmd::Start(cfg_for(B, 8310, 8110, 4642, 7310, &work)));
-            Ok(Bench { ether, a, b, mercs, work, results: vec![], started: Instant::now(), mark: (0, 0) })
+            let (st_a, a) = Station::start(kinds[0], 0, mercury, &work, &sa, &mut mercs)?;
+            let (st_b, b) = Station::start(kinds[1], 1, mercury, &work, &sb, &mut mercs)?;
+            Ok(Bench { ether, a, b, mercs, stations: vec![st_a, st_b], work, results: vec![], started: Instant::now(), mark: (0, 0) })
         }
 
         fn st<'a>(&self, h: &'a Handle) -> std::sync::MutexGuard<'a, State> {
@@ -170,7 +158,7 @@ mod bench {
         }
 
         fn update(&self, h: &Handle, f: impl FnOnce(&mut Config)) {
-            let mut c = if std::ptr::eq(h, &self.a) { cfg_for(A, 8300, 8100, 4632, 7300, &self.work) } else { cfg_for(B, 8310, 8110, 4642, 7310, &self.work) };
+            let mut c = self.stations[if std::ptr::eq(h, &self.a) { 0 } else { 1 }].cfg.clone();
             f(&mut c);
             h.send(Cmd::Update(c));
         }
@@ -202,10 +190,12 @@ mod bench {
         // ------------------------------------------------------------ scenarios
 
         fn s_ready(&mut self) {
-            let ok = self.wait(30.0, |a, b| a.mercury_ok && b.mercury_ok && a.rig_ok && b.rig_ok && a.audio_ok && b.audio_ok);
+            // An app's own Mercury starts with the app; give it time.
+            let ok = self.wait(120.0, |a, b| a.mercury_ok && b.mercury_ok && a.rig_ok && b.rig_ok && a.audio_ok && b.audio_ok);
             let stats = self.ether.stats();
             let detail = format!(
-                "Mercury links {}/{}, ether sees Mercury {}/{} and apps {}/{}",
+                "ready after {:.0} s; Mercury links {}/{}, ether sees Mercury {}/{} and apps {}/{}",
+                ok.map(|d| d.as_secs_f64()).unwrap_or(-1.0),
                 self.st(&self.a).mercury_ok,
                 self.st(&self.b).mercury_ok,
                 stats[0].mercury_connected,
@@ -354,7 +344,7 @@ mod bench {
             });
             // Byte-exact check for an unzipped file.
             let exact = match (&path, zip, paths.first()) {
-                (Some(p), false, Some(src)) => std::fs::read(p).ok() == std::fs::read(src).ok(),
+                (Some(p), false, Some(src)) => self.stations[if from_a { 1 } else { 0 }].read(p) == std::fs::read(src).ok(),
                 (Some(_), true, _) => true, // zip verified by SHA-256 end to end (DONE ok)
                 _ => false,
             };
@@ -622,18 +612,22 @@ mod bench {
         /// band, refused), and both come home when the link ends.
         fn s_qsylib(&mut self) {
             self.disconnect_both();
-            let lib = self.work.join("BRAVO-library");
-            let _ = std::fs::remove_dir_all(&lib);
-            std::fs::create_dir_all(lib.join("logs")).unwrap();
             let notes: Vec<u8> = (0..3000u32).map(|i| b"QSL via the Whistlestop library. "[i as usize % 33]).collect();
-            std::fs::write(lib.join("notes.txt"), &notes).unwrap();
-            std::fs::write(lib.join("logs/today.adi"), "<CALL:5>ALPHA<EOR>").unwrap();
-            let libdir = lib.to_string_lossy().to_string();
-            self.update(&self.b, |c| {
-                c.accept_qsy = true;
-                c.share_library = true;
-                c.library_dir = libdir.clone();
-            });
+            let sb = &self.stations[1];
+            match sb.kind {
+                Kind::Engine | Kind::Desktop => {
+                    let lib = PathBuf::from(&sb.cfg.library_dir);
+                    let _ = std::fs::remove_dir_all(&lib);
+                    std::fs::create_dir_all(lib.join("logs")).unwrap();
+                    std::fs::write(lib.join("notes.txt"), &notes).unwrap();
+                    std::fs::write(lib.join("logs/today.adi"), "<CALL:5>ALPHA<EOR>").unwrap();
+                }
+                _ => {
+                    sb.put("bench-lib/notes.txt", &notes).unwrap();
+                    sb.put("bench-lib/logs/today.adi", b"<CALL:5>ALPHA<EOR>").unwrap();
+                }
+            }
+            self.update(&self.b, |c| c.accept_qsy = true);
             self.b.send(Cmd::SetAway(true));
             std::thread::sleep(Duration::from_secs(1));
             if !self.direct_link("qsy/library") {
@@ -647,7 +641,10 @@ mod bench {
             self.record("library: browse over real Mercury", t.is_some(), format!("listing in {:.0} s", t.map(|d| d.as_secs_f64()).unwrap_or(-1.0)));
             self.a.send(Cmd::LibFetch("notes.txt".into()));
             let got = self.wait(300.0, |a, _| a.transfers.iter().any(|t| t.dir == Dir::In && t.name == "notes.txt" && matches!(t.state, XferState::Done(_))));
-            let same = std::fs::read(self.work.join("ALPHA-downloads/notes.txt")).map(|d| d == notes).unwrap_or(false);
+            let same = {
+                let sa = &self.stations[0];
+                sa.read(&sa.cfg.download_dir.join("notes.txt")).is_some_and(|d| d == notes)
+            };
             self.record(
                 "library: download byte-exact",
                 got.is_some() && same,
@@ -676,10 +673,7 @@ mod bench {
             let back = self.wait(120.0, |a, b| a.link.is_none() && b.link.is_none() && a.rig.freq_hz == home && b.rig.freq_hz == home);
             self.record("qsy: both back home when the link ends", back.is_some(), format!("{:.0} s", back.map(|d| d.as_secs_f64()).unwrap_or(-1.0)));
             self.b.send(Cmd::SetAway(false));
-            self.update(&self.b, |c| {
-                c.accept_qsy = false;
-                c.share_library = false;
-            });
+            self.update(&self.b, |c| c.accept_qsy = false);
         }
 
         // ------------------------------------------- transfers, cancel, resume
@@ -1081,7 +1075,11 @@ mod bench {
         }
 
         fn report(&self) -> String {
-            let mut s = String::from("# Whistlestop two-station bench (real Mercury 1.9.23 ×2)\n\n");
+            let mut s = format!(
+                "# Whistlestop two-station bench (real Mercury 1.9.23 ×2)\n\nALPHA: {}. BRAVO: {}.\n\n",
+                self.stations[0].kind.label(),
+                self.stations[1].kind.label()
+            );
             s += &format!("Run time {:.0} s. {}\n\n| Result | Test | Details |\n|---|---|---|\n", self.started.elapsed().as_secs_f64(), self.snr_note());
             for (n, ok, d) in &self.results {
                 s += &format!("| {} | {n} | {d} |\n", if *ok { "PASS" } else { "**FAIL**" });
@@ -1097,6 +1095,351 @@ mod bench {
                 let lines: Vec<String> = g.log.iter().map(|(at, l)| format!("{} {l}", at.hhmm())).collect();
                 let _ = std::fs::write(self.work.join(format!("whistlestop-{n}.log")), lines.join("\n"));
             }
+            for st in &self.stations {
+                if matches!(st.kind, Kind::Ios | Kind::Android)
+                    && let Some(l) = st.mercury_log(&self.work)
+                {
+                    let _ = std::fs::write(self.work.join(format!("mercury-{}-{}.log", st.call, if st.kind == Kind::Ios { "ios" } else { "android" })), l);
+                }
+            }
+        }
+    }
+
+    // ------------------------------------------------------------ stations
+
+    /// What runs a station: this process's engine (the original bench), or
+    /// a real app operated by remote operation: the desktop app, the iPhone
+    /// app in the Simulator, the Android app in the emulator, each with its
+    /// own real Mercury on the ether.
+    #[derive(Clone, Copy, PartialEq, Debug)]
+    pub enum Kind {
+        Engine,
+        Desktop,
+        Ios,
+        Android,
+    }
+
+    impl Kind {
+        fn parse(s: &str) -> anyhow::Result<Kind> {
+            Ok(match s {
+                "engine" => Kind::Engine,
+                "desktop" => Kind::Desktop,
+                "ios" => Kind::Ios,
+                "android" => Kind::Android,
+                _ => anyhow::bail!("station kind {s}: engine, desktop, ios or android"),
+            })
+        }
+        fn label(self) -> &'static str {
+            match self {
+                Kind::Engine => "engine",
+                Kind::Desktop => "desktop app",
+                Kind::Ios => "iPhone app",
+                Kind::Android => "Android app",
+            }
+        }
+    }
+
+    /// `TWOTEST_PORT_OFFSET` moves every port this bench opens on the
+    /// computer, so two benches can run side by side.
+    fn off() -> u16 {
+        std::env::var("TWOTEST_PORT_OFFSET").ok().and_then(|v| v.parse().ok()).unwrap_or(0)
+    }
+
+    const APP_ID: &str = "com.nr5p.whistlestop";
+    const ANDROID_DIR: &str = "/data/user/0/com.nr5p.whistlestop/files";
+    const REMOTE_PW: &str = "bench";
+
+    pub struct Station {
+        pub kind: Kind,
+        pub call: &'static str,
+        /// The station's settings, in its own paths.
+        pub cfg: Config,
+        /// Its folder (the app's, for a phone; on the phone for Android).
+        pub dir: PathBuf,
+        client: Option<whistlestop::remote::Client>,
+        child: Option<Child>,
+        forwards: Vec<String>,
+        /// `adb reverse` ports (a real phone).
+        reverses: Vec<String>,
+        /// A real phone's own settings file, put back when the bench ends
+        /// (`Some(None)`: it had none).
+        phone_toml: Option<Option<Vec<u8>>>,
+    }
+
+    fn adb(args: &[&str]) -> anyhow::Result<Vec<u8>> {
+        let o = Command::new(adb_path()).args(args).output()?;
+        anyhow::ensure!(o.status.success(), "adb {}: {}", args.join(" "), String::from_utf8_lossy(&o.stderr));
+        Ok(o.stdout)
+    }
+
+    /// How the Android app reaches this computer: the emulator's alias for
+    /// it, or (a real phone on USB, `ANDROID_SERIAL` not `emulator-…`)
+    /// localhost, carried over the cable by `adb reverse`.
+    fn android_host() -> &'static str {
+        match std::env::var("ANDROID_SERIAL") {
+            Ok(s) if !s.starts_with("emulator-") => "127.0.0.1",
+            _ => "10.0.2.2",
+        }
+    }
+
+    fn adb_path() -> PathBuf {
+        let sdk = std::env::var_os("ANDROID_HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from(std::env::var("HOME").unwrap()).join("Library/Android/sdk"));
+        sdk.join("platform-tools/adb")
+    }
+
+    /// Write a file in the Android app's folder (run-as: a debug build).
+    fn adb_put(path: &str, data: &[u8]) -> anyhow::Result<()> {
+        use std::io::Write;
+        let parent = Path::new(path).parent().unwrap().to_string_lossy().to_string();
+        adb(&["shell", "run-as", APP_ID, "mkdir", "-p", &parent])?;
+        let mut c = Command::new(adb_path())
+            .args(["exec-in", "run-as", APP_ID, "sh", "-c", &format!("cat > '{path}'")])
+            .stdin(Stdio::piped())
+            .spawn()?;
+        c.stdin.take().unwrap().write_all(data)?;
+        anyhow::ensure!(c.wait()?.success(), "couldn't write {path} on the phone");
+        Ok(())
+    }
+
+    fn ios_dir() -> anyhow::Result<PathBuf> {
+        let o = Command::new("xcrun").args(["simctl", "get_app_container", "booted", APP_ID, "data"]).output()?;
+        anyhow::ensure!(o.status.success(), "the iPhone app isn't installed in the booted Simulator");
+        Ok(PathBuf::from(String::from_utf8_lossy(&o.stdout).trim()).join("Documents"))
+    }
+
+    /// Bridge TCP connections on `port` to the ether's socket for a
+    /// station's Mercury (the Android emulator can't reach Unix sockets).
+    fn bridge(port: u16, sock: PathBuf) -> anyhow::Result<()> {
+        let l = std::net::TcpListener::bind(("127.0.0.1", port))?;
+        std::thread::spawn(move || {
+            for t in l.incoming().flatten() {
+                let Ok(u) = std::os::unix::net::UnixStream::connect(&sock) else { continue };
+                t.set_nodelay(true).ok();
+                // When either side ends (the ether drops a Mercury that
+                // stalls), close both, so Mercury sees it and reconnects.
+                let (mut t2, mut u2) = (t.try_clone().unwrap(), u.try_clone().unwrap());
+                let (mut t, mut u) = (t, u);
+                std::thread::spawn(move || {
+                    let _ = std::io::copy(&mut t, &mut u);
+                    let _ = u.shutdown(std::net::Shutdown::Both);
+                    let _ = t.shutdown(std::net::Shutdown::Both);
+                });
+                std::thread::spawn(move || {
+                    let _ = std::io::copy(&mut u2, &mut t2);
+                    let _ = u2.shutdown(std::net::Shutdown::Both);
+                    let _ = t2.shutdown(std::net::Shutdown::Both);
+                });
+            }
+        });
+        Ok(())
+    }
+
+    impl Station {
+        /// Start a station: `i` 0 for ALPHA, 1 for BRAVO.
+        fn start(kind: Kind, i: usize, mercury: &Path, work: &Path, sock: &Path, mercs: &mut Vec<Child>) -> anyhow::Result<(Station, Handle)> {
+            let call = [A, B][i];
+            let (rig, audio) = ([4632u16, 4642][i] + off(), [7300u16, 7310][i] + off());
+            // Host Mercury ports per station; the iPhone's Mercury shares the
+            // computer's network too, so it gets its own.
+            let (port, bport) = match kind {
+                Kind::Ios => ([8320u16, 8330][i] + off(), [8120u16, 8130][i] + off()),
+                Kind::Android => (8300, 8100),
+                _ => ([8300u16, 8310][i] + off(), [8100u16, 8110][i] + off()),
+            };
+            let remote_port = [7381u16, 7382][i] + off();
+            let mut cfg = cfg_for(call, port, bport, rig, audio, work);
+            let dir = match kind {
+                Kind::Engine | Kind::Desktop => work.to_path_buf(),
+                Kind::Ios => ios_dir()?,
+                Kind::Android => PathBuf::from(ANDROID_DIR),
+            };
+            // The file library is the station's own (remote operation can't
+            // switch it on or move it), so it's set here, at the station.
+            // s_qsylib fills it.
+            cfg.share_library = true;
+            cfg.library_dir = match kind {
+                Kind::Engine | Kind::Desktop => work.join(format!("{call}-library")),
+                _ => dir.join("bench-lib"),
+            }
+            .to_string_lossy()
+            .to_string();
+            if matches!(kind, Kind::Ios | Kind::Android) {
+                cfg.download_dir = dir.join("Downloads");
+                cfg.depot_file = dir.join(format!("{call}-depot.json")).to_string_lossy().to_string();
+            }
+            // Ports a real phone dials back to this computer (over USB, `adb reverse`).
+            let mut reverses = vec![];
+            if kind == Kind::Android {
+                let host = android_host();
+                if host == "127.0.0.1" {
+                    for p in [rig, audio] {
+                        let r = format!("tcp:{p}");
+                        adb(&["reverse", &r, &r])?;
+                        reverses.push(r);
+                    }
+                }
+                cfg.rigctld = format!("{host}:{rig}");
+                cfg.audio_in = format!("ether:{host}:{audio}");
+                cfg.audio_out = cfg.audio_in.clone();
+            }
+            if matches!(kind, Kind::Engine | Kind::Desktop) {
+                let out = std::fs::File::create(work.join(format!("mercury-{call}.log")))?;
+                mercs.push(
+                    Command::new(mercury)
+                        .args(["-x", "sock", "-p", &port.to_string(), "-b", &bport.to_string(), "-v"])
+                        .env("MERCURY_AUDIO_SOCK", sock)
+                        .current_dir(work)
+                        .stdout(Stdio::from(out.try_clone()?))
+                        .stderr(Stdio::from(out))
+                        .spawn()?,
+                );
+                for p in [port, bport] {
+                    anyhow::ensure!(wait_port(p, 20), "Mercury did not open port {p} (see mercury-*.log)");
+                }
+            }
+            let mut st = Station { kind, call, cfg: cfg.clone(), dir: dir.clone(), client: None, child: None, forwards: vec![], reverses, phone_toml: None };
+            let mut remote_cfg = cfg.clone();
+            remote_cfg.remote_serve = true;
+            remote_cfg.remote_port = remote_port;
+            remote_cfg.remote_password = REMOTE_PW.into();
+            let toml = toml::to_string(&remote_cfg)?;
+            let bench_json = |audio: String| serde_json::json!({"mercury_audio": audio, "remote_port": remote_port, "remote_password": REMOTE_PW}).to_string();
+            let addr = match kind {
+                Kind::Engine => {
+                    let _ = std::fs::remove_file(&cfg.depot_file);
+                    let h = engine::spawn(|| {});
+                    h.send(Cmd::Start(cfg));
+                    return Ok((st, h));
+                }
+                Kind::Desktop => {
+                    let _ = std::fs::remove_file(&cfg.depot_file);
+                    let p = work.join(format!("{call}-desktop.toml"));
+                    std::fs::write(&p, toml)?;
+                    let bin = std::env::var_os("WHISTLESTOP_BIN").map(PathBuf::from).unwrap_or_else(|| std::env::current_exe().unwrap().with_file_name("whistlestop"));
+                    let out = std::fs::File::create(work.join(format!("desktop-{call}.log")))?;
+                    st.child = Some(
+                        Command::new(bin).env("WHISTLESTOP_CONFIG", &p).stdout(Stdio::from(out.try_clone()?)).stderr(Stdio::from(out)).spawn()?,
+                    );
+                    format!("127.0.0.1:{remote_port}")
+                }
+                Kind::Ios => {
+                    let _ = Command::new("xcrun").args(["simctl", "terminate", "booted", APP_ID]).output();
+                    std::thread::sleep(Duration::from_secs(1));
+                    for f in ["Downloads", "bench-lib"] {
+                        let _ = std::fs::remove_dir_all(dir.join(f));
+                    }
+                    let _ = std::fs::remove_file(&cfg.depot_file);
+                    let _ = std::fs::remove_file(dir.join("mercury.log"));
+                    std::fs::write(dir.join("whistlestop.toml"), toml)?;
+                    std::fs::write(dir.join("bench.json"), bench_json(sock.to_string_lossy().to_string()))?;
+                    let o = Command::new("xcrun").args(["simctl", "launch", "booted", APP_ID]).output()?;
+                    anyhow::ensure!(o.status.success(), "couldn't launch the iPhone app: {}", String::from_utf8_lossy(&o.stderr));
+                    format!("127.0.0.1:{remote_port}")
+                }
+                Kind::Android => {
+                    adb(&["shell", "am", "force-stop", APP_ID])?;
+                    let _ = adb(&["shell", "pm", "grant", APP_ID, "android.permission.RECORD_AUDIO"]);
+                    let _ = adb(&["shell", "run-as", APP_ID, "rm", "-rf", &format!("{ANDROID_DIR}/Downloads"), &format!("{ANDROID_DIR}/bench-lib"), &cfg.depot_file, &format!("{ANDROID_DIR}/mercury.log")]);
+                    let tcp = [7401u16, 7402][i] + off();
+                    bridge(tcp, sock.to_path_buf())?;
+                    let path = format!("{ANDROID_DIR}/whistlestop.toml");
+                    if android_host() == "127.0.0.1" {
+                        // A real phone: keep its own settings to put back.
+                        st.phone_toml = Some(
+                            adb(&["exec-out", "run-as", APP_ID, "sh", "-c", &format!("[ -f '{path}' ] && cat '{path}' || echo -n NONE")])
+                                .ok()
+                                .filter(|b| b.as_slice() != b"NONE"),
+                        );
+                    }
+                    adb_put(&path, toml.as_bytes())?;
+                    let host = android_host();
+                    if host == "127.0.0.1" {
+                        let r = format!("tcp:{tcp}");
+                        adb(&["reverse", &r, &r])?;
+                        st.reverses.push(r);
+                    }
+                    adb_put(&format!("{ANDROID_DIR}/bench.json"), bench_json(format!("tcp:{host}:{tcp}")).as_bytes())?;
+                    let local = format!("tcp:{remote_port}");
+                    adb(&["forward", &local, &format!("tcp:{remote_port}")])?;
+                    st.forwards.push(local);
+                    adb(&["shell", "am", "start", "-n", &format!("{APP_ID}/.MainActivity")])?;
+                    format!("127.0.0.1:{remote_port}")
+                }
+            };
+            // Operate it remotely, as one desktop operates another.
+            let t = Instant::now();
+            let client = loop {
+                match whistlestop::remote::connect(&addr, REMOTE_PW, work.join(format!("{call}-fetched")), String::new(), Arc::new(|| {})) {
+                    Ok(c) => break c,
+                    Err(e) if t.elapsed() > Duration::from_secs(90) => anyhow::bail!("{} {call}: {e:#}", kind.label()),
+                    Err(_) => std::thread::sleep(Duration::from_millis(500)),
+                }
+            };
+            println!("   {call}: {} at {addr} ({})", kind.label(), client.desc);
+            let h = client.handle.clone();
+            st.client = Some(client);
+            Ok((st, h))
+        }
+
+        /// Read a file on the station.
+        pub fn read(&self, p: &Path) -> Option<Vec<u8>> {
+            match self.kind {
+                Kind::Android => adb(&["exec-out", "run-as", APP_ID, "cat", &p.to_string_lossy()]).ok(),
+                _ => std::fs::read(p).ok(),
+            }
+        }
+
+        /// Put a file on the station, at `rel` under its folder; returns
+        /// the folder `rel`'s first component names, as the station sees it.
+        pub fn put(&self, rel: &str, data: &[u8]) -> anyhow::Result<PathBuf> {
+            let p = self.dir.join(rel);
+            match self.kind {
+                Kind::Android => adb_put(&p.to_string_lossy(), data)?,
+                _ => {
+                    std::fs::create_dir_all(p.parent().unwrap())?;
+                    std::fs::write(&p, data)?;
+                }
+            }
+            Ok(self.dir.join(rel.split('/').next().unwrap()))
+        }
+
+        pub fn mercury_log(&self, work: &Path) -> Option<Vec<u8>> {
+            match self.kind {
+                Kind::Engine | Kind::Desktop => std::fs::read(work.join(format!("mercury-{}.log", self.call))).ok(),
+                _ => self.read(&self.dir.join("mercury.log")),
+            }
+        }
+
+        fn stop(&mut self) {
+            self.client = None;
+            if let Some(mut c) = self.child.take() {
+                let _ = c.kill();
+                let _ = c.wait();
+            }
+            match self.kind {
+                Kind::Ios => {
+                    let _ = Command::new("xcrun").args(["simctl", "terminate", "booted", APP_ID]).output();
+                    let _ = std::fs::remove_file(self.dir.join("bench.json"));
+                }
+                Kind::Android => {
+                    let _ = adb(&["shell", "am", "force-stop", APP_ID]);
+                    let _ = adb(&["shell", "run-as", APP_ID, "rm", "-f", &format!("{ANDROID_DIR}/bench.json")]);
+                    for f in &self.forwards {
+                        let _ = adb(&["forward", "--remove", f]);
+                    }
+                    for r in &self.reverses {
+                        let _ = adb(&["reverse", "--remove", r]);
+                    }
+                    if let Some(t) = self.phone_toml.take() {
+                        let path = format!("{ANDROID_DIR}/whistlestop.toml");
+                        let _ = match t {
+                            Some(t) => adb_put(&path, &t),
+                            None => adb(&["shell", "run-as", APP_ID, "rm", "-f", &path]).map(|_| ()),
+                        };
+                    }
+                }
+                _ => {}
+            }
         }
     }
 
@@ -1104,9 +1447,19 @@ mod bench {
         let args: Vec<String> = std::env::args().collect();
         let mercury = PathBuf::from(args.get(1).cloned().unwrap_or_else(|| "mercury".into()));
         let work = PathBuf::from(args.get(2).cloned().unwrap_or_else(|| "bench-run".into()));
-        let only: Vec<String> = args.iter().skip(3).cloned().collect();
+        let mut kinds = [Kind::Engine, Kind::Engine];
+        let mut only: Vec<String> = vec![];
+        for a in args.iter().skip(3) {
+            if let Some(k) = a.strip_prefix("--a=") {
+                kinds[0] = Kind::parse(k)?;
+            } else if let Some(k) = a.strip_prefix("--b=") {
+                kinds[1] = Kind::parse(k)?;
+            } else {
+                only.push(a.clone());
+            }
+        }
         let run = |n: &str| only.is_empty() || only.iter().any(|o| o == n);
-        let mut b = Bench::start(&mercury, work)?;
+        let mut b = Bench::start(&mercury, work, kinds)?;
         println!("Bench up: 2× Mercury on the ether. Work dir {}", b.work.display());
         b.s_ready();
         if run("watch") {

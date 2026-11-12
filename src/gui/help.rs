@@ -166,7 +166,7 @@ pub const S_AUTOTUNE: Topic = (
 );
 pub const S_AUTOANSWER: Topic = (
     "Answer automatically",
-    "When a search locks onto a whistle and Mercury decodes the caller's CQ, connect at once instead of waiting for you to press Answer.",
+    "When a search locks onto a whistle and Mercury decodes the caller's CQ, connect by itself instead of waiting for you to press Answer. It calls as soon as the caller's CALL packet that follows the CQ is over (4.5 s at most), so the call isn't sent on top of the caller's own transmission.",
     "Finding stations",
 );
 
@@ -230,6 +230,11 @@ pub const F_DECLINE: Topic = ("Decline", "Refuse this file; the sender is told."
 pub const F_CANCEL: Topic = ("Cancel", "Stop this transfer on both sides. A partly received file is kept so it can resume later.", "Files");
 
 pub const T_JOIN: Topic = ("Join here", "Join the named Roundtable on the frequency you're on (the host's frequency). Off during a 1:1 link: disconnect first.", "Roundtables");
+pub const T_JOIN_WAIT: Topic = (
+    "Waiting to join",
+    "You asked to join while a link was still closing. Mercury can't switch to Roundtable listening until its disconnect is done, so the join is retried every 2 s for up to 60 s. Cancel to stop waiting.",
+    "Roundtables",
+);
 pub const T_LEAVE: Topic = ("Leave", "Say goodbye to the table and stop listening to it.", "Roundtables");
 pub const T_MEMBER: Topic = (
     "Pass the floor",

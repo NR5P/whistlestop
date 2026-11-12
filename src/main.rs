@@ -33,6 +33,12 @@ enum Command {
     IconPng {
         #[arg(default_value = "whistlestop-icon.png")]
         path: String,
+        #[arg(long, default_value_t = 512)]
+        size: u32,
+        /// Phone icon: opaque, full-bleed, the navy square spanning this
+        /// fraction of the image (1.0 for iOS, 0.667 for Android adaptive).
+        #[arg(long)]
+        square: Option<f32>,
     },
     /// Write demo sounds of a whole CQ (whistle + CQ burst), clean and as
     /// heard on the air, into a folder.
@@ -73,10 +79,13 @@ fn main() -> anyhow::Result<()> {
             Ok(())
         }
         Command::CqDemo { dir, whistle: wsecs } => cq_demo(&dir, wsecs),
-        Command::IconPng { path } => {
-            let d = gui::icon::icon_data();
-            let img = eframe::egui::ColorImage::from_rgba_unmultiplied([d.width as usize, d.height as usize], &d.rgba);
-            write_png(&path, d.width, d.height, img.as_raw())?;
+        Command::IconPng { path, size, square } => {
+            let rgba = match square {
+                Some(span) => gui::icon::icon_rgba_square(size, span),
+                None => gui::icon::icon_rgba(size),
+            };
+            let img = eframe::egui::ColorImage::from_rgba_unmultiplied([size as usize, size as usize], &rgba);
+            write_png(&path, size, size, img.as_raw())?;
             println!("Wrote {path}");
             Ok(())
         }

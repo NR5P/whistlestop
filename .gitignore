@@ -2,12 +2,14 @@
 /prototype-python/.venv
 __pycache__/
 /bench-run
+/air-run*
 # 3D intro renders (regenerate with intro/3d/build.py); the final video is over GitHub's 100 MB limit
 /intro/3d/frames
 /intro/3d/test
 /intro/3d/render.log
 *.blend1
 /intro/whistlestop-intro-3d.mp4
+/intro/whistlestop-intro-3d-tull.mp4
 
 # Phone builds: Mercury checkouts and objects, Xcode and Gradle output
 /mobile/build

@@ -12,6 +12,8 @@ final class Core: ObservableObject {
     /// Settings as the engine keeps them (every key, so saving never drops
     /// one this app doesn't show).
     @Published var config: [String: Any] = [:]
+    /// Which half of the Chat tab shows: the 1:1 link or the Roundtable.
+    @Published var chatPane: ChatPane = .link
     /// Waterfall rows, newest last.
     @Published private(set) var rows: [[Float]] = []
 
@@ -105,7 +107,15 @@ final class Core: ObservableObject {
         }
     }
     func stopSearch() { send("StopSearch") }
-    func callCq() { send("CallCq", ["table": NSNull()]) }
+    /// Call CQ for a 1:1 chat (`table` nil) or to host a named Roundtable.
+    func callCq(table: String? = nil) {
+        let t = table?.trimmingCharacters(in: .whitespaces) ?? ""
+        send("CallCq", ["table": t.isEmpty ? NSNull() : t as Any])
+    }
+    func joinTable(_ name: String) { send("JoinTable", name.trimmingCharacters(in: .whitespaces)) }
+    func leaveTable() { send("LeaveTable") }
+    func tableSay(_ text: String) { send("TableSay", text) }
+    func passFloor(_ call: String) { send("PassFloor", call) }
     func stopCq() { send("StopCq") }
     func setAway(_ on: Bool) { send("SetAway", on) }
     func depotPost(to: String, via: String?, text: String) {
@@ -154,6 +164,8 @@ final class Core: ObservableObject {
         Binding(get: { Int(self.number(key)) }, set: { self.config[key] = $0 })
     }
 }
+
+enum ChatPane: Hashable { case link, table }
 
 enum SearchChoice: Hashable {
     case currentBand, allBands

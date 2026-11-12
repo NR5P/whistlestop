@@ -29,6 +29,36 @@ Add scenario names to run only some of them: `watch link chat files table
 narrow weak e2e depot scan qsylib`. Results go to `bench-run/REPORT.md`; Mercury and Whistlestop
 logs are written beside it.
 
+## The real apps as stations
+
+`--a=KIND` and `--b=KIND` put a real app on ALPHA or BRAVO instead of an
+engine in the bench's own process:
+
+| KIND | Station | Its Mercury |
+|---|---|---|
+| `engine` (default) | Whistlestop's engine inside `twotest` | `mercury -x sock` on this computer |
+| `desktop` | the desktop app (`target/release/whistlestop`, or `WHISTLESTOP_BIN`), its own settings file | `mercury -x sock` on this computer |
+| `ios` | the iPhone app in the booted Simulator | built into the app, ports 8320/8330 |
+| `android` | the Android app (debug build) in the emulator (`ANDROID_SERIAL`) | built into the app (arm64) |
+
+```bash
+ANDROID_SERIAL=emulator-5554 target/release/twotest ~/Desktop/mercury/source/mercury bench-run/apps --a=ios --b=android
+```
+
+The bench operates each app by remote operation, the way one desktop
+operates another. A phone app does this only when its folder holds
+`bench.json` (the bench writes it, with the settings, before launching
+the app, and removes it after): its built-in Mercury then uses the ether
+(`-x sock`) instead of the phone's sound, and the app serves remote
+operation on 7381 (ALPHA) or 7382 (BRAVO). The emulator reaches the
+computer at 10.0.2.2, and its Mercury's audio comes over TCP (7401/7402),
+bridged to the ether's socket; remote operation goes through `adb forward`.
+Build and install the apps first (`mobile/README.md`).
+
+`TWOTEST_PORT_OFFSET=2000` moves every port the bench opens on this
+computer (ether, Mercury, remote operation, bridges), so two benches can
+run at once in different work folders.
+
 Slower scenarios run only when named (not part of a run with no names):
 
 | Name | What it checks |
@@ -42,6 +72,69 @@ Slower scenarios run only when named (not part of a run with no names):
 
 For example `... bench-run cancel chat_during resume e2e_require away_long away_weak`
 (about 30 min).
+
+## A real phone on USB
+
+`ANDROID_SERIAL` set to a phone (anything not `emulator-…`) runs the
+`android` station on that phone: the bench reaches it with `adb reverse`
+(its rig, audio and Mercury-audio ports) and `127.0.0.1` instead of the
+emulator's `10.0.2.2`, and removes the reverses afterwards. Keep the
+phone unlocked (Developer options → Stay awake): a locked phone can't
+start the app. The bench saves the phone's own `whistlestop.toml` and puts
+it back at the end (its settings turn on remote operation with the bench
+password).
+
+## Over the air: `airtest` (computer ↔ Android phone, real sound)
+
+`src/bin/airtest.rs` checks the phone's own audio path: no radio and no
+simulated band. ALPHA (`N0MAC`) is an engine on this computer with Mercury
+on its default speakers and microphone (`-x coreaudio`, ports 8350/8150);
+BRAVO (`N0PHN`) is the Android app on the phone named by `ANDROID_SERIAL`,
+its built-in Mercury on the phone's speaker and microphone (`bench.json`
+with an empty `mercury_audio`), operated remotely through `adb forward`.
+Both use Radio → none (VOX: nothing to key).
+
+```bash
+ANDROID_SERIAL=<phone> target/release/airtest ~/Desktop/mercury/source/mercury air-run [whistle] [link] [e2e] [table]
+```
+
+`whistle` (the phone's audio output starts, the computer hears nothing
+in 15 s of quiet, then hears the phone's CQ whistle), `link` (the phone
+calls the computer, then chat both ways with delivery
+confirmed), `e2e` (Prefer on both: same check code, sealed chat), `table`
+(the computer hosts a Roundtable by CQ, the phone hears the CALL and
+joins, both talk). Results: `air-run/AIR-REPORT.md`, with both Mercury
+logs beside it. Like the bench, it puts the phone's own settings back
+afterwards, and it refuses to start while port 8350 is taken.
+
+### First results (2026-11-12, MacBook Air ↔ Galaxy S23, same room)
+
+2/6. Both Mercurys came up and the phone linked to the computer in 36 s
+(MFSK, 38 bps; the phone measured the computer at 12 dB). Phone →
+computer worked: all 62 bytes it sent arrived. Computer → phone did not:
+the phone decoded the computer's ACCEPT (on the MFSK floor) but none of
+the 83 bytes of data in 13 frames, so the HELLO never completed, no chat
+could pass, and the phone declared the link lost after 240 s. The same
+direction failed for the Roundtable CALL (DATAC3) and the whistle.
+Mercury's phone input already uses Android's UNPROCESSED preset, so the
+phone's voice processing isn't the cause; the MacBook's small speakers
+into the phone's microphone are the weak direction.
+
+A second try with the computer's volume at 80 % (the first was 60 %):
+0 links. The computer heard the phone's CALL and sent its ACCEPT twice;
+the phone heard neither and fell back to calling on the MFSK floor. So
+louder doesn't help; the computer → phone path is the problem.
+
+Found on the way: Radio → none was treated as a rigctld host called
+"none" (fixed: "Radio: none (no CAT)", test `radio_none_is_no_cat`), and
+on the phone Whistlestop's own audio output (the whistle) never started:
+cpal's Android backend asks the app's JavaVM and Context for AudioManager's
+mixer bursts after opening an output stream, and panicked because the app
+had never handed them over (`ndk_context`), killing the audio thread. Fixed
+(`Core.initAndroid`, called before the engine starts); a panic while
+building any audio stream now reports its message instead of "did not
+start". Checked with `airtest whistle`: 4/4, no false alarm in 15 s of
+quiet, then the computer heard the phone's CQ whistle 3 s in (score 0.9).
 
 ## Cancel, resume, Require, away timeout (2026-11-11)
 

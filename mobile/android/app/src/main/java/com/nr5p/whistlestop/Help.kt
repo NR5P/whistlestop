@@ -90,4 +90,36 @@ enum class HelpTopic(val title: String, val body: String) {
         "Answer automatically",
         "When a search locks onto a whistle and the caller's CQ is decoded, connect at once instead of waiting for you to tap Answer.",
     ),
+    encryption(
+        "Encryption",
+        "Off (the default), Prefer (encrypt when the other station also wants to) or Require (encrypt or hang up, never plain text). Protects 1:1 chat on the link, with fresh keys every link that are never saved. Roundtables are never encrypted. NOT legal on amateur bands in the US (47 CFR 97.113(a)(4)) and most other countries.",
+    ),
+    linkE2e(
+        "Encryption on this link",
+        "Encrypted: chat on this link is sealed with keys made for this link only. Read the 6-digit code to the other operator by voice; if their screen shows the same code, no one is in the middle. If it differs, disconnect. Setting up: keys are being exchanged, and chat waits. Not encrypted: you prefer encryption, but this link is plain text.",
+    ),
+    cqKind(
+        "What the CQ is for",
+        "Chat (1:1): someone answers and you have a private link for chat. Roundtable: a group conversation on your frequency; give it a name, and others join.",
+    ),
+    roundtable(
+        "Roundtable",
+        "A group conversation on one frequency, wherever its host called it. The host sets the speed: it ramps up to the fastest mode every member can copy, and drops back if someone fades. To host one, use Call CQ → Roundtable on Operate. Roundtables are never encrypted.",
+    ),
+    tableJoin(
+        "Join a Roundtable",
+        "Join the named Roundtable on the frequency you're on (the host's frequency); Join under Heard does this for you. Off during a 1:1 link: disconnect first. Stations at a table with a different name ignore each other.",
+    ),
+    tableJoinWait(
+        "Waiting to join",
+        "You asked to join while a link was still closing. Mercury can't switch to Roundtable listening until its disconnect is done, so the join is retried every 2 s for up to 60 s. Cancel to stop waiting.",
+    ),
+    tableMembers(
+        "At the table",
+        "Who's at the table. Tap a member to pass them the floor (the talking stick): a courtesy so people take turns, not a lock. The number is how well they hear the host. Leave says goodbye and stops listening.",
+    ),
+    tableSay(
+        "Roundtable message",
+        "Goes to everyone at the table as broadcast frames. They aren't acknowledged, so a station missing part of a message asks for just that part again.",
+    ),
 }

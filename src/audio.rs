@@ -153,6 +153,20 @@ pub fn list_devices() -> (Vec<String>, Vec<String>) {
     (ins, outs)
 }
 
+/// Build a stream, turning a panic in the audio backend (cpal) into an
+/// error that says what happened, instead of a silent dead thread that the
+/// caller can only report as "did not start".
+fn built<T>(build: impl FnOnce() -> Result<T>) -> Result<T> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(build)).unwrap_or_else(|p| {
+        let why = p
+            .downcast_ref::<&str>()
+            .map(|s| s.to_string())
+            .or_else(|| p.downcast_ref::<String>().cloned())
+            .unwrap_or_else(|| "unknown".into());
+        Err(anyhow!("the audio backend failed: {why}"))
+    })
+}
+
 fn find_device(name: &str, input: bool) -> Result<cpal::Device> {
     let host = cpal::default_host();
     if name.is_empty() {
@@ -215,7 +229,7 @@ impl LiveInput {
                 stream.play()?;
                 Ok(stream)
             };
-            match build() {
+            match built(build) {
                 Ok(stream) => {
                     let _ = ready_tx.send(Ok(()));
                     while !st.load(Ordering::Relaxed) {
@@ -304,7 +318,7 @@ impl LiveOutput {
                 stream.play()?;
                 Ok((stream, rate))
             };
-            match build() {
+            match built(build) {
                 Ok((stream, rate)) => {
                     let _ = ready_tx.send(Ok(rate));
                     while !st.load(Ordering::Relaxed) {
@@ -431,7 +445,7 @@ impl Monitor {
                 stream.play()?;
                 Ok((stream, rate))
             };
-            match build() {
+            match built(build) {
                 Ok((stream, rate)) => {
                     let _ = ready_tx.send(Ok(rate));
                     while !st.load(Ordering::Relaxed) {
@@ -804,5 +818,16 @@ mod tests {
                 && hit.z > crate::whistle::TrackDetector::found(0.5),
             "{hit:?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod built_tests {
+    #[test]
+    fn a_panic_while_building_is_an_error_that_says_why() {
+        let r: anyhow::Result<()> = super::built(|| panic!("android context was not initialized"));
+        let e = r.unwrap_err().to_string();
+        assert!(e.contains("android context was not initialized"), "{e}");
+        assert_eq!(super::built(|| Ok(7)).unwrap(), 7);
     }
 }

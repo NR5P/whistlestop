@@ -312,6 +312,9 @@ pub struct State {
     pub library: Option<LibView>,
     /// The schedule slot in charge, as text.
     pub schedule_now: Option<String>,
+    /// A Roundtable we'll join as soon as Mercury is free (a link is
+    /// still closing).
+    pub table_pending: Option<String>,
 }
 
 /// Radio controls beyond the basics, polled while their window is open,
@@ -689,6 +692,17 @@ struct Station {
     hangup_at: Option<Instant>,
     /// The other station said BYE at this moment.
     bye_at: Option<Instant>,
+    /// When we started ending the link (BYE queued or DISCONNECT sent);
+    /// cleared by DISCONNECTED. See `leaving()`.
+    leaving_since: Option<Instant>,
+    /// When the last link or connect attempt ended. Mercury's closing
+    /// frames can still be on the air for a few seconds after.
+    link_ended_at: Option<Instant>,
+    /// A Roundtable to join once Mercury is free: (name, asked, last try).
+    pending_join: Option<(String, Instant, Instant)>,
+    /// An auto-answer waiting for the CQ station to stop transmitting:
+    /// (callsign, when to CONNECT).
+    answer_at: Option<(String, Instant)>,
     /// Library downloads we asked for (their offers are accepted at once).
     wanted: std::collections::HashSet<u64>,
     /// Library files we're sending on this link (fids): dropped when it ends.
@@ -872,6 +886,10 @@ impl Station {
             qsy_home: None,
             hangup_at: None,
             bye_at: None,
+            leaving_since: None,
+            link_ended_at: None,
+            pending_join: None,
+            answer_at: None,
             wanted: Default::default(),
             library_out: Default::default(),
             last_sched: None,
@@ -981,9 +999,14 @@ impl Station {
                     Err(e) => s.log(format!("⚠ Radio: {e}")),
                 }
             }
+            // "none" (the phones' Radio → None): no CAT at all, keyed by VOX.
+            let no_cat = real_ports.is_none() && s.rigctld.is_none() && addr.trim().eq_ignore_ascii_case("none");
+            if no_cat {
+                s.log("Radio: none (no CAT). Whistlestop can't read or tune the dial; key the radio with VOX.".into());
+            }
             // A freshly started rigctld needs a moment to open the radio.
             let mut last = None;
-            for _ in 0..(if s.rigctld.is_some() { 30 } else { 1 }) {
+            for _ in 0..(if no_cat { 0 } else if s.rigctld.is_some() { 30 } else { 1 }) {
                 match RigctldClient::connect(&addr).await {
                     Ok(c) => {
                         s.rig = Some(Rig::Rigctld(c));
@@ -1501,7 +1524,7 @@ impl Station {
                 if self.peer.is_some() {
                     self.hang_up("73").await?;
                 } else {
-                    self.tnc()?.command("DISCONNECT").await?;
+                    self.disconnect_now().await?;
                 }
                 self.quiet_watch();
                 self.set(|g| g.calling = None);
@@ -1544,8 +1567,12 @@ impl Station {
                 self.xfer(dir, fid, |t| t.state = XferState::Failed("cancelled".into()));
                 self.pump().await?;
             }
-            Cmd::JoinTable(name) => self.join_table(name, false).await?,
+            Cmd::JoinTable(name) => self.request_join(name).await?,
             Cmd::LeaveTable => {
+                if self.pending_join.take().is_some() {
+                    self.set(|g| g.table_pending = None);
+                    self.log("Roundtable join cancelled".into());
+                }
                 if let Some(id) = self.table_id() {
                     let me = self.mycall();
                     self.table_tx(
@@ -2064,6 +2091,24 @@ impl Station {
                         };
                     } else {
                         match v {
+                            // Freshly retuned onto it, the whistle should be
+                            // within the scan detector's ~10 Hz. Further off
+                            // means the look likely caught audio from before
+                            // the retune (a radio or sound card slow to
+                            // follow): go there and measure once more before
+                            // locking.
+                            Some(off) if off.abs() >= RECHECK_HZ && hops < 3 => {
+                                self.log(format!(
+                                    "🚂 Measured {off:+.0} Hz off after retuning; checking again there"
+                                ));
+                                s.phase = SearchPhase::Verify {
+                                    target: target + off,
+                                    from: 0,
+                                    coarse,
+                                    again: false,
+                                    hops: hops + 1,
+                                };
+                            }
                             Some(off) => {
                                 let fine = target + off;
                                 if (fine - target).abs() >= 2.0 {
@@ -2446,6 +2491,7 @@ impl Station {
                     return Ok(());
                 };
                 self.quiet_watch();
+                self.leaving_since = None;
                 self.stop_search("— linked");
                 self.link_got_mail = false;
                 if self.cq.take().is_some() {
@@ -2531,6 +2577,8 @@ impl Station {
                 // while (up to ~25 s seen on the bench).
                 self.quiet_watch_for(30.0);
                 self.link_auto = None;
+                self.leaving_since = None;
+                self.link_ended_at = Some(Instant::now());
                 // Forget the session keys (they wipe themselves on drop).
                 self.e2e = None;
                 self.ctl_queue.clear();
@@ -2650,9 +2698,20 @@ impl Station {
                 if locked {
                     self.stop_search(&format!("found {call}"));
                     if self.cfg.auto_answer && self.peer.is_none() {
-                        let me = self.mycall();
-                        self.tnc()?.command(&format!("CONNECT {me} {call}")).await?;
-                        self.log(format!("Auto-answering {call}"));
+                        // Not at once: the CQ station keys straight on with
+                        // its CALL packet (~3.7 s), and a CONNECT now puts
+                        // Mercury's first fast CALL on top of it, unheard.
+                        // The CONNECT goes when that packet has been decoded,
+                        // or after ANSWER_AFTER_CQ_S (`step_answer`).
+                        self.answer_at = Some((
+                            call.clone(),
+                            Instant::now() + Duration::from_secs_f64(ANSWER_AFTER_CQ_S),
+                        ));
+                        // Calling, like a Connect by hand: nothing else may
+                        // retune, beacon or connect while Mercury links up.
+                        self.set(|g| g.calling = Some(call.clone()));
+                        self.quiet_watch();
+                        self.log(format!("Auto-answering {call} once its CQ is off the air"));
                     }
                 }
             }
@@ -2775,7 +2834,7 @@ impl Station {
         };
         self.ctl_queue.push_back(Link::Bye { text: text.into() }.encode());
         self.pump().await?;
-        self.tnc()?.command("DISCONNECT").await?;
+        self.disconnect_now().await?;
         Ok(())
     }
 
@@ -3411,6 +3470,92 @@ impl Station {
         self.st.lock().unwrap().table.as_ref().map(|t| t.id)
     }
 
+    /// Join here, now if Mercury is free. While a link is closing (or
+    /// Mercury still says BUSY after it), the join waits and is retried,
+    /// for up to `JOIN_WAIT_S`.
+    async fn request_join(&mut self, name: String) -> anyhow::Result<()> {
+        let name = name.trim().to_string();
+        if name.is_empty() {
+            anyhow::bail!("give the Roundtable a name");
+        }
+        if let Some(peer) = self.peer.clone() {
+            if !(self.leaving() || self.bye_at.is_some()) {
+                anyhow::bail!("still linked with {peer}: end the link first, then join");
+            }
+            self.queue_join(name, "the link is still closing");
+            return Ok(());
+        }
+        match self.join_table(name.clone(), false).await {
+            Err(e) if crate::tnc::is_busy(&e) => {
+                self.queue_join(name, "Mercury is still busy closing the last link");
+                Ok(())
+            }
+            r => r,
+        }
+    }
+
+    fn queue_join(&mut self, name: String, why: &str) {
+        let now = Instant::now();
+        self.pending_join = Some((name.clone(), now, now));
+        self.set(|g| g.table_pending = Some(name.clone()));
+        let m = format!("Joining Roundtable \"{name}\" as soon as Mercury is free ({why})");
+        self.log(m.clone());
+        self.system_line(m);
+    }
+
+    /// Send a waiting auto-answer's CONNECT once the CQ is off the air,
+    /// unless the call was cancelled or another link came first.
+    async fn step_answer(&mut self) -> anyhow::Result<()> {
+        let Some((call, at)) = self.answer_at.clone() else {
+            return Ok(());
+        };
+        if Instant::now() < at {
+            return Ok(());
+        }
+        self.answer_at = None;
+        let still = self.st.lock().unwrap().calling.as_deref() == Some(call.as_str());
+        if still && self.peer.is_none() {
+            let me = self.mycall();
+            self.tnc()?.command(&format!("CONNECT {me} {call}")).await?;
+            self.log(format!("Calling {call}…"));
+        }
+        Ok(())
+    }
+
+    /// Try a waiting Roundtable join again (every 2 s once unlinked).
+    async fn step_pending_join(&mut self) -> anyhow::Result<()> {
+        let Some((name, asked, last)) = self.pending_join.clone() else {
+            return Ok(());
+        };
+        if asked.elapsed() > Duration::from_secs_f64(JOIN_WAIT_S) {
+            self.pending_join = None;
+            self.set(|g| g.table_pending = None);
+            let m = format!(
+                "Couldn't join Roundtable \"{name}\": Mercury stayed busy for {JOIN_WAIT_S:.0} s. Try Join here again."
+            );
+            self.log(format!("⚠ {m}"));
+            self.system_line(m);
+            return Ok(());
+        }
+        if self.peer.is_some() || last.elapsed() < Duration::from_secs(2) {
+            return Ok(());
+        }
+        self.pending_join = Some((name.clone(), asked, Instant::now()));
+        match self.join_table(name, false).await {
+            Ok(()) => {
+                self.pending_join = None;
+                self.set(|g| g.table_pending = None);
+            }
+            Err(e) if crate::tnc::is_busy(&e) => {}
+            Err(e) => {
+                self.pending_join = None;
+                self.set(|g| g.table_pending = None);
+                return Err(e);
+            }
+        }
+        Ok(())
+    }
+
     async fn join_table(&mut self, name: String, host: bool) -> anyhow::Result<()> {
         let name = name.trim().to_string();
         if name.is_empty() {
@@ -3561,6 +3706,13 @@ impl Station {
             TableBody::Call {
                 kind, table_name, ..
             } => {
+                // The CALL packet that follows a CQFRAME: the air is about
+                // to be free for a waiting auto-answer.
+                if let Some((call, at)) = self.answer_at.as_mut()
+                    && *call == fr.from
+                {
+                    *at = (*at).min(Instant::now() + Duration::from_millis(300));
+                }
                 let what = if *kind == CALL_TABLE {
                     format!("Roundtable \"{table_name}\"")
                 } else {
@@ -3791,6 +3943,8 @@ impl Station {
         self.step_wide().await?;
         self.step_automation().await?;
         self.step_qsy().await?;
+        self.step_pending_join().await?;
+        self.step_answer().await?;
         if self.pending_tune {
             let quiet = {
                 let g = self.st.lock().unwrap();
@@ -3947,8 +4101,22 @@ impl Station {
         Ok(())
     }
 
+    /// Ending a link, and Mercury hasn't confirmed yet. Gives up after
+    /// 45 s, in case a DISCONNECT with nothing to end never gets an answer.
+    fn leaving(&self) -> bool {
+        self.leaving_since
+            .is_some_and(|t| t.elapsed() < Duration::from_secs(45))
+    }
+
+    /// Tell Mercury to end the link (or the call in progress) now.
+    async fn disconnect_now(&mut self) -> anyhow::Result<()> {
+        self.leaving_since = Some(Instant::now());
+        self.tnc()?.command("DISCONNECT").await
+    }
+
     /// End the link politely: BYE, then DISCONNECT once Mercury has sent it.
     async fn hang_up(&mut self, text: &str) -> anyhow::Result<()> {
+        self.leaving_since = Some(Instant::now());
         self.hi_queue.push_back(Link::Bye { text: text.into() });
         self.pump().await?;
         self.hangup_at = Some(Instant::now());
@@ -3965,6 +4133,7 @@ impl Station {
                 // ABORT, not DISCONNECT: they've gone (after a QSY, maybe to
                 // another frequency), and Mercury would otherwise hold a
                 // DISCONNECT "until delivered", polling nobody for minutes.
+                self.leaving_since = Some(Instant::now());
                 self.tnc()?.command("ABORT").await?;
             }
         }
@@ -3977,7 +4146,7 @@ impl Station {
                 || at.elapsed() > Duration::from_secs(6)
             {
                 self.hangup_at = None;
-                self.tnc()?.command("DISCONNECT").await?;
+                self.disconnect_now().await?;
             }
         }
         if let Some((home, at, since)) = self.qsy_home
@@ -4501,7 +4670,11 @@ impl Station {
             let g = self.st.lock().unwrap();
             g.tx || g.calling.is_some() || g.incoming_call
         };
-        if busy || self.peer.is_some() || Instant::now() < self.watch_quiet_until {
+        let closing = self.leaving()
+            || self
+                .link_ended_at
+                .is_some_and(|t| t.elapsed() < Duration::from_secs_f64(WATCH_AFTER_LINK_S));
+        if busy || closing || self.peer.is_some() || Instant::now() < self.watch_quiet_until {
             self.watch_pending = None;
             return;
         }
@@ -4561,6 +4734,20 @@ impl Station {
         }
     }
 }
+
+/// Whistle watch stays off this long after a link (or connect attempt)
+/// ends, while the other station's Mercury finishes its disconnect.
+pub const WATCH_AFTER_LINK_S: f64 = 10.0;
+
+/// Longest an auto-answer waits after the CQFRAME before CONNECT: the CQ
+/// station's CALL packet (one DATAC3 frame, ~3.7 s) follows it on the air.
+pub const ANSWER_AFTER_CQ_S: f64 = 4.5;
+/// A fine correction at least this big right after retuning onto a whistle
+/// is measured again before locking (the scan detector is good to ~10 Hz).
+pub const RECHECK_HZ: f64 = 25.0;
+
+/// How long a Roundtable join waits for Mercury to be free.
+pub const JOIN_WAIT_S: f64 = 60.0;
 
 /// May a link move from `home` to `hz`? (Settings → QSY requests.)
 pub fn qsy_verdict(cfg: &Config, home: f64, hz: f64) -> Result<(), String> {
@@ -4655,6 +4842,36 @@ fn mercury_version_reply() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Radio "none" (the phones' Radio → None, VOX keying) is no radio, not
+    /// a rigctld host called "none".
+    #[test]
+    fn radio_none_is_no_cat() {
+        let h = spawn(|| {});
+        let mut cfg = Config {
+            callsign: "N0NONE".into(),
+            demo: false,
+            rigctld: "none".into(),
+            // Nothing listens here: the modem stays down, which is fine.
+            mercury_port: 1,
+            ..Default::default()
+        };
+        cfg.sdr.enabled = false;
+        cfg.sdr.wide_search = false;
+        h.send(Cmd::Start(cfg));
+        let t = Instant::now();
+        let log = loop {
+            let log: Vec<String> = h.state.lock().unwrap().log.iter().map(|l| l.1.clone()).collect();
+            if log.iter().any(|l| l.starts_with("Radio: none")) || t.elapsed() > Duration::from_secs(10) {
+                break log;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        };
+        h.send(Cmd::Stop);
+        assert!(log.iter().any(|l| l.starts_with("Radio: none (no CAT)")), "{log:#?}");
+        assert!(!log.iter().any(|l| l.contains("rigctld at none")), "{log:#?}");
+        assert!(!h.state.lock().unwrap().rig_ok);
+    }
 
     /// Demo on two real Mercury modems (skipped when Mercury isn't
     /// installed): search finds K7BOT's real whistle, Mercury decodes its
@@ -4971,6 +5188,106 @@ mod tests {
         });
         h.send(Cmd::Stop);
         std::fs::remove_dir_all(&cfg.download_dir).ok();
+    }
+
+    /// Auto-answering a CQ that Search found is a call in progress, like
+    /// Connect by hand: `calling` is set until the link comes up, so
+    /// whistle watch, beacons, schedules and SDR auto-tune leave the radio
+    /// alone while Mercury links up.
+    #[test]
+    fn demo_auto_answer_marks_calling() {
+        let h = spawn(|| {});
+        let mut cfg = Config {
+            demo: true,
+            demo_real_mercury: false,
+            callsign: "N0AUTO".into(),
+            auto_answer: true,
+            ..Default::default()
+        };
+        cfg.sdr.enabled = false;
+        h.send(Cmd::Start(cfg));
+        let t = Instant::now();
+        while !h.state.lock().unwrap().mercury_ok {
+            assert!(
+                t.elapsed() < Duration::from_secs(10),
+                "Mercury didn't start"
+            );
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        h.send(Cmd::StartSearch(SearchScope::CurrentBand));
+        let mut seen_calling = false;
+        while t.elapsed() < Duration::from_secs(150) {
+            {
+                let g = h.state.lock().unwrap();
+                if g.log.iter().any(|l| l.1.contains("Auto-answering K7BOT")) && g.link.is_none() {
+                    assert_eq!(
+                        g.calling.as_deref(),
+                        Some("K7BOT"),
+                        "auto-answer must mark the call"
+                    );
+                    seen_calling = true;
+                }
+                if g.link.as_ref().is_some_and(|l| l.peer == "K7BOT") {
+                    assert!(g.calling.is_none(), "calling cleared once linked");
+                    break;
+                }
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert!(seen_calling, "never saw the auto-answer call in progress");
+        h.send(Cmd::Stop);
+    }
+
+    /// Join a Roundtable right after hanging up: Mercury refuses the mode
+    /// change (BUSY) until its disconnect is done, so the join waits and
+    /// goes through by itself instead of failing.
+    #[test]
+    fn demo_join_table_waits_for_hang_up() {
+        let h = spawn(|| {});
+        let mut cfg = Config {
+            demo: true,
+            demo_real_mercury: false,
+            callsign: "N0JOIN".into(),
+            auto_answer: true,
+            ..Default::default()
+        };
+        cfg.sdr.enabled = false;
+        h.send(Cmd::Start(cfg));
+        let wait = |what: &str, secs: u64, f: &dyn Fn(&State) -> bool| {
+            let t = Instant::now();
+            while t.elapsed() < Duration::from_secs(secs) {
+                if f(&h.state.lock().unwrap()) {
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            let g = h.state.lock().unwrap();
+            let log: Vec<_> = g.log.iter().map(|l| l.1.clone()).collect();
+            panic!("timed out waiting for {what}; log:\n{}", log.join("\n"));
+        };
+        wait("Mercury", 10, &|s| s.mercury_ok);
+        // Joining mid-link (not hanging up) is refused with a clear reason.
+        h.send(Cmd::StartSearch(SearchScope::CurrentBand));
+        wait("link with K7BOT", 150, &|s| {
+            s.link.as_ref().is_some_and(|l| l.peer == "K7BOT")
+        });
+        h.send(Cmd::JoinTable("Evening Table".into()));
+        wait("refusal", 5, &|s| {
+            s.log
+                .iter()
+                .any(|l| l.1.contains("end the link first, then join"))
+        });
+        // Hang up, and join straight away.
+        h.send(Cmd::Disconnect);
+        h.send(Cmd::JoinTable("Evening Table".into()));
+        wait("join queued", 5, &|s| {
+            s.table_pending.as_deref() == Some("Evening Table")
+        });
+        wait("joined after the hang-up", 30, &|s| {
+            s.link.is_none() && s.table.as_ref().is_some_and(|t| t.name == "Evening Table")
+        });
+        assert!(h.state.lock().unwrap().table_pending.is_none());
+        h.send(Cmd::Stop);
     }
 
     /// Depot in the demo: mail posted for K7BOT waits in Departures, goes

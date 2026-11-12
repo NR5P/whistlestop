@@ -69,6 +69,14 @@ device too):
 cd mobile/android && ANDROID_SERIAL=emulator-5554 ./gradlew connectedDebugAndroidTest
 ```
 
+The app icons are the desktop mark (`src/gui/icon.rs`), drawn full-bleed
+for phones; regenerate them after changing it:
+
+```bash
+whistlestop icon-png mobile/ios/Whistlestop/Assets.xcassets/AppIcon.appiconset/AppIcon.png --size 1024 --square 1.0
+whistlestop icon-png mobile/android/app/src/main/res/mipmap-xxxhdpi/ic_launcher_foreground.png --size 432 --square 0.667
+```
+
 Without `build-mercury.sh` the apps still build; they then need a Mercury
 elsewhere on the network (Settings → Modem) unless in Demo mode. Android's
 Mercury is arm64 only (its Hamlib ships for arm64); the x86_64 library,
@@ -83,6 +91,9 @@ for Intel emulators, goes without.
   chat → reply → disconnect; search → lock → Answer → link; Depot mail;
   Help mode. Launched with `WS_UITEST=1` / `--ez ws_uitest true`, the app
   starts a fresh demo station in a scratch folder.
+- The two-station bench with real Mercury (`docs/BENCH.md`, "The real apps
+  as stations"): `twotest --a=ios --b=android` and so on, each app with its
+  built-in Mercury on the simulated band (`core/src/bench.rs`).
 
 ## Android USB radios
 
@@ -101,12 +112,13 @@ UI tests; not yet on a real radio.
 
 ## Status
 
-Working on both: search, whistle, Heard/Answer, CQ, connect, chat, QSY
-request, Away, the Depot, Log, settings, Help mode, the waterfall; Mercury
+Working on both: search, whistle, Heard/Answer, CQ, connect, chat,
+Roundtables (join, host via Call CQ, talk, pass the floor, leave),
+encryption (Settings, and the check code on the link), QSY request, Away, the Depot, Log, settings, Help mode, the waterfall; Mercury
 embedded and serving its TNC to the engine (checked in the iPhone simulator:
 audio open, engine connected, callsign and listen mode set).
 
-Not yet: files and the library, Roundtables, the schedule, radio controls,
+Not yet: files and the library, the schedule, radio controls,
 tuner/SWR, the RTL-SDR, remote operation of a desktop station,
 choosing the sound device in the app, and a foreground service so Android
 keeps running with the screen off.

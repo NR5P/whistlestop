@@ -90,4 +90,55 @@ class WhistlestopUiTest {
         rule.onNode(hasContentDescription("Help: Search")).performScrollTo().performClick()
         rule.waitUntilAtLeastOneExists(hasText("Steps the radio", substring = true), 5_000)
     }
+
+    /** Tap a button by its text, scrolling to it when it's in a scrolling screen. */
+    private fun tap(text: String) {
+        val n = rule.onNode(hasText(text) and androidx.compose.ui.test.hasClickAction())
+        runCatching { n.performScrollTo() }
+        n.performClick()
+    }
+
+    @Test
+    fun roundtableJoinTalkAndLeave() {
+        tap("Chat")
+        tap("Roundtable")
+        field("Roundtable name").performTextInput("Evening Table")
+        tap("Join here")
+        rule.waitUntilAtLeastOneExists(hasText("Evening Table"), 30_000)
+        // K7BOT joins and greets the table.
+        rule.waitUntilAtLeastOneExists(hasText("Good evening all", substring = true), 90_000)
+        field("Say something to the table").performTextInput("good evening from Android")
+        rule.onNode(hasContentDescription("Send to the table")).performClick()
+        rule.waitUntilAtLeastOneExists(hasText("good evening from Android", substring = true), 10_000)
+        rule.waitUntilAtLeastOneExists(hasText("solid copy here", substring = true), 90_000)
+        rule.onNode(hasText("Leave")).performClick()
+        rule.waitUntilAtLeastOneExists(hasText("Join here"), 30_000)
+    }
+
+    @Test
+    fun hostRoundtableByCq() {
+        rule.onAllNodes(hasText("Roundtable") and androidx.compose.ui.test.hasClickAction()).onFirst().performScrollTo().performClick()
+        field("Roundtable name").performScrollTo().performTextInput("Phone Table")
+        tap("Whistle and host the table")
+        // Hosting switches to the table; K7BOT hears the call and joins.
+        rule.waitUntilAtLeastOneExists(hasText("you host"), 30_000)
+        rule.waitUntilAtLeastOneExists(hasText("Good evening all", substring = true), 150_000)
+    }
+
+    @Test
+    fun encryptionShowsCheckCode() {
+        tap("Settings")
+        rule.onNode(hasContentDescription("Encryption Prefer")).performScrollTo().performClick()
+        // Leaving Off asks to confirm the legal warning.
+        rule.waitUntilAtLeastOneExists(hasText("Turn on encryption?"), 5_000)
+        rule.onNode(hasText("Turn on")).performClick()
+        tap("Save")
+        tap("Operate")
+        field("Callsign").performScrollTo().performTextInput("K7BOT")
+        rule.onNode(hasText("Connect") and androidx.compose.ui.test.hasClickAction()).performScrollTo().performClick()
+        rule.waitUntilAtLeastOneExists(hasText("Linked with K7BOT"), 60_000)
+        // K7BOT prefers encryption too: the link is sealed and shows its check code.
+        rule.waitUntilAtLeastOneExists(hasText("🔒 Encrypted"), 120_000)
+        rule.waitUntilAtLeastOneExists(hasContentDescription("check code", substring = true), 5_000)
+    }
 }

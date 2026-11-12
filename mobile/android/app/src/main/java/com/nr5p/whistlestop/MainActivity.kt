@@ -28,6 +28,7 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -122,21 +123,34 @@ class MainActivity : ComponentActivity() {
 
 private enum class Tab(val label: String) { Operate("Operate"), Chat("Chat"), Depot("Depot"), Log("Log"), Settings("Settings") }
 
+@OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
 @Composable
 private fun App(station: Station) {
     val s by station.state.collectAsState()
     var tab by rememberSaveable { mutableStateOf(Tab.Operate) }
     var lastPeer by remember { mutableStateOf<String?>(null) }
+    // The Chat tab shows the 1:1 link's chat or the Roundtable.
+    var tablePane by rememberSaveable { mutableStateOf(false) }
     LaunchedEffect(s.link?.peer) {
-        if (s.link?.peer != null && s.link?.peer != lastPeer) tab = Tab.Chat
+        if (s.link?.peer != null && s.link?.peer != lastPeer) { tab = Tab.Chat; tablePane = false }
         lastPeer = s.link?.peer
+    }
+    val tableName = s.table?.name ?: s.tablePending
+    LaunchedEffect(tableName) {
+        if (tableName != null) { tab = Tab.Chat; tablePane = true }
     }
     Column(Modifier.fillMaxSize().background(C.bg).systemBarsPadding()) {
         StationHeader(station, s)
         Box(Modifier.weight(1f)) {
             when (tab) {
                 Tab.Operate -> OperateScreen(station, s)
-                Tab.Chat -> ChatScreen(station, s)
+                Tab.Chat -> Column {
+                    SecondaryTabRow(selectedTabIndex = if (tablePane) 1 else 0, containerColor = C.panel, contentColor = C.brass) {
+                        Tab(selected = !tablePane, onClick = { tablePane = false }, text = { Text("1:1 chat") })
+                        Tab(selected = tablePane, onClick = { tablePane = true }, text = { Text(if (s.table != null) "Roundtable ●" else "Roundtable") })
+                    }
+                    if (tablePane) TableScreen(station, s) else ChatScreen(station, s)
+                }
                 Tab.Depot -> DepotScreen(station, s)
                 Tab.Log -> LogScreen(s)
                 Tab.Settings -> SettingsScreen(station, s)
@@ -226,6 +240,7 @@ private fun StationHeader(station: Station, s: EngineState) {
 
 private val BANDS = listOf("160m", "80m", "60m", "40m", "30m", "20m", "17m", "15m", "12m", "10m")
 
+@OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
 @Composable
 private fun OperateScreen(station: Station, s: EngineState) {
     val rows by station.rows.collectAsState()
@@ -234,6 +249,8 @@ private fun OperateScreen(station: Station, s: EngineState) {
     var call by rememberSaveable { mutableStateOf("") }
     var band by rememberSaveable { mutableStateOf("20m") }
     var bandMenu by remember { mutableStateOf(false) }
+    var cqTable by rememberSaveable { mutableStateOf(false) }
+    var tableName by rememberSaveable { mutableStateOf("") }
     Column(
         Modifier.fillMaxSize().verticalScroll(rememberScrollState()).imePadding().padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
@@ -301,7 +318,14 @@ private fun OperateScreen(station: Station, s: EngineState) {
                         Text(h.call, color = C.text, fontWeight = FontWeight.SemiBold)
                         Text("${Fmt.dial(h.dialHz)} kHz · ${h.what} · ${Fmt.utc(h.at)}", color = C.dim, fontSize = 12.sp, maxLines = 1)
                     }
-                    BrassButton("Answer", Modifier.width(110.dp), enabled = s.link == null) {
+                    val table = h.table
+                    if (table != null) {
+                        BrassButton("Join", Modifier.width(110.dp).semantics { contentDescription = "Join $table" }, color = C.teal,
+                            enabled = s.link == null && s.table == null) {
+                            station.setFreq(h.dialHz / 1000)
+                            station.joinTable(table)
+                        }
+                    } else BrassButton("Answer", Modifier.width(110.dp), enabled = s.link == null) {
                         station.setFreq(h.dialHz / 1000)
                         station.connect(h.call)
                     }
@@ -313,7 +337,18 @@ private fun OperateScreen(station: Station, s: EngineState) {
                 Text("Cycle ${s.cq.cycle} of ${s.cq.cycles} · ${s.cq.phase}", color = C.text, maxLines = 1, minLines = 1)
                 BrassButton("Stop CQ", color = C.red) { station.stopCq() }
             } else {
-                BrassButton("Whistle and call CQ", enabled = s.link == null && s.mercuryOk) { station.callCq() }
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    SecondaryTabRow(selectedTabIndex = if (cqTable) 1 else 0, containerColor = C.card, contentColor = C.brass, modifier = Modifier.weight(1f)) {
+                        Tab(selected = !cqTable, onClick = { cqTable = false }, text = { Text("Chat (1:1)") })
+                        Tab(selected = cqTable, onClick = { cqTable = true }, text = { Text("Roundtable") })
+                    }
+                    HelpButton(HelpTopic.cqKind)
+                }
+                if (cqTable) Field(tableName, { tableName = it }, "Roundtable name", Modifier.fillMaxWidth(), caps = false)
+                BrassButton(
+                    if (cqTable) "Whistle and host the table" else "Whistle and call CQ",
+                    enabled = s.link == null && s.mercuryOk && (!cqTable || tableName.isNotBlank()),
+                ) { station.callCq(if (cqTable) tableName else null) }
             }
         }
         WCard("Connect", HelpTopic.connect) {
@@ -346,7 +381,28 @@ private fun LinkCard(station: Station, link: Link, qsyNote: String?) {
             }
             HelpButton(HelpTopic.qsy)
         }
+        if (link.e2e != E2e.Off) E2eBadge(link.e2e)
         if (!qsyNote.isNullOrEmpty()) Text(qsyNote, color = C.brass, fontSize = 12.sp)
+    }
+}
+
+/** Encryption on the link: setting up, the check code, or plain text. */
+@Composable
+private fun E2eBadge(e2e: E2e) {
+    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
+        when (e2e) {
+            E2e.Off -> {}
+            E2e.Negotiating -> Text("⏳ Setting up encryption…", color = C.brass, fontSize = 14.sp, modifier = Modifier.weight(1f))
+            is E2e.Encrypted -> {
+                Text("🔒 Encrypted", color = C.teal, fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
+                Text(
+                    "code ${e2e.sas}", color = C.text, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold, fontSize = 16.sp,
+                    modifier = Modifier.weight(1f).semantics { contentDescription = "check code ${e2e.sas.toList().joinToString(" ")}" },
+                )
+            }
+            is E2e.Plain -> Text("🔓 Not encrypted: ${e2e.why}", color = C.dim, fontSize = 12.sp, maxLines = 2, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+        }
+        HelpButton(HelpTopic.linkE2e)
     }
 }
 
@@ -365,6 +421,9 @@ private fun ChatScreen(station: Station, s: EngineState) {
             HelpButton(HelpTopic.chat)
             if (s.link != null) TextButton(onClick = { station.disconnect() }) { Text("Disconnect") }
         }
+        s.link?.e2e?.takeIf { it != E2e.Off }?.let {
+            Box(Modifier.fillMaxWidth().background(C.panel).padding(horizontal = 16.dp, vertical = 4.dp)) { E2eBadge(it) }
+        }
         LazyColumn(Modifier.weight(1f).fillMaxWidth(), state = list, contentPadding = androidx.compose.foundation.layout.PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             itemsIndexed(s.chat) { _, line -> Bubble(line) }
         }
@@ -374,6 +433,105 @@ private fun ChatScreen(station: Station, s: EngineState) {
                 onClick = { if (text.isNotBlank()) { station.chat(text.trim()); text = "" } },
                 enabled = s.link != null && text.isNotBlank(),
             ) { Icon(Icons.AutoMirrored.Filled.Send, "Send", tint = if (s.link != null && text.isNotBlank()) C.brass else C.dim) }
+        }
+    }
+}
+
+// --------------------------------------------------------------- Roundtable
+
+@Composable
+private fun TableScreen(station: Station, s: EngineState) {
+    val t = s.table
+    if (t == null) {
+        var name by rememberSaveable { mutableStateOf("") }
+        Column(
+            Modifier.fillMaxSize().verticalScroll(rememberScrollState()).imePadding().padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            WCard("Roundtable", HelpTopic.roundtable) {
+                Text("A group conversation on one frequency. No fixed channel: it's wherever its host calls it.", color = C.text)
+                Text("The host sets the speed: it ramps up to the fastest mode every member can copy, and drops back if someone fades.", color = C.dim, fontSize = 12.sp)
+            }
+            val pending = s.tablePending
+            WCard("Join", if (pending != null) HelpTopic.tableJoinWait else HelpTopic.tableJoin) {
+                if (pending != null) {
+                    Text("Joining “$pending” as soon as Mercury is free (the last link is still closing)…", color = C.brass, minLines = 3, maxLines = 3)
+                    QuietButton("Cancel") { station.leaveTable() }
+                } else {
+                    Field(name, { name = it }, "Roundtable name", Modifier.fillMaxWidth(), caps = false)
+                    BrassButton("Join here", enabled = s.link == null && name.isNotBlank()) { station.joinTable(name); name = "" }
+                    Text(
+                        if (s.link != null) "Disconnect the 1:1 link first."
+                        else "Tune to the host's frequency first, or tap Join under Heard on Operate.",
+                        color = C.dim, fontSize = 12.sp,
+                    )
+                }
+            }
+            Text("To host one, use Call CQ → Roundtable on the Operate tab.", color = C.dim, fontSize = 12.sp)
+        }
+        return
+    }
+    var text by rememberSaveable { mutableStateOf("") }
+    val list = rememberLazyListState()
+    LaunchedEffect(t.lines.size) { if (t.lines.isNotEmpty()) list.animateScrollToItem(t.lines.size - 1) }
+    Column(Modifier.fillMaxSize().imePadding()) {
+        Column(Modifier.fillMaxWidth().background(C.panel).padding(horizontal = 16.dp, vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(t.name, color = C.brass, fontWeight = FontWeight.Bold, fontSize = 20.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Spacer(Modifier.width(8.dp))
+                Text(if (t.host) "you host" else "member", color = C.dim, fontSize = 12.sp, modifier = Modifier.weight(1f))
+                HelpButton(HelpTopic.tableMembers)
+                TextButton(onClick = { station.leaveTable() }) { Text("Leave") }
+            }
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(t.mode, color = C.teal, fontSize = 12.sp, fontFamily = FontFamily.Monospace)
+                t.floor?.takeIf { it.isNotEmpty() }?.let { Text("floor: $it", color = C.brass, fontSize = 12.sp) }
+            }
+            Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                Text("${s.mycall} (you)", color = C.text, fontSize = 12.sp, fontWeight = FontWeight.SemiBold,
+                    modifier = Modifier.background(C.cardHi, CircleShape).padding(horizontal = 10.dp, vertical = 5.dp))
+                t.members.keys.sorted().forEach { call ->
+                    val snr = t.members[call]?.let { " %+d dB".format(it) } ?: ""
+                    Text("$call$snr", color = C.text, fontSize = 12.sp, fontFamily = FontFamily.Monospace,
+                        modifier = Modifier
+                            .background(if (t.floor == call) C.brass.copy(alpha = 0.3f) else C.cardHi, CircleShape)
+                            .clickable { station.passFloor(call) }
+                            .padding(horizontal = 10.dp, vertical = 5.dp)
+                            .semantics { contentDescription = "$call$snr. Tap to pass the floor" })
+                }
+            }
+        }
+        LazyColumn(Modifier.weight(1f).fillMaxWidth(), state = list, contentPadding = androidx.compose.foundation.layout.PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            itemsIndexed(t.lines) { _, l ->
+                Row {
+                    Text(Fmt.utc(l.at), color = C.dim, fontSize = 11.sp, fontFamily = FontFamily.Monospace, modifier = Modifier.width(52.dp))
+                    if (l.from.isEmpty()) Text(l.text, color = C.dim, fontSize = 14.sp, fontStyle = androidx.compose.ui.text.font.FontStyle.Italic)
+                    else Text(
+                        androidx.compose.ui.text.buildAnnotatedString {
+                            pushStyle(androidx.compose.ui.text.SpanStyle(color = if (l.from == s.mycall) C.brass else C.teal, fontWeight = FontWeight.Bold))
+                            append(l.from)
+                            pop()
+                            append("  ")
+                            append(l.text)
+                        },
+                        color = C.text, fontSize = 14.sp,
+                    )
+                }
+            }
+        }
+        Column(Modifier.fillMaxWidth().background(C.panel).padding(horizontal = 12.dp, vertical = 6.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Field(text, { text = it }, "Say something to the table", Modifier.weight(1f), caps = false)
+                IconButton(
+                    onClick = { if (text.isNotBlank()) { station.tableSay(text.trim()); text = "" } },
+                    enabled = text.isNotBlank(),
+                ) { Icon(Icons.AutoMirrored.Filled.Send, "Send to the table", tint = if (text.isNotBlank()) C.brass else C.dim) }
+                HelpButton(HelpTopic.tableSay)
+            }
+            Text(
+                if (t.sendingEtaS > 0) "On air: ${Fmt.ago(t.sendingEtaS)} left" else "Broadcast to everyone at the table",
+                color = C.dim, fontSize = 11.sp, maxLines = 1,
+            )
         }
     }
 }
@@ -538,6 +696,7 @@ private fun SettingsScreen(station: Station, s: EngineState) {
     val cfg by station.config.collectAsState()
     val help = LocalHelp.current
     var saved by remember { mutableStateOf(false) }
+    var e2eAsk by remember { mutableStateOf<String?>(null) }
     LaunchedEffect(saved) { if (saved) { kotlinx.coroutines.delay(1500); saved = false } }
     fun str(k: String) = (cfg[k] as? JsonPrimitive)?.content ?: ""
     fun set(k: String, v: String) = station.edit { it[k] = JsonPrimitive(v) }
@@ -572,6 +731,32 @@ private fun SettingsScreen(station: Station, s: EngineState) {
             Field(str("mercury_port"), { v -> v.toIntOrNull()?.let { n -> station.edit { it["mercury_port"] = JsonPrimitive(n) } } },
                 "Port", Modifier.fillMaxWidth(), caps = false, number = true)
         }
+        WCard("Encryption", HelpTopic.encryption) {
+            val e2e = str("e2e").ifEmpty { "off" }
+            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                listOf("off" to "Off", "prefer" to "Prefer", "require" to "Require").forEach { (k, label) ->
+                    val on = e2e == k
+                    Text(
+                        label, color = if (on) C.ink else C.text, fontWeight = FontWeight.SemiBold, textAlign = TextAlign.Center,
+                        modifier = Modifier.weight(1f)
+                            .background(if (on) C.brass else C.cardHi, RoundedCornerShape(8.dp))
+                            .clickable { if (e2e == "off" && k != "off") e2eAsk = k else set("e2e", k) }
+                            .padding(vertical = 8.dp)
+                            .semantics { contentDescription = "Encryption $label"; stateDescription = if (on) "selected" else "" },
+                    )
+                }
+            }
+            Text(
+                when (e2e) {
+                    "prefer" -> "Encrypt when the other station does too; otherwise plain text."
+                    "require" -> "Encrypt or hang up: never plain text."
+                    else -> "Links are plain text (the default)."
+                },
+                color = C.dim, fontSize = 12.sp, minLines = 2, maxLines = 2,
+            )
+            Text("⚠ $E2E_LEGAL_WARNING", color = C.red, fontSize = 12.sp)
+            Text("Roundtables are never encrypted. Keys are made per link and never saved. Takes effect when you tap Save, from the next link.", color = C.dim, fontSize = 12.sp)
+        }
         BrassButton(if (saved) "Saved" else "Save") {
             // The engine restarts the station itself when a connection
             // setting (demo, modem, radio, callsign) changed.
@@ -584,7 +769,19 @@ private fun SettingsScreen(station: Station, s: EngineState) {
             Text("Whistlestop is free software (GPL-3.0). It includes the Mercury modem by Rhizomatica.", color = C.dim, fontSize = 12.sp)
         }
     }
+    e2eAsk?.let { want ->
+        androidx.compose.material3.AlertDialog(
+            onDismissRequest = { e2eAsk = null },
+            title = { Text("Turn on encryption?") },
+            text = { Text(E2E_LEGAL_WARNING) },
+            confirmButton = { TextButton(onClick = { set("e2e", want); e2eAsk = null }) { Text("Turn on", color = C.red) } },
+            dismissButton = { TextButton(onClick = { e2eAsk = null }) { Text("Cancel") } },
+        )
+    }
 }
+
+/** The engine's `e2e::LEGAL_WARNING`, word for word. */
+private const val E2E_LEGAL_WARNING = "Encryption is NOT legal on amateur radio bands in the US (47 CFR 97.113(a)(4)) and in most other countries: amateur transmissions may not be encoded to obscure their meaning. Use it only where it is lawful (for example on non-amateur frequencies you are licensed for, or over a wired or test link)."
 
 // ------------------------------------------------------------------- Radio
 

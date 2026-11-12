@@ -50,7 +50,14 @@ final class WhistlestopUITests: XCTestCase {
         body.tap()
         body.typeText("See you on 20m tonight.")
         app.buttons["Post"].tap()
-        app.buttons["Departures"].tap()
+        // A tap while the mail sheet is still closing can be lost: wait for
+        // it to go, then make sure Departures took.
+        XCTAssert(to.waitForNonExistence(timeout: 5), "the mail form didn't close")
+        let departures = app.buttons["Departures"]
+        for _ in 0..<3 where !departures.isSelected {
+            departures.tap()
+            _ = departures.wait(for: \.isSelected, toEqual: true, timeout: 2)
+        }
         let row = app.descendants(matching: .any).containing(NSPredicate(format: "label CONTAINS 'To K7BOT'")).firstMatch
         waitFor(row, 10, "the mail in Departures")
     }
@@ -71,5 +78,62 @@ final class WhistlestopUITests: XCTestCase {
         waitFor(q, 5, "the help button")
         q.tap()
         waitFor(app.staticTexts["Search"].firstMatch, 5, "the explanation")
+    }
+
+    func testRoundtableJoinTalkAndLeave() {
+        app.tabBars.buttons["Chat"].tap()
+        app.buttons["Roundtable"].firstMatch.tap()
+        let name = app.textFields["Roundtable name"]
+        waitFor(name, 5, "the name field")
+        name.tap()
+        name.typeText("Evening Table")
+        app.buttons["Join here"].tap()
+        waitFor(app.staticTexts["Evening Table"], 30, "the table")
+        // K7BOT joins and greets the table.
+        let hello = app.staticTexts.containing(NSPredicate(format: "label CONTAINS 'Good evening all'")).firstMatch
+        waitFor(hello, 90, "K7BOT's greeting")
+        let box = app.textFields["Say something to the table"]
+        box.tap()
+        box.typeText("good evening from the iPhone")
+        app.buttons["Send to the table"].tap()
+        let copy = app.staticTexts.containing(NSPredicate(format: "label CONTAINS 'solid copy here'")).firstMatch
+        waitFor(copy, 90, "K7BOT's reply at the table")
+        app.buttons["Leave"].tap()
+        waitFor(app.buttons["Join here"], 30, "leaving the table")
+    }
+
+    func testHostRoundtableByCq() {
+        app.buttons["Roundtable"].firstMatch.tap()
+        let name = app.textFields["Roundtable name"]
+        waitFor(name, 5, "the name field")
+        name.tap()
+        name.typeText("Phone Table")
+        app.buttons["Whistle and host the table"].tap()
+        // Hosting switches to the table; K7BOT hears the call and joins.
+        waitFor(app.staticTexts["you host"], 30, "hosting")
+        let hello = app.staticTexts.containing(NSPredicate(format: "label CONTAINS 'Good evening all'")).firstMatch
+        waitFor(hello, 150, "K7BOT joining")
+    }
+
+    func testEncryptionShowsCheckCode() {
+        app.tabBars.buttons["Settings"].tap()
+        let prefer = app.buttons["Prefer"]
+        for _ in 0..<6 where !prefer.isHittable { app.swipeUp() }
+        prefer.tap()
+        // Leaving Off asks to confirm the legal warning.
+        let turnOn = app.alerts.buttons["Turn on"]
+        waitFor(turnOn, 5, "the legal warning")
+        turnOn.tap()
+        app.buttons["Save"].tap()
+        app.tabBars.buttons["Operate"].tap()
+        let call = app.textFields["Callsign"]
+        call.tap()
+        call.typeText("K7BOT")
+        app.buttons["Connect"].firstMatch.tap()
+        waitFor(app.staticTexts["Linked with K7BOT"], 60, "the link")
+        // K7BOT prefers encryption too: the link is sealed and shows its check code.
+        waitFor(app.staticTexts["Encrypted"], 120, "encryption")
+        let code = app.staticTexts.containing(NSPredicate(format: "label BEGINSWITH 'check code'")).firstMatch
+        waitFor(code, 5, "the check code")
     }
 }

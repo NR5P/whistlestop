@@ -50,7 +50,10 @@ struct RootView: View {
         }
         .background(Theme.bg.ignoresSafeArea())
         .onChange(of: core.state.link?.peer) { _, peer in
-            if peer != nil { tab = .chat }
+            if peer != nil { tab = .chat; core.chatPane = .link }
+        }
+        .onChange(of: core.state.table?.name ?? core.state.tablePending) { _, name in
+            if name != nil { tab = .chat; core.chatPane = .table }
         }
     }
 }

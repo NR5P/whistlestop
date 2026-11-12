@@ -32,6 +32,24 @@ pub struct Tnc {
 
 const REPLIES: [&str; 3] = ["OK", "WRONG", "BUSY"];
 
+/// Mercury answered BUSY: it is in (or still closing) an ARQ link and
+/// won't take this command yet. Worth trying again once it's free.
+#[derive(Debug)]
+pub struct Busy(pub String);
+
+impl std::fmt::Display for Busy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Mercury: {:?} -> BUSY", self.0)
+    }
+}
+
+impl std::error::Error for Busy {}
+
+/// Was this error Mercury saying BUSY?
+pub fn is_busy(e: &anyhow::Error) -> bool {
+    e.downcast_ref::<Busy>().is_some()
+}
+
 async fn dial(addr: &str) -> Result<TcpStream> {
     let s = tokio::time::timeout(Duration::from_secs(3), TcpStream::connect(addr))
         .await
@@ -148,6 +166,9 @@ impl Tnc {
             .await
             .map_err(|_| anyhow!("Mercury did not reply to {cmd:?}"))?
             .ok_or_else(|| anyhow!("Mercury connection closed"))?;
+        if r == "BUSY" {
+            return Err(Busy(cmd.to_string()).into());
+        }
         if r != "OK" {
             bail!("Mercury: {cmd:?} -> {r}");
         }

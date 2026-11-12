@@ -7,6 +7,8 @@ struct OperateView: View {
     @State private var khz = ""
     @State private var call = ""
     @State private var band = "20m"
+    @State private var cqTable = false
+    @State private var tableName = ""
 
     private let bands = ["160m", "80m", "60m", "40m", "30m", "20m", "17m", "15m", "12m", "10m"]
 
@@ -108,13 +110,24 @@ struct OperateView: View {
                                         .font(.caption).foregroundStyle(Theme.dim).lineLimit(1)
                                 }
                                 Spacer()
-                                Button("Answer") {
-                                    core.setFreq(khz: h.dialHz / 1000)
-                                    core.connect(h.call)
+                                if let t = h.table {
+                                    Button("Join") {
+                                        core.setFreq(khz: h.dialHz / 1000)
+                                        core.joinTable(t)
+                                    }
+                                    .buttonStyle(BrassButtonStyle(color: Theme.teal))
+                                    .frame(width: 110)
+                                    .disabled(s.link != nil || s.table != nil)
+                                    .accessibilityLabel("Join \(t)")
+                                } else {
+                                    Button("Answer") {
+                                        core.setFreq(khz: h.dialHz / 1000)
+                                        core.connect(h.call)
+                                    }
+                                    .buttonStyle(BrassButtonStyle())
+                                    .frame(width: 110)
+                                    .disabled(s.link != nil)
                                 }
-                                .buttonStyle(BrassButtonStyle())
-                                .frame(width: 110)
-                                .disabled(s.link != nil)
                             }
                         }
                     }
@@ -128,9 +141,23 @@ struct OperateView: View {
                         Button("Stop CQ") { core.stopCq() }
                             .buttonStyle(BrassButtonStyle(color: Theme.red))
                     } else {
-                        Button("Whistle and call CQ") { core.callCq() }
-                            .buttonStyle(BrassButtonStyle())
-                            .disabled(s.link != nil || s.mercuryOk != true)
+                        HStack {
+                            Picker("CQ for", selection: $cqTable) {
+                                Text("Chat (1:1)").tag(false)
+                                Text("Roundtable").tag(true)
+                            }
+                            .pickerStyle(.segmented)
+                            HelpButton(topic: .cqKind)
+                        }
+                        if cqTable {
+                            Field(placeholder: "Roundtable name", text: $tableName, caps: false)
+                        }
+                        Button(cqTable ? "Whistle and host the table" : "Whistle and call CQ") {
+                            core.callCq(table: cqTable ? tableName : nil)
+                        }
+                        .buttonStyle(BrassButtonStyle())
+                        .disabled(s.link != nil || s.mercuryOk != true
+                                  || (cqTable && tableName.trimmingCharacters(in: .whitespaces).isEmpty))
                     }
                 }
 
@@ -185,6 +212,9 @@ struct LinkCard: View {
                 .frame(width: 80)
                 .disabled(Double(qsyKhz) == nil)
                 HelpButton(topic: .qsy)
+            }
+            if let e2e = link.e2e, e2e != .off {
+                E2eBadge(e2e: e2e)
             }
             if let note = core.state.qsyNote, !note.isEmpty {
                 Text(note).font(.caption).foregroundStyle(Theme.brass)

@@ -75,7 +75,6 @@ def frame(t, fi):
     cr = cairo.Context(surf)
     fl = vm.flash_level(t)
     vm.draw_rain(cr, t, fl)
-    vm.soft_line(cr, "There's only one way down.", 1.6, vm.T0 + 0.1, t, 150, 44, col=(0.92, 0.9, 0.85))
     for text, b0, b1 in vm.CARDS:
         vm.card(cr, text, vm.BARS[b0], vm.BARS[b1] - 0.05 if b1 < len(vm.BARS) - 1 else T_HIT - 0.05, t)
     logo_layer(cr, t)

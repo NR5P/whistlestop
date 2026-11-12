@@ -45,6 +45,9 @@ data class EngineState(
     val depot: Depot = Depot(),
     val away: Boolean = false,
     val qsyNote: String? = null,
+    val table: TableState? = null,
+    /** A Roundtable we'll join as soon as Mercury is free. */
+    val tablePending: String? = null,
 ) {
     companion object {
         fun parse(json: String): EngineState {
@@ -68,13 +71,14 @@ data class EngineState(
                         mode = it.s("mode") ?: "",
                         bps = it.d("bps") ?: 0.0,
                         since = it.d("since") ?: 0.0,
+                        e2e = E2e.parse(it["e2e"]),
                     )
                 },
                 chat = s.a("chat").map { it.obj() }.map {
                     ChatLine(it.l("at"), it.s("who") ?: "", it.s("from") ?: "", it.s("text") ?: "", it.b("delivered"))
                 },
                 heard = s.a("heard").map { it.obj() }.map {
-                    Heard(it.l("at"), it.s("call") ?: "", it.d("dial_hz") ?: 0.0, it.s("what") ?: "")
+                    Heard(it.l("at"), it.s("call") ?: "", it.d("dial_hz") ?: 0.0, it.s("what") ?: "", it.s("table"))
                 },
                 whistle = s.o("whistle")?.let {
                     Whistle(it.d("at") ?: 0.0, it.d("dial_hz") ?: 0.0, it.d("offset_hz") ?: 0.0, it.d("score") ?: 0.0)
@@ -102,17 +106,74 @@ data class EngineState(
                 } ?: Depot(),
                 away = s.b("away"),
                 qsyNote = s.s("qsy_note"),
+                table = s.o("table")?.let { t ->
+                    TableState(
+                        name = t.s("name") ?: "",
+                        host = t.b("host"),
+                        mode = t.s("mode") ?: "",
+                        members = (t.o("members") ?: JsonObject(emptyMap())).mapValues { (_, m) ->
+                            (m as? JsonObject)?.let { (it["snr_of_host"] as? JsonPrimitive)?.intOrNull }
+                        },
+                        floor = t.s("floor"),
+                        lines = t.a("lines").mapNotNull { e ->
+                            val a = e as? JsonArray ?: return@mapNotNull null
+                            TableLine(
+                                (a.getOrNull(0) as? JsonPrimitive)?.longOrNull ?: 0L,
+                                (a.getOrNull(1) as? JsonPrimitive)?.content ?: "",
+                                (a.getOrNull(2) as? JsonPrimitive)?.content ?: "",
+                            )
+                        },
+                        sendingEtaS = t.d("sending_eta_s") ?: 0.0,
+                    )
+                },
+                tablePending = s.s("table_pending"),
             )
         }
     }
 }
 
-data class Link(val peer: String, val peerName: String, val peerGrid: String, val mode: String, val bps: Double, val since: Double)
+data class Link(val peer: String, val peerName: String, val peerGrid: String, val mode: String, val bps: Double, val since: Double, val e2e: E2e = E2e.Off)
+
+/** Encryption on the link (Rust `engine::E2eView`). */
+sealed class E2e {
+    data object Off : E2e()
+    data object Negotiating : E2e()
+    data class Encrypted(val sas: String) : E2e()
+    data class Plain(val why: String) : E2e()
+
+    companion object {
+        /** `"Off"`, `"Negotiating"`, `{"Encrypted":{"sas":…}}` or `{"Plain":{"why":…}}`. */
+        fun parse(e: JsonElement?): E2e {
+            (e as? JsonPrimitive)?.let { return if (it.content == "Negotiating") Negotiating else Off }
+            val o = e as? JsonObject ?: return Off
+            o.o("Encrypted")?.let { return Encrypted(it.s("sas") ?: "") }
+            o.o("Plain")?.let { return Plain(it.s("why") ?: "") }
+            return Off
+        }
+    }
+}
+
+/** The Roundtable we're at (Rust `engine::TableState`). */
+data class TableState(
+    val name: String,
+    val host: Boolean,
+    /** Mercury's broadcast mode, e.g. "DATAC3". */
+    val mode: String,
+    /** Callsign → how well they hear the host (dB). */
+    val members: Map<String, Int?>,
+    /** Who holds the floor (the talking stick). */
+    val floor: String?,
+    val lines: List<TableLine>,
+    /** Air time still to go for frames being sent. */
+    val sendingEtaS: Double,
+)
+/** `from` is empty for the table's own notices. */
+data class TableLine(val at: Long, val from: String, val text: String)
 data class ChatLine(val at: Long, val who: String, val from: String, val text: String, val delivered: Boolean) {
     val mine get() = who == "Me"
     val system get() = who == "System"
 }
-data class Heard(val at: Long, val call: String, val dialHz: Double, val what: String)
+data class Heard(val at: Long, val call: String, val dialHz: Double, val what: String, val table: String? = null)
 data class Whistle(val agoS: Double, val dialHz: Double, val offsetHz: Double, val score: Double)
 data class Search(val active: Boolean = false, val index: Int = 0, val total: Int = 0, val channelHz: Double = 0.0, val note: String = "")
 data class Cq(val active: Boolean = false, val cycle: Int = 0, val cycles: Int = 0, val phase: String = "")

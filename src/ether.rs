@@ -425,6 +425,10 @@ fn run(
     let start = Instant::now();
     let mut seq = 0u64;
     let mut next = Instant::now();
+    // ETHER_TRACE=<file>: every change of a station's dial or PTT, against
+    // the ether's own clock (seconds of audio since it started).
+    let mut trace = std::env::var_os("ETHER_TRACE").and_then(|p| std::fs::File::create(p).ok());
+    let mut last: Vec<Option<(f64, bool, bool)>> = vec![None; n];
     while !stop.load(Ordering::Relaxed) {
         // Accept Mercury connections as they arrive.
         for (i, l) in listeners.iter().enumerate() {
@@ -440,13 +444,31 @@ fn run(
         let ch = channel.lock().unwrap().clone();
         let noise_rms = 10f64.powf(ch.noise_dbfs / 20.0) * (FS / 2.0 / 2500.0).sqrt();
         let gain = 10f64.powf(-ch.path_loss_db / 20.0);
-        let (dials, keyed): (Vec<f64>, Vec<bool>) = stations
+        let now: Vec<(f64, bool, bool)> = stations
             .iter()
             .map(|s| {
                 let g = s.lock().unwrap();
-                (g.stats.dial_hz, g.stats.rig_ptt || g.stats.mercury_ptt)
+                (g.stats.dial_hz, g.stats.rig_ptt, g.stats.mercury_ptt)
             })
-            .unzip();
+            .collect();
+        if let Some(t) = trace.as_mut() {
+            for (i, (now, was)) in now.iter().zip(&last).enumerate() {
+                if Some(*now) != *was {
+                    let _ = writeln!(
+                        t,
+                        "{:9.3} {} dial {:.0} rig_ptt {} mercury_ptt {}",
+                        seq as f64 * BLOCK as f64 / FS,
+                        (b'A' + i as u8) as char,
+                        now.0,
+                        now.1 as u8,
+                        now.2 as u8
+                    );
+                }
+            }
+            last = now.iter().map(|x| Some(*x)).collect();
+        }
+        let (dials, keyed): (Vec<f64>, Vec<bool>) =
+            now.iter().map(|(d, r, m)| (*d, *r || *m)).unzip();
 
         // What each receiver hears this block (from last block's TX).
         let mut rx: Vec<Vec<f64>> = vec![vec![0.0; BLOCK]; n];

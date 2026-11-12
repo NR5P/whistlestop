@@ -291,7 +291,8 @@ impl Session {
             }
             "MODE" => {
                 if w.next().is_some() {
-                    self.reply("OK");
+                    // Like real Mercury: no listening-mode change mid-link.
+                    self.reply(if self.peer.is_some() { "BUSY" } else { "OK" });
                 } else {
                     self.reply("MODE 1 DATAC3");
                 }

@@ -30,6 +30,7 @@ use std::sync::{Mutex, MutexGuard, OnceLock};
 use whistlestop::config::Config;
 use whistlestop::engine::{self, Cmd, Handle, State};
 
+pub mod bench;
 #[cfg(feature = "mercury")]
 pub mod mercury;
 
@@ -39,6 +40,8 @@ struct App {
     cfg: Config,
     /// Waterfall rows already handed out.
     rows_seen: u64,
+    /// The two-station bench operating this station (`bench.rs`).
+    _bench: Option<whistlestop::remote::Server>,
 }
 
 static APP: Mutex<Option<App>> = Mutex::new(None);
@@ -158,16 +161,27 @@ pub fn start(dir: &str) -> anyhow::Result<()> {
     if adopt_usb_radio(&mut cfg) {
         let _ = cfg.save();
     }
+    let bench = bench::load(&dir);
+    // An empty `mercury_audio` (the over-the-air test, `airtest`) keeps the
+    // phone's own sound: only remote operation comes from the bench.
+    if let Some(b) = bench.as_ref().filter(|b| !b.mercury_audio.is_empty()) {
+        match bench::mercury_audio(&dir, b) {
+            Ok(input) => set_radio_audio(&input, ""),
+            Err(e) => eprintln!("whistlestop: bench: {e:#}"),
+        }
+    }
     ensure_mercury(&dir, &cfg);
     let h = engine::spawn(|| {
         CHANGES.fetch_add(1, Ordering::Relaxed);
     });
     h.send(Cmd::Start(cfg.clone()));
+    let _bench = bench.and_then(|b| bench::serve(&b, &h, &cfg));
     *slot = Some(App {
         dir,
         h,
         cfg,
         rows_seen: 0,
+        _bench,
     });
     Ok(())
 }
@@ -256,8 +270,9 @@ fn ensure_mercury(dir: &std::path::Path, cfg: &Config) {
                 }
             }
             let (input, output) = RADIO_AUDIO.lock().unwrap().clone();
-            if let Err(e) = mercury::start(&dir, port, bcast, &input, &output, ptt.as_deref()) {
-                eprintln!("whistlestop: {e:#}");
+            match mercury::start(&dir, port, bcast, &input, &output, ptt.as_deref()) {
+                Ok(()) => connect_when_ready(),
+                Err(e) => eprintln!("whistlestop: {e:#}"),
             }
             MERCURY_WAITING.store(false, Ordering::SeqCst);
             CHANGES.fetch_add(1, Ordering::Relaxed);
@@ -265,6 +280,27 @@ fn ensure_mercury(dir: &std::path::Path, cfg: &Config) {
     }
     #[cfg(not(feature = "mercury"))]
     let _ = (dir, cfg, local);
+}
+
+/// The engine starts alongside Mercury and connects to it once; Mercury
+/// opens its ports a moment later (or, keying a USB radio, up to 30 s
+/// later). Restart the engine until it has connected. (Its ports aren't
+/// probed: Mercury serves one control client, and a probe could unseat it.)
+#[cfg(feature = "mercury")]
+fn connect_when_ready() {
+    for _ in 0..8 {
+        std::thread::sleep(std::time::Duration::from_secs(3));
+        let done = with_app(|a| {
+            let ok = a.h.state.lock().unwrap().mercury_ok;
+            if !ok {
+                a.h.send(Cmd::Start(a.cfg.clone()));
+            }
+            ok
+        });
+        if done != Some(false) {
+            return;
+        }
+    }
 }
 
 /// Does the app need closing and reopening so Mercury keys the radio the
@@ -473,6 +509,33 @@ mod android {
                 -1
             }
         }
+    }
+
+    /// Hand the app's JavaVM and Context to `ndk_context`, once, before the
+    /// engine starts. cpal's Android backend asks for them when it opens an
+    /// output stream (AudioManager's mixer bursts); without them it panics,
+    /// and the whistle's audio output never starts.
+    #[unsafe(no_mangle)]
+    pub extern "system" fn Java_com_nr5p_whistlestop_Core_initAndroid(
+        env: JNIEnv,
+        _: JClass,
+        context: jni::objects::JObject,
+    ) {
+        static ONCE: std::sync::Once = std::sync::Once::new();
+        guard((), || {
+            ONCE.call_once(|| {
+                let (Ok(vm), Ok(ctx)) = (env.get_java_vm(), env.new_global_ref(&context)) else {
+                    eprintln!("whistlestop: couldn't keep the Android context");
+                    return;
+                };
+                let raw = ctx.as_obj().as_raw();
+                // The application Context lives as long as the process.
+                std::mem::forget(ctx);
+                // SAFETY: a valid JavaVM and a global reference that is never
+                // released; `ONCE` makes this the only initialisation.
+                unsafe { ndk_context::initialize_android_context(vm.get_java_vm_pointer().cast(), raw.cast()) };
+            })
+        })
     }
 
     #[unsafe(no_mangle)]

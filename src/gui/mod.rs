@@ -1226,13 +1226,22 @@ impl App {
                         .color(DIM),
                 );
                 ui.add_space(6.0);
-                ui.horizontal(|ui| {
-                    ui.add(egui::TextEdit::singleline(&mut self.join_name).hint_text("Roundtable name").desired_width(220.0));
-                    let join = ui.add_enabled(s.link.is_none(), egui::Button::new("Join here")).help(&help::T_JOIN).on_disabled_hover_text("Disconnect the 1:1 link first");
-                    if join.clicked() && !self.join_name.trim().is_empty() {
-                        self.send(Cmd::JoinTable(self.join_name.trim().into()));
-                    }
-                });
+                if let Some(name) = &s.table_pending {
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new(format!("⏳ Joining “{name}” as soon as Mercury is free (the last link is still closing)…")).color(BRASS));
+                        if ui.button("Cancel").help(&help::T_JOIN_WAIT).clicked() {
+                            self.send(Cmd::LeaveTable);
+                        }
+                    });
+                } else {
+                    ui.horizontal(|ui| {
+                        ui.add(egui::TextEdit::singleline(&mut self.join_name).hint_text("Roundtable name").desired_width(220.0));
+                        let join = ui.add_enabled(s.link.is_none(), egui::Button::new("Join here")).help(&help::T_JOIN).on_disabled_hover_text("Disconnect the 1:1 link first");
+                        if join.clicked() && !self.join_name.trim().is_empty() {
+                            self.send(Cmd::JoinTable(self.join_name.trim().into()));
+                        }
+                    });
+                }
                 ui.label(RichText::new("To host one, use Call CQ → Roundtable.").small().color(DIM));
             });
             return;
@@ -2448,6 +2457,7 @@ impl eframe::App for App {
                 qsy_note: g.qsy_note.clone(),
                 library: g.library.clone(),
                 schedule_now: g.schedule_now.clone(),
+                table_pending: g.table_pending.clone(),
             }
         };
 

@@ -15,6 +15,7 @@
 		563283F6A021306C2A529720 /* ChatView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 979BAD88AAC665BE3986ADCF /* ChatView.swift */; };
 		5858F43A8C34D6B887B281C6 /* OperateView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2F976A58480EF2E86DA2645B /* OperateView.swift */; };
 		A72C90E720A1B1A4AC4696DF /* WhistlestopCore.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = D22E438897EB5938EB0A8B90 /* WhistlestopCore.xcframework */; };
+		C379FD19D8BB9B97141BFCC5 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 5A5D17CD888B45A8188FD0CC /* Assets.xcassets */; };
 		C8E58BB3D3129AB9764F010D /* SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 05FDF90D79C417FBB8983FC6 /* SettingsView.swift */; };
 		C9C7AB9A6E5E8277FCC54B3A /* Theme.swift in Sources */ = {isa = PBXBuildFile; fileRef = 42DEA0EAB95596CBC962DB2E /* Theme.swift */; };
 		CFA20445A1B4315AABB293D1 /* Waterfall.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5346A439170DA64901645542 /* Waterfall.swift */; };
@@ -38,6 +39,7 @@
 		42DEA0EAB95596CBC962DB2E /* Theme.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Theme.swift; sourceTree = "<group>"; };
 		497D9C41F5B9C79CBC66A297 /* DepotView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DepotView.swift; sourceTree = "<group>"; };
 		5346A439170DA64901645542 /* Waterfall.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Waterfall.swift; sourceTree = "<group>"; };
+		5A5D17CD888B45A8188FD0CC /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		6192EE20BAA1ABD97E5F58DF /* Help.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Help.swift; sourceTree = "<group>"; };
 		61A7407124542665C00681E0 /* Models.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Models.swift; sourceTree = "<group>"; };
 		8A8535C1F5A722A8BC3AB965 /* Whistlestop.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = Whistlestop.app; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -74,6 +76,7 @@
 		50C80496136DBB378EF85D8C /* Whistlestop */ = {
 			isa = PBXGroup;
 			children = (
+				5A5D17CD888B45A8188FD0CC /* Assets.xcassets */,
 				979BAD88AAC665BE3986ADCF /* ChatView.swift */,
 				F8ABA0662EED073C5B1115E0 /* Core.swift */,
 				497D9C41F5B9C79CBC66A297 /* DepotView.swift */,
@@ -140,6 +143,7 @@
 			buildConfigurationList = 4F2142A79BDE034231F919B4 /* Build configuration list for PBXNativeTarget "Whistlestop" */;
 			buildPhases = (
 				01228C18DC39E41B077DB660 /* Sources */,
+				97799AB2AB4D1CD1D50AA86F /* Resources */,
 				B98F775878097D296C07110F /* Frameworks */,
 			);
 			buildRules = (
@@ -163,7 +167,13 @@
 				LastUpgradeCheck = 1430;
 				TargetAttributes = {
 					42EF1FF13D2D0EFE971A8EA5 = {
+						DevelopmentTeam = G4GK5372G8;
+						ProvisioningStyle = Automatic;
 						TestTargetID = B6120A41C4D29B4970141388;
+					};
+					B6120A41C4D29B4970141388 = {
+						DevelopmentTeam = G4GK5372G8;
+						ProvisioningStyle = Automatic;
 					};
 				};
 			};
@@ -186,6 +196,17 @@
 			);
 		};
 /* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		97799AB2AB4D1CD1D50AA86F /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				C379FD19D8BB9B97141BFCC5 /* Assets.xcassets in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
 		01228C18DC39E41B077DB660 /* Sources */ = {
@@ -305,9 +326,11 @@
 				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
 				CLANG_WARN_UNREACHABLE_CODE = YES;
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				CODE_SIGN_STYLE = Automatic;
 				COPY_PHASE_STRIP = NO;
 				CURRENT_PROJECT_VERSION = 1;
 				DEBUG_INFORMATION_FORMAT = dwarf;
+				DEVELOPMENT_TEAM = G4GK5372G8;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
 				ENABLE_TESTABILITY = YES;
 				GCC_C_LANGUAGE_STANDARD = gnu11;
@@ -418,9 +441,11 @@
 				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
 				CLANG_WARN_UNREACHABLE_CODE = YES;
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				CODE_SIGN_STYLE = Automatic;
 				COPY_PHASE_STRIP = NO;
 				CURRENT_PROJECT_VERSION = 1;
 				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				DEVELOPMENT_TEAM = G4GK5372G8;
 				ENABLE_NS_ASSERTIONS = NO;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
 				GCC_C_LANGUAGE_STANDARD = gnu11;
