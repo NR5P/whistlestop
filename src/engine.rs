@@ -224,6 +224,9 @@ pub struct TableState {
     #[serde(with = "ser::mode")]
     pub mode: &'static Mode,
     pub members: HashMap<String, Member>,
+    /// Who hosts it (a member learns it from the host's CALL or SPEED).
+    #[serde(default)]
+    pub host_call: Option<String>,
     pub floor: Option<String>,
     pub lines: Vec<(chrono_lite::Clock, String, String)>,
     /// Frames still to transmit, with their air time.
@@ -258,11 +261,84 @@ pub struct WhistleSeen {
     pub score: f64,
 }
 
+/// A Roundtable member re-reports how well it hears the host this often.
+const TABLE_REPORT_EVERY: Duration = Duration::from_secs(120);
+/// An unattended transmission (CQ, Station ID) waits at most this long for a
+/// busy channel to clear, then goes anyway.
+const BUSY_WAIT_MAX: Duration = Duration::from_secs(60);
+/// How long an automatic deliver/collect call waits for a clear channel
+/// (past BUSY_WAIT_MAX, so a stuck detector still lets it go).
+const AUTO_PENDING_MAX: Duration = Duration::from_secs(90);
+/// A member not heard for this long no longer counts for the speed.
+const TABLE_MEMBER_TIMEOUT: Duration = Duration::from_secs(420);
+/// A sped-up table opens a DATAC3 join window this often...
+const JOIN_WINDOW_EVERY: Duration = Duration::from_secs(180);
+/// ...for this long (after the switch to DATAC3).
+const JOIN_WINDOW_FOR: Duration = Duration::from_secs(20);
+/// A host with nothing to say re-announces the table's speed this often, so
+/// its members can tell they still hear it.
+const TABLE_HEARTBEAT: Duration = Duration::from_secs(90);
+/// A member that hears nothing of its table for this long (two heartbeats
+/// and a join window) has lost it: it listens in another of the table's
+/// likely speeds until it hears it again.
+const TABLE_LOST_AFTER: Duration = Duration::from_secs(240);
+/// A member whose report says it can't copy the table's speed expects the
+/// host to slow down; if no announcement comes in this time, it slows down
+/// by itself (it would never copy the one sent at the faster speed).
+const SLOWDOWN_WAIT: Duration = Duration::from_secs(40);
+
+/// An automatic call (auto-answer, deliver, collect) that hasn't linked by
+/// then is abandoned.
+const AUTO_CALL_GIVE_UP: Duration = Duration::from_secs(60);
+
+/// Chat lines kept on screen (older ones scroll away for good).
+pub const MAX_CHAT_LINES: usize = 500;
+/// Finished transfer rows kept (those still going are never dropped).
+pub const MAX_DONE_TRANSFERS: usize = 200;
+
+impl State {
+    /// Keep the history bounded: an unattended station runs for days, and
+    /// the whole State goes to a remote operator several times a second.
+    pub fn trim_history(&mut self) {
+        if self.chat.len() > MAX_CHAT_LINES {
+            let excess = self.chat.len() - MAX_CHAT_LINES;
+            self.chat.drain(..excess);
+        }
+        let finished = |t: &Transfer| {
+            matches!(
+                t.state,
+                XferState::Done(_) | XferState::Failed(_) | XferState::Declined
+            )
+        };
+        let mut excess = self
+            .transfers
+            .iter()
+            .filter(|t| finished(t))
+            .count()
+            .saturating_sub(MAX_DONE_TRANSFERS);
+        if excess > 0 {
+            self.transfers.retain(|t| {
+                if excess > 0 && finished(t) {
+                    excess -= 1;
+                    false
+                } else {
+                    true
+                }
+            });
+        }
+        // Mail news older than the window the screen shows (30 min).
+        self.mail_alerts
+            .retain(|a| a.at.elapsed() < Duration::from_secs(1800));
+    }
+}
+
 /// Fields missing from a serialized State take their defaults, so a remote
 /// client can still show a radio computer running another version.
 #[derive(Default, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 pub struct State {
+    /// Mercury's busy detector reads the channel as occupied.
+    pub channel_busy: bool,
     pub running: bool,
     pub demo: bool,
     pub mycall: String,
@@ -610,7 +686,7 @@ struct Station {
     /// Handshake packets: always sent at once, in the clear.
     ctl_queue: VecDeque<Vec<u8>>,
     /// Packets that arrived before Mercury's CONNECTED line.
-    early: Vec<Vec<u8>>,
+    early: Vec<(Instant, Vec<u8>)>,
     /// Application packets, waiting for the modem (and for keys).
     hi_queue: VecDeque<Link>,
     outgoing: Vec<Outgoing>,
@@ -677,8 +753,44 @@ struct Station {
     link_auto: Option<bool>,
     /// Mail arrived on this link (a collect link can end soon after).
     link_got_mail: bool,
+    /// When we placed a call nobody pressed a button for (auto-answer,
+    /// deliver, collect): given up after AUTO_CALL_GIVE_UP.
+    auto_call: Option<Instant>,
     /// We asked Mercury for a CQFRAME (when; whether its PENDING has come).
     own_cq_pending: Option<(Instant, bool)>,
+    /// Demo mode's simulated Mercury.
+    fake: Option<FakeMercury>,
+    /// Settings problems already logged (each is logged once).
+    cfg_notes: Vec<String>,
+    /// Mercury's last SN figure, and when.
+    last_sn: Option<(Instant, f64)>,
+    /// Mercury's busy detector says someone is transmitting (BUSY ON/OFF).
+    chan_busy: bool,
+    /// Since when an unattended transmission has been waiting for the
+    /// channel to clear (and when it last asked: a gap starts it over).
+    busy_wait: Option<(Instant, Instant)>,
+    /// An automatic deliver (true) or collect (false) call waiting for the
+    /// channel to clear: the Station ID or CQ that set it off has only just
+    /// ended, and the busy detector still reads it.
+    auto_pending: Option<(String, bool, Instant)>,
+    /// How well we hear the host of the table we're at (from its frames).
+    host_snr: Option<f64>,
+    /// When we last reported to the table's host (members re-report).
+    last_table_report: Instant,
+    /// Host: a join window is open (when it ends, the speed to go back to).
+    join_window: Option<(Instant, &'static Mode)>,
+    /// When we last heard a frame of our table, and last sent one.
+    last_table_heard: Instant,
+    last_table_sent: Instant,
+    /// The table's speed as last announced to us (members).
+    table_announced: Option<&'static Mode>,
+    /// A member not yet known to be in step with the host (just joined, or
+    /// lost the table): it re-sends its JOIN when it hears the host's CALL.
+    table_unsynced: bool,
+    /// Member: our report said we can't copy the current speed (when).
+    expect_slowdown: Option<Instant>,
+    /// Host: when the last join window ended (or the table started).
+    last_join_window: Instant,
     /// Per-station cooldown for notices and automatic connects.
     auto_cooldown: HashMap<String, Instant>,
     /// QSY in force: (home dial, dial now).
@@ -743,7 +855,15 @@ async fn run(
                 match c {
                     Cmd::Start(cfg) => {
                         if let Some(s) = station.take() { s.shutdown().await; }
-                        station = Some(Station::start(cfg, st.clone(), sdr.clone(), pcm.clone(), repaint.clone()).await);
+                        // Out-of-range values (a hand-edited file, a remote
+                        // client) are clamped before they reach the station.
+                        let (cfg, notes) = cfg.sanitized();
+                        let mut s = Station::start(cfg, st.clone(), sdr.clone(), pcm.clone(), repaint.clone()).await;
+                        for n in &notes {
+                            s.log(format!("⚠ Settings: {n}"));
+                        }
+                        s.cfg_notes = notes;
+                        station = Some(s);
                     }
                     Cmd::Stop => {
                         if let Some(s) = station.take() { s.shutdown().await; }
@@ -882,7 +1002,23 @@ impl Station {
             last_link_activity: Instant::now(),
             link_auto: None,
             link_got_mail: false,
+            auto_call: None,
             own_cq_pending: None,
+            fake: None,
+            cfg_notes: vec![],
+            last_sn: None,
+            chan_busy: false,
+            busy_wait: None,
+            auto_pending: None,
+            host_snr: None,
+            last_table_report: Instant::now(),
+            join_window: None,
+            last_join_window: Instant::now(),
+            last_table_heard: Instant::now(),
+            last_table_sent: Instant::now(),
+            table_announced: None,
+            table_unsynced: false,
+            expect_slowdown: None,
             auto_cooldown: HashMap::new(),
             qsy: None,
             qsy_out: None,
@@ -1126,7 +1262,13 @@ impl Station {
             })
             .await
             {
-                Ok(f) => ("127.0.0.1".to_string(), f.port, f.bcast_port),
+                Ok(f) => {
+                    let r = ("127.0.0.1".to_string(), f.port, f.bcast_port);
+                    // Stopped with the station (each restart used to leave
+                    // the old one running).
+                    s.fake = Some(f);
+                    r
+                }
                 Err(e) => {
                     s.log(format!("⚠ demo Mercury: {e}"));
                     ("127.0.0.1".into(), 0, 0)
@@ -1163,9 +1305,15 @@ impl Station {
         let (host, port, bport) = self.modem.clone();
         let (etx, erx) = mpsc::unbounded_channel();
         match Tnc::connect(&host, port, Some(bport), etx).await {
-            Ok(mut t) => match t.setup(&self.cfg.callsign, self.bw.mercury_arq_bw()).await {
+            Ok(mut t) => match t.setup(&self.mycall(), self.bw.mercury_arq_bw()).await {
                 Ok(()) => {
                     let _ = t.command("MODE 1").await; // calling mode: DATAC3
+                    // Listen before unattended transmissions (CQ, Station ID,
+                    // automatic calls). Off during links: Mercury's link also
+                    // holds back while the detector says busy.
+                    if self.cfg.busy_detect {
+                        let _ = t.command("BUSYDETECT ON").await;
+                    }
                     let _ = t.send_line("VERSION").await;
                     self.tnc = Some(t);
                     self.tnc_rx = Some(erx);
@@ -1173,8 +1321,14 @@ impl Station {
                         g.mercury_ok = true;
                         g.listen_mode = modes::mode_by_name("DATAC3");
                     });
-                    let call = self.cfg.callsign.to_uppercase();
-                    self.log(format!("Mercury: connected ({host}:{port}), listening as {call}"));
+                    let me = self.mycall();
+                    if crate::protocol::valid_call(&me) {
+                        self.log(format!("Mercury: connected ({host}:{port}), listening as {me}"));
+                    } else {
+                        self.log(format!(
+                            "⚠ Mercury: connected ({host}:{port}), but {me:?} isn't a callsign: nothing will be sent until you set yours (Settings → Station)"
+                        ));
+                    }
                     true
                 }
                 Err(e) => {
@@ -1190,6 +1344,9 @@ impl Station {
     }
 
     async fn shutdown(mut self) {
+        if let Some(f) = self.fake.take() {
+            f.stop();
+        }
         self.sim_stop.store(true, Ordering::Relaxed);
         self.sdr_stop.store(true, Ordering::Relaxed);
         if let Some(r) = self.rig.as_mut() {
@@ -1217,7 +1374,9 @@ impl Station {
     }
 
     fn set(&self, f: impl FnOnce(&mut State)) {
-        f(&mut self.st.lock().unwrap());
+        let mut g = self.st.lock().unwrap();
+        f(&mut g);
+        g.trim_history();
     }
 
     fn log(&self, msg: String) {
@@ -1229,7 +1388,7 @@ impl Station {
     }
 
     fn mycall(&self) -> String {
-        self.cfg.callsign.to_uppercase()
+        self.cfg.callsign.trim().to_uppercase()
     }
 
     fn dial(&self) -> f64 {
@@ -1472,9 +1631,34 @@ impl Station {
         match c {
             Cmd::Start(_) | Cmd::Stop => {}
             Cmd::Update(c) => {
+                let (c, notes) = c.sanitized();
+                for n in notes.iter().filter(|n| !self.cfg_notes.contains(n)) {
+                    self.log(format!("⚠ Settings: {n}"));
+                }
+                self.cfg_notes = notes;
                 let keep_bw = self.bw;
+                let old_call = self.mycall();
+                let busy_was = self.cfg.busy_detect;
+                let busy_now = c.busy_detect;
+                if busy_was && !busy_now {
+                    // Off: a BUSY it latched must not hold anything back.
+                    self.busy_detect(false).await;
+                }
                 self.cfg = c;
+                if !busy_was && busy_now && self.peer.is_none() {
+                    self.busy_detect(true).await;
+                }
                 self.cfg.bandwidth = keep_bw;
+                // A new callsign reaches Mercury now (not linked: a link
+                // carries on under the call it was made with).
+                let call = self.mycall();
+                if call != old_call && self.peer.is_none() && crate::protocol::valid_call(&call) {
+                    if let Some(t) = self.tnc.as_mut() {
+                        t.command(&format!("MYCALL {call}")).await?;
+                    }
+                    self.set(|g| g.mycall = call.clone());
+                    self.log(format!("Callsign now {call}"));
+                }
             }
             Cmd::SetFreq(hz) => {
                 self.no_retune_while_linked()?;
@@ -1504,6 +1688,11 @@ impl Station {
                 }
             }
             Cmd::SetBandwidth(bw) => {
+                // The link's bandwidth was agreed when it came up; Mercury
+                // isn't asked to change it mid-link.
+                if self.peer.is_some() {
+                    anyhow::bail!("bandwidth can't change during a link: it applies from the next one");
+                }
                 self.bw = bw;
                 self.detector = Detector::new(bw.whistle_profile());
                 self.tracker = TrackDetector::new(bw.whistle_profile());
@@ -1531,9 +1720,7 @@ impl Station {
             Cmd::StopCq => self.stop_cq("CQ stopped").await,
             Cmd::Connect(call) => {
                 let call = call.trim().to_uppercase();
-                if !crate::protocol::valid_call(&call) {
-                    anyhow::bail!("{call:?} isn't a callsign");
-                }
+                self.ready_to_call(&call).await?;
                 self.stop_search("connecting");
                 self.cancel_pending_join("calling instead");
                 // A Connect by hand replaces a pending auto-answer (and its
@@ -1770,12 +1957,12 @@ impl Station {
             }
             Cmd::DepotConnect(call) => {
                 let call = call.trim().to_uppercase();
-                if self.peer.is_some() {
-                    anyhow::bail!("already linked");
-                }
+                self.ready_to_call(&call).await?;
+                self.stop_search("connecting");
                 let me = self.mycall();
                 self.tnc()?.command(&format!("CONNECT {me} {call}")).await?;
                 self.set(|g| g.calling = Some(call.clone()));
+                self.quiet_watch();
                 self.log(format!("Connecting to {call} for Depot mail…"));
             }
             Cmd::BeaconNow => self.send_beacon("by hand")?,
@@ -2247,6 +2434,9 @@ impl Station {
     // ------------------------------------------------------------------ CQ
 
     async fn start_cq(&mut self, table: Option<String>) -> anyhow::Result<()> {
+        if !crate::protocol::valid_call(&self.mycall()) {
+            anyhow::bail!("set your own callsign first (Settings → Station): a CQ identifies you");
+        }
         self.stop_search("for CQ");
         self.cancel_pending_join("calling CQ instead");
         if self.peer.is_some() {
@@ -2262,7 +2452,14 @@ impl Station {
                 until: Instant::now(),
             },
         });
-        self.begin_cq_cycle().await;
+        if self.clear_to_send("CQ") {
+            self.begin_cq_cycle().await;
+        } else if let Some(cq) = self.cq.as_mut() {
+            // step_cq starts it once the channel clears.
+            cq.phase = CqPhase::Listen {
+                until: Instant::now(),
+            };
+        }
         self.log(format!(
             "Calling CQ{} on {:.3} kHz: {:.0} s whistle, then CQFRAME",
             table
@@ -2353,6 +2550,14 @@ impl Station {
     }
 
     async fn step_cq(&mut self) -> anyhow::Result<()> {
+        // The next cycle is due (listening over, table traffic out): it
+        // still waits for a clear channel.
+        let next_due = matches!(
+            self.cq.as_ref().map(|c| &c.phase),
+            Some(CqPhase::Listen { until }) if Instant::now() >= *until
+        ) && self.table_queue.is_empty()
+            && Instant::now() >= self.table_busy_until;
+        let may_go = next_due && self.clear_to_send("CQ");
         let Some(cq) = self.cq.as_ref() else {
             return Ok(());
         };
@@ -2406,10 +2611,7 @@ impl Station {
             // The next whistle waits for a Roundtable host's table traffic,
             // so the two never go out on top of each other. (An incoming
             // call holds the CQ through `until`: see hold_cq.)
-            CqPhase::Listen { until }
-                if Instant::now() >= *until
-                    && self.table_queue.is_empty()
-                    && Instant::now() >= self.table_busy_until =>
+            CqPhase::Listen { .. } if may_go =>
             {
                 if cycle >= cycles {
                     self.log("No answer to CQ".into());
@@ -2475,7 +2677,8 @@ impl Station {
                 if self.peer.is_none() {
                     // Mercury's data port can beat the CONNECTED line on the
                     // control port: keep these for when it arrives.
-                    self.early.extend(bodies);
+                    let now = Instant::now();
+                    self.early.extend(bodies.into_iter().map(|b| (now, b)));
                     self.early.truncate(64);
                 } else {
                     self.on_bodies(bodies).await?;
@@ -2525,6 +2728,8 @@ impl Station {
                 };
                 self.quiet_watch();
                 self.leaving_since = None;
+                self.auto_call = None;
+                self.busy_detect(false).await;
                 self.stop_search("— linked");
                 self.link_got_mail = false;
                 if self.cq.take().is_some() {
@@ -2582,9 +2787,23 @@ impl Station {
                     self.log(m.clone());
                     self.system_line(m);
                 }
-                // Re-offer files queued before the link came up.
-                for o in self.outgoing.iter() {
+                // Re-offer files queued before the link came up: those for
+                // this station (resuming), and those picked while not linked.
+                // A file meant for someone else waits for them.
+                let mut waiting = 0;
+                for o in self.outgoing.iter_mut() {
+                    match &o.to {
+                        None => o.to = Some(peer.clone()),
+                        Some(t) if *t == peer => {}
+                        Some(_) => {
+                            waiting += 1;
+                            continue;
+                        }
+                    }
                     self.hi_queue.push_back(o.offer());
+                }
+                if waiting > 0 {
+                    self.log(format!("{waiting} file(s) wait for the station they were sent to"));
                 }
                 // Depot mail for this station goes across now.
                 self.last_link_activity = Instant::now();
@@ -2602,7 +2821,14 @@ impl Station {
                     self.system_line(format!("(away) sent: {text}"));
                 }
                 self.pump().await?;
-                let early = std::mem::take(&mut self.early);
+                // Only what came just before this CONNECTED belongs to this
+                // link: older bytes are the last link's leftovers (its
+                // replies can arrive after its DISCONNECTED).
+                let early: Vec<Vec<u8>> = std::mem::take(&mut self.early)
+                    .into_iter()
+                    .filter(|(at, _)| at.elapsed() < Duration::from_secs(3))
+                    .map(|(_, b)| b)
+                    .collect();
                 self.on_bodies(early).await?;
             }
             "DISCONNECTED" => {
@@ -2618,6 +2844,10 @@ impl Station {
                 self.early.clear();
                 self.dec = LinkDecoder::default();
                 self.mercury_reported = 0;
+                self.hangup_at = None;
+                self.bye_at = None;
+                self.auto_call = None;
+                self.busy_detect(true).await;
                 if let Some(p) = self.peer.take() {
                     self.log(format!("Link with {p} ended"));
                     self.set(|g| {
@@ -2791,9 +3021,16 @@ impl Station {
                     }
                 });
             }
+            // Mercury's busy detector (on while not linked, see busy_detect).
+            "BUSY" => {
+                let on = l.split_whitespace().nth(1) == Some("ON");
+                self.chan_busy = on;
+                self.set(|g| g.channel_busy = on);
+            }
             "SN" => {
                 self.est.on_snr_line(&l);
                 let v = self.est.snr_db;
+                self.last_sn = v.map(|s| (Instant::now(), s));
                 self.set(|g| g.snr_db = v);
             }
             // Mercury answers VERSION as VARA does ("VARA version 4.9.0
@@ -3294,7 +3531,14 @@ impl Station {
             Link::MailAck { id } => {
                 self.last_link_activity = Instant::now();
                 if let Some(m) = self.depot.confirm(id, &peer).cloned() {
-                    self.log(format!("✓ Mail delivered to {} (now in Delivered)", m.to));
+                    if m.to.eq_ignore_ascii_case(&peer) {
+                        self.log(format!("✓ Mail delivered to {} (now in Delivered)", m.to));
+                    } else {
+                        self.log(format!(
+                            "✓ Mail for {} handed to {peer}, who carries it on (now in Delivered)",
+                            m.to
+                        ));
+                    }
                     let left = self.depot.waiting_for(&m.to).len();
                     if left == 0 {
                         self.set(|g| g.mail_alerts.retain(|a| !(a.call == m.to && a.ours)));
@@ -3372,7 +3616,8 @@ impl Station {
         files: u64,
         original: u64,
     ) -> anyhow::Result<()> {
-        let out = Outgoing::new(fid, name.clone(), data, zipped, files);
+        let mut out = Outgoing::new(fid, name.clone(), data, zipped, files);
+        out.to = self.peer.clone();
         let size = out.data.len() as u64;
         let eta = self.est.eta_s(file_wire_size(&name, size), self.bw);
         if self.peer.is_some() {
@@ -3559,6 +3804,7 @@ impl Station {
                 self.set(|g| g.calling = None);
                 return Err(e.context(format!("couldn't answer {call}")));
             }
+            self.auto_call = Some(Instant::now());
             self.log(format!("Calling {call}…"));
         }
         Ok(())
@@ -3630,12 +3876,22 @@ impl Station {
                 host,
                 mode,
                 members: HashMap::new(),
+                host_call: host.then(|| self.mycall()),
                 floor: None,
                 lines: vec![],
                 sending_eta_s: 0.0,
             })
         });
+        self.join_window = None;
+        self.last_join_window = Instant::now();
+        self.last_table_report = Instant::now();
+        self.last_table_heard = Instant::now();
+        self.last_table_sent = Instant::now();
+        self.table_announced = Some(mode);
+        self.table_unsynced = !host;
+        self.expect_slowdown = None;
         if !host {
+            self.host_snr = None;
             let me = self.mycall();
             let snr = self.est.snr_db.unwrap_or(0.0).round() as i8;
             self.table_tx(
@@ -3680,6 +3936,9 @@ impl Station {
         let frames = table_text_frames(id, &me, self.table_msg_id, &text, mode.broadcast_bytes())?;
         let eta = frames.len() as f64 * mode.frame_s;
         self.table_sent.insert(self.table_msg_id, frames.clone());
+        // Repeats are asked for within minutes: keep the last 64 messages.
+        let oldest = self.table_msg_id.saturating_sub(64);
+        self.table_sent.retain(|id, _| *id > oldest);
         self.table_queue.extend(frames);
         self.set(|g| {
             if let Some(t) = g.table.as_mut() {
@@ -3714,6 +3973,15 @@ impl Station {
         ) {
             return Ok(());
         }
+        // Our CQFRAME is going out (until Mercury's CANCELPENDING): a frame
+        // handed over now would go out in the CQFRAME's mode, cut short, and
+        // nobody could decode it.
+        if self
+            .own_cq_pending
+            .is_some_and(|(at, _)| at.elapsed() < Duration::from_secs(10))
+        {
+            return Ok(());
+        }
         let Some(f) = self.table_queue.pop_front() else {
             if self.restore_calling_mode
                 && self.peer.is_none()
@@ -3740,6 +4008,7 @@ impl Station {
             .listen_mode
             .unwrap_or(&modes::MODES[4]);
         self.tnc()?.send_broadcast(&f).await?;
+        self.last_table_sent = Instant::now();
         self.table_busy_until = Instant::now() + Duration::from_secs_f64(mode.frame_s + 0.4);
         let left = self.table_queue.len() as f64 * mode.frame_s;
         self.set(|g| {
@@ -3775,6 +4044,35 @@ impl Station {
                     what,
                     (*kind == CALL_TABLE).then(|| table_name.clone()),
                 );
+                // At this table: its CALL comes from the host (also during a
+                // join window).
+                if *kind == CALL_TABLE && self.table_id() == Some(fr.table) {
+                    let from = fr.from.clone();
+                    self.set(|g| {
+                        if let Some(t) = g.table.as_mut()
+                            && !t.host
+                        {
+                            t.host_call = Some(from);
+                        }
+                    });
+                    if let Some((at, snr)) = self.last_sn
+                        && at.elapsed() < Duration::from_secs(2)
+                    {
+                        self.host_snr = Some(snr);
+                    }
+                    self.last_table_heard = Instant::now();
+                    // A join window: a member the host may not know yet
+                    // (its JOIN went out while the table ran faster, or it
+                    // lost the table) says so now, while the host listens
+                    // in DATAC3.
+                    let is_member = self.st.lock().unwrap().table.as_ref().is_some_and(|t| !t.host);
+                    if is_member
+                        && self.table_unsynced
+                        && self.last_table_report.elapsed() >= Duration::from_secs(15)
+                    {
+                        self.send_table_report();
+                    }
+                }
                 self.heard_station(&fr.from).await?;
                 return Ok(());
             }
@@ -3819,7 +4117,33 @@ impl Station {
         if fr.table != my_id {
             return Ok(());
         }
+        self.last_table_heard = Instant::now();
         let from = fr.from.clone();
+        // Only the host sends SPEED. A member reports how well it hears the
+        // host, so it keeps the SN Mercury gave for the host's own frames.
+        if matches!(fr.body, TableBody::Speed { .. }) {
+            self.set(|g| {
+                if let Some(t) = g.table.as_mut()
+                    && !t.host
+                {
+                    t.host_call = Some(from.clone());
+                }
+            });
+        }
+        let is_host = self
+            .st
+            .lock()
+            .unwrap()
+            .table
+            .as_ref()
+            .and_then(|t| t.host_call.clone())
+            .is_some_and(|h| h == from);
+        if is_host
+            && let Some((at, snr)) = self.last_sn
+            && at.elapsed() < Duration::from_secs(2)
+        {
+            self.host_snr = Some(snr);
+        }
         match fr.body {
             TableBody::Text {
                 id,
@@ -3836,28 +4160,41 @@ impl Station {
                     });
                 }
             }
+            // A JOIN, or a member's periodic report (the same frame).
             TableBody::Join { snr_of_host, .. } => {
                 self.set(|g| {
                     if let Some(t) = g.table.as_mut() {
+                        let new = !t.members.contains_key(&from);
                         let m = t.members.entry(from.clone()).or_default();
                         m.snr_of_host = Some(snr_of_host);
                         m.last = Some(Instant::now());
-                        t.lines.push((
-                            Clock::now(),
-                            String::new(),
-                            format!("{from} joined (hears the host at {snr_of_host:+} dB)"),
-                        ));
+                        if new {
+                            t.lines.push((
+                                Clock::now(),
+                                String::new(),
+                                format!("{from} joined (hears the host at {snr_of_host:+} dB)"),
+                            ));
+                        }
                     }
                 });
                 self.ramp().await?;
             }
-            TableBody::Speed { mode_index } => {
+            // A speed change, or the host's heartbeat (the same speed).
+            TableBody::Speed { mode_index, last_id } => {
+                // Its newest message: one we never heard is asked for.
+                self.table_asm.note_latest(&from, last_id, true);
                 if let Some(m) = modes::mode_by_index(mode_index) {
-                    self.apply_table_mode(m).await?;
-                    self.log(format!(
-                        "Roundtable speed → {} ({} bps), set by {from}",
-                        m.name, m.payload_bps
-                    ));
+                    self.table_unsynced = false;
+                    self.expect_slowdown = None;
+                    self.table_announced = Some(m);
+                    let now = self.st.lock().unwrap().table.as_ref().map(|t| t.mode.index);
+                    if now != Some(m.index) {
+                        self.apply_table_mode(m).await?;
+                        self.log(format!(
+                            "Roundtable speed → {} ({} bps), set by {from}",
+                            m.name, m.payload_bps
+                        ));
+                    }
                 }
             }
             TableBody::Again { of, id, missing } => {
@@ -3893,6 +4230,193 @@ impl Station {
         Ok(())
     }
 
+    /// Roundtable timers. A member re-reports how well it hears the host
+    /// (every TABLE_REPORT_EVERY). The host of a table that has sped up past
+    /// DATAC3 opens a join window every JOIN_WINDOW_EVERY: the table drops to
+    /// DATAC3 for JOIN_WINDOW_FOR and sends its CALL, so latecomers (who call
+    /// and listen in DATAC3) can join; then it goes back to speed.
+    async fn step_table_timers(&mut self) -> anyhow::Result<()> {
+        let Some((host, mode, id, name)) = self
+            .st
+            .lock()
+            .unwrap()
+            .table
+            .as_ref()
+            .map(|t| (t.host, t.mode, t.id, t.name.clone()))
+        else {
+            self.join_window = None;
+            return Ok(());
+        };
+        if self.tnc.is_none() || self.pending_speed.is_some() {
+            return Ok(());
+        }
+        let me = self.mycall();
+        let calling = modes::mode_by_name("DATAC3").expect("DATAC3");
+        if !host {
+            if self.last_table_report.elapsed() >= TABLE_REPORT_EVERY {
+                self.send_table_report();
+            }
+            // Our report said we can't copy this speed and no slow-down
+            // came (it was announced at this speed: we missed it).
+            if self.expect_slowdown.is_some_and(|t| t.elapsed() >= SLOWDOWN_WAIT) {
+                self.expect_slowdown = None;
+                if mode.payload_bps > calling.payload_bps {
+                    self.log(format!(
+                        "Roundtable: {} is too fast to copy here and no slow-down was heard; listening in DATAC3",
+                        mode.name
+                    ));
+                    self.table_lost_to(calling).await?;
+                }
+            }
+            // Nothing heard of the table for a long while: it moved without
+            // us. Try the speed it last announced, DATAC3 (join windows),
+            // then the most robust mode, in turn.
+            if self.last_table_heard.elapsed() >= TABLE_LOST_AFTER {
+                let robust = self
+                    .bw
+                    .modes()
+                    .iter()
+                    .min_by(|a, b| a.min_snr_db.partial_cmp(&b.min_snr_db).unwrap())
+                    .copied()
+                    .unwrap_or(calling);
+                let next = match self.table_announced {
+                    Some(a) if a.index != mode.index => a,
+                    _ if mode.index != calling.index => calling,
+                    _ => robust,
+                };
+                self.log(format!(
+                    "Roundtable: nothing heard for {} s at {}; listening in {}",
+                    TABLE_LOST_AFTER.as_secs(),
+                    mode.name,
+                    next.name
+                ));
+                self.table_lost_to(next).await?;
+            }
+            return Ok(());
+        }
+        // A host with nothing to say: a heartbeat at the table's speed.
+        if self.join_window.is_none()
+            && self.table_queue.is_empty()
+            && self.last_table_sent.elapsed() >= TABLE_HEARTBEAT
+        {
+            self.last_table_sent = Instant::now();
+            self.table_tx(
+                TableFrame {
+                    table: id,
+                    from: me.clone(),
+                    body: TableBody::Speed {
+                        mode_index: mode.index,
+                        last_id: self.table_msg_id,
+                    },
+                }
+                .encode(),
+            );
+        }
+        if let Some((end, back)) = self.join_window {
+            if Instant::now() < end {
+                return Ok(());
+            }
+            self.join_window = None;
+            self.last_join_window = Instant::now();
+            // Back to speed: what it was, or slower if a newcomer (or a
+            // member's new report) needs it.
+            let worst = self
+                .st
+                .lock()
+                .unwrap()
+                .table
+                .as_ref()
+                .and_then(|t| {
+                    t.members
+                        .values()
+                        .filter(|m| m.last.is_some_and(|l| l.elapsed() < TABLE_MEMBER_TIMEOUT))
+                        .filter_map(|m| m.snr_of_host)
+                        .min()
+                });
+            let target = worst
+                .map(|w| modes::best_mode(self.bw, w as f64, self.cfg.ramp_margin_db))
+                .filter(|m| m.payload_bps < back.payload_bps)
+                .unwrap_or(back);
+            if target.payload_bps > calling.payload_bps {
+                self.log(format!("Roundtable: join window closed; back to {}", target.name));
+                self.table_set_speed(target).await?;
+            } else {
+                self.log("Roundtable: join window closed; staying at DATAC3".into());
+            }
+            return Ok(());
+        }
+        if mode.payload_bps > calling.payload_bps
+            && self.last_join_window.elapsed() >= JOIN_WINDOW_EVERY
+            && self.table_queue.is_empty()
+        {
+            self.table_set_speed(calling).await?;
+            let switched = self.pending_speed.map(|(_, at)| at).unwrap_or_else(Instant::now);
+            self.join_window = Some((switched + JOIN_WINDOW_FOR, mode));
+            // Its CALL, in DATAC3 once the table has switched (table traffic
+            // waits for the switch), for stations looking for it.
+            let call = TableFrame {
+                table: id,
+                from: me,
+                body: TableBody::Call {
+                    kind: CALL_TABLE,
+                    table_name: name,
+                    bw_code: Bandwidth::ALL
+                        .iter()
+                        .position(|b| *b == self.bw)
+                        .unwrap_or(4) as u8,
+                    grid: self.cfg.grid.clone(),
+                },
+            };
+            self.table_tx(call.encode());
+            self.log(format!(
+                "Roundtable: join window: DATAC3 for {} s so others can join",
+                JOIN_WINDOW_FOR.as_secs()
+            ));
+        }
+        Ok(())
+    }
+
+    /// Member: our periodic report (a JOIN frame with how well we hear the
+    /// host). If it says we can't copy the table's speed, expect the host to
+    /// slow down.
+    fn send_table_report(&mut self) {
+        let Some((id, name, mode)) =
+            self.st.lock().unwrap().table.as_ref().map(|t| (t.id, t.name.clone(), t.mode))
+        else {
+            return;
+        };
+        self.last_table_report = Instant::now();
+        let snr = self.host_snr.or(self.est.snr_db).unwrap_or(0.0).round() as i8;
+        if self.host_snr.is_some()
+            && (snr as f64) < mode.min_snr_db + self.cfg.ramp_margin_db
+            && self.expect_slowdown.is_none()
+        {
+            self.expect_slowdown = Some(Instant::now());
+        }
+        let me = self.mycall();
+        self.table_tx(
+            TableFrame {
+                table: id,
+                from: me,
+                body: TableBody::Join {
+                    table_name: name,
+                    snr_of_host: snr,
+                },
+            }
+            .encode(),
+        );
+    }
+
+    /// Member: listen for the table in `m`, and tell the host where we are
+    /// at the next chance (now, and again at its next join window).
+    async fn table_lost_to(&mut self, m: &'static Mode) -> anyhow::Result<()> {
+        self.apply_table_mode(m).await?;
+        self.last_table_heard = Instant::now();
+        self.table_unsynced = true;
+        self.send_table_report();
+        Ok(())
+    }
+
     async fn apply_table_mode(&mut self, m: &'static Mode) -> anyhow::Result<()> {
         self.tnc()?.command(&format!("MODE {}", m.index)).await?;
         self.set(|g| {
@@ -3914,6 +4438,7 @@ impl Station {
             from: me,
             body: TableBody::Speed {
                 mode_index: m.index,
+                last_id: self.table_msg_id,
             },
         }
         .encode();
@@ -3938,6 +4463,11 @@ impl Station {
         }
         self.tnc()?.send_broadcast(&f).await?;
         self.tnc()?.send_broadcast(&f).await?;
+        self.last_table_sent = Instant::now();
+        if old.name == "DATAC3" && m.payload_bps > old.payload_bps && self.join_window.is_none() {
+            // The first join window a full period after leaving DATAC3.
+            self.last_join_window = Instant::now();
+        }
         let at = Instant::now() + Duration::from_secs_f64(2.0 * old.frame_s + 3.0);
         self.pending_speed = Some((m, at));
         self.log(format!(
@@ -3949,7 +4479,7 @@ impl Station {
 
     /// Host only: move the table to the fastest mode everyone can copy.
     async fn ramp(&mut self) -> anyhow::Result<()> {
-        if !self.cfg.auto_ramp || self.pending_speed.is_some() {
+        if !self.cfg.auto_ramp || self.pending_speed.is_some() || self.join_window.is_some() {
             return Ok(());
         }
         let (host, worst, current) = {
@@ -3958,8 +4488,10 @@ impl Station {
                 return Ok(());
             };
             let recent = |m: &Member| {
+                // Members report every 2 min: after three missed reports a
+                // member no longer holds the table back.
                 m.last
-                    .is_some_and(|l| l.elapsed() < Duration::from_secs(300))
+                    .is_some_and(|l| l.elapsed() < TABLE_MEMBER_TIMEOUT)
             };
             let worst = t
                 .members
@@ -3989,11 +4521,31 @@ impl Station {
     // ---------------------------------------------------------------- tick
 
     async fn tick(&mut self) -> anyhow::Result<()> {
+        // An automatic call that hasn't linked: another station probably won
+        // the CQ, or the station is gone. Stop calling (Mercury would go on
+        // for minutes, on top of whoever is on the frequency).
+        if let Some(at) = self.auto_call
+            && self.peer.is_none()
+            && at.elapsed() > AUTO_CALL_GIVE_UP
+        {
+            self.auto_call = None;
+            self.link_auto = None;
+            let who = self.st.lock().unwrap().calling.take();
+            if let Some(t) = self.tnc.as_mut() {
+                let _ = t.command("ABORT").await;
+            }
+            self.log(format!(
+                "Gave up calling {} after {} s (no link)",
+                who.as_deref().unwrap_or("the station"),
+                AUTO_CALL_GIVE_UP.as_secs()
+            ));
+        }
         self.step_waterfall();
         self.step_monitor();
         self.step_pcm();
         self.step_wide().await?;
         self.step_automation().await?;
+        self.step_auto_pending().await?;
         self.step_qsy().await?;
         self.step_pending_join().await?;
         self.step_answer().await?;
@@ -4016,6 +4568,7 @@ impl Station {
             self.step_watch();
         }
         self.step_cq().await?;
+        self.step_table_timers().await?;
         self.step_table_tx().await?;
 
         if let Some(ch) = self.e2e.as_mut() {
@@ -4289,7 +4842,86 @@ impl Station {
         !g.tx && g.link.is_none() && g.calling.is_none() && !g.incoming_call
     }
 
+    /// Mercury's busy detector on (no link) or off (linked), if the
+    /// settings use it.
+    async fn busy_detect(&mut self, on: bool) {
+        if !self.cfg.busy_detect {
+            return;
+        }
+        if !on {
+            self.chan_busy = false;
+            self.busy_wait = None;
+            self.set(|g| g.channel_busy = false);
+        }
+        if let Some(t) = self.tnc.as_mut() {
+            let _ = t.command(if on { "BUSYDETECT ON" } else { "BUSYDETECT OFF" }).await;
+        }
+    }
+
+    /// May an unattended transmission go now? Not while the channel is busy,
+    /// but after BUSY_WAIT_MAX of waiting it goes anyway (a detector that
+    /// reads busy all the time, behind a narrow filter say, mustn't silence
+    /// the station).
+    fn clear_to_send(&mut self, what: &str) -> bool {
+        if !self.chan_busy {
+            self.busy_wait = None;
+            return true;
+        }
+        let now = Instant::now();
+        // Not asked for a few seconds: whatever waited gave up meanwhile.
+        if self
+            .busy_wait
+            .is_some_and(|(_, last)| now.duration_since(last) > Duration::from_secs(3))
+        {
+            self.busy_wait = None;
+        }
+        match self.busy_wait {
+            None => {
+                self.busy_wait = Some((now, now));
+                self.log(format!("{what} waits: someone is transmitting on this frequency"));
+                false
+            }
+            Some((t, _)) if t.elapsed() >= BUSY_WAIT_MAX => {
+                self.busy_wait = None;
+                self.log(format!(
+                    "{what}: the channel has read busy for {} s; sending anyway",
+                    BUSY_WAIT_MAX.as_secs()
+                ));
+                true
+            }
+            Some((t, _)) => {
+                self.busy_wait = Some((t, now));
+                false
+            }
+        }
+    }
+
+    /// Before calling a station: a real call of ours and theirs, not linked
+    /// or at a Roundtable already; a running CQ stops (its whistle and
+    /// CQFRAME would go out on top of the call).
+    async fn ready_to_call(&mut self, call: &str) -> anyhow::Result<()> {
+        if !crate::protocol::valid_call(call) {
+            anyhow::bail!("{call:?} isn't a callsign");
+        }
+        if !crate::protocol::valid_call(&self.mycall()) {
+            anyhow::bail!("set your own callsign first (Settings → Station)");
+        }
+        if self.peer.is_some() || self.st.lock().unwrap().calling.is_some() {
+            anyhow::bail!("already linked (or calling): disconnect first");
+        }
+        if self.st.lock().unwrap().table.is_some() {
+            anyhow::bail!("you're at a Roundtable: Leave it first, then call");
+        }
+        self.stop_cq("CQ stopped: calling a station").await;
+        Ok(())
+    }
+
     fn cooled(&mut self, call: &str, secs: u64) -> bool {
+        // Forget stations not heard from in a day (the map would grow).
+        if self.auto_cooldown.len() > 256 {
+            self.auto_cooldown
+                .retain(|_, t| t.elapsed() < Duration::from_secs(86_400));
+        }
         let ok = self
             .auto_cooldown
             .get(call)
@@ -4324,13 +4956,8 @@ impl Station {
             && self.auto_allowed()
             && self.cooled(&format!("deliver {call}"), 900)
         {
-            let me = self.mycall();
-            self.tnc()?.command(&format!("CONNECT {me} {call}")).await?;
-            self.link_auto = Some(true);
-            self.set(|g| g.calling = Some(call.clone()));
-            self.log(format!(
-                "🤖 Away: connecting to {call} to deliver {n} Depot message(s)"
-            ));
+            self.auto_pending = Some((call, true, Instant::now()));
+            self.step_auto_pending().await?;
         } else if self.cfg.notify_mail
             && self.auto_allowed()
             && self.cooled(&format!("notice {call}"), 900)
@@ -4372,23 +4999,67 @@ impl Station {
             && self.auto_allowed()
             && self.cooled(&format!("collect {call}"), 900)
         {
-            let me = self.mycall();
-            self.tnc()?.command(&format!("CONNECT {me} {call}")).await?;
-            self.link_auto = Some(false);
-            self.set(|g| g.calling = Some(call.clone()));
+            self.auto_pending = Some((call, false, Instant::now()));
+            self.step_auto_pending().await?;
+        }
+        Ok(())
+    }
+
+    /// Place the waiting automatic deliver/collect call once the channel is
+    /// clear (the frame that set it off has just ended, and the detector
+    /// holds BUSY a moment longer). Dropped if things change meanwhile.
+    async fn step_auto_pending(&mut self) -> anyhow::Result<()> {
+        let Some((call, deliver, at)) = self.auto_pending.clone() else {
+            return Ok(());
+        };
+        let still = self.away
+            && if deliver { self.cfg.auto_deliver } else { self.cfg.auto_collect }
+            && self.quiet()
+            && self.peer.is_none()
+            && self.cq.is_none()
+            && self.search.is_none()
+            && self.st.lock().unwrap().table.is_none()
+            && (!deliver || !self.depot.waiting_for(&call).is_empty());
+        if !still {
+            self.auto_pending = None;
+            return Ok(());
+        }
+        if at.elapsed() > AUTO_PENDING_MAX {
+            self.auto_pending = None;
             self.log(format!(
-                "🤖 Away: connecting to {call} to collect your mail"
+                "🤖 Away: no clear channel to call {call} in {} s; not calling",
+                AUTO_PENDING_MAX.as_secs()
             ));
+            return Ok(());
+        }
+        let what = if deliver { "Automatic delivery" } else { "Automatic collection" };
+        if !self.clear_to_send(what) {
+            return Ok(());
+        }
+        self.auto_pending = None;
+        let me = self.mycall();
+        self.tnc()?.command(&format!("CONNECT {me} {call}")).await?;
+        self.auto_call = Some(Instant::now());
+        self.quiet_watch();
+        self.link_auto = Some(deliver);
+        self.set(|g| g.calling = Some(call.clone()));
+        if deliver {
+            let n = self.depot.waiting_for(&call).len();
+            self.log(format!(
+                "🤖 Away: connecting to {call} to deliver {n} Depot message(s)"
+            ));
+        } else {
+            self.log(format!("🤖 Away: connecting to {call} to collect your mail"));
         }
         Ok(())
     }
 
     fn send_beacon(&mut self, why: &str) -> anyhow::Result<()> {
-        if self.tnc.is_none() {
+        if self.tnc.is_none() || !crate::protocol::valid_call(&self.mycall()) {
             // Counts as an attempt: otherwise the automation step would retry
             // (and fail, skipping the rest of the tick) ten times a second.
             self.last_beacon = Instant::now();
-            anyhow::bail!("Mercury is not connected");
+            anyhow::bail!("Mercury is not connected, or no callsign is set");
         }
         let me = self.mycall();
         let mut mail_for = self.depot.waiting_calls();
@@ -4491,6 +5162,7 @@ impl Station {
             && self.cq.is_none()
             && self.search.is_none()
             && self.table_queue.is_empty()
+            && self.clear_to_send("Station ID")
         {
             if self.auto_allowed() {
                 self.send_beacon("scheduled")?;

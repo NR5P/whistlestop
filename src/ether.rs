@@ -11,7 +11,9 @@
 //! Between stations it models an HF channel: each transmission is heard
 //! shifted by the difference of the dial frequencies (USB), with band noise,
 //! optional slow fading, and the receiver's 300-2700 Hz passband. A station's
-//! receiver is muted while it transmits.
+//! receiver is muted while it transmits. Any number of stations can share
+//! the band; with three or more, single paths can be made weaker
+//! (`Ether::set_pair_loss`).
 
 use std::collections::VecDeque;
 use std::f64::consts::PI;
@@ -81,6 +83,10 @@ struct Station {
 
 pub struct Ether {
     pub channel: Arc<Mutex<Channel>>,
+    /// Extra loss (dB) on single paths, `[receiver][transmitter]`, on top of
+    /// `Channel::path_loss_db`: unequal paths between three or more
+    /// stations. Empty (the default): every path the same.
+    pub pair_loss_db: Arc<Mutex<Vec<Vec<f64>>>>,
     /// (rigctld port, app audio port) per station, as actually bound (a
     /// port of 0 in the config picks a free one).
     pub ports: Vec<(u16, u16)>,
@@ -89,6 +95,24 @@ pub struct Ether {
 }
 
 impl Ether {
+    /// Extra loss between stations `a` and `b` (indexes in the order given
+    /// to `start`), both ways.
+    pub fn set_pair_loss(&self, a: usize, b: usize, db: f64) {
+        let n = self.stations.len();
+        let mut m = self.pair_loss_db.lock().unwrap();
+        if m.len() != n {
+            *m = vec![vec![0.0; n]; n];
+        }
+        m[a][b] = db;
+        m[b][a] = db;
+    }
+
+    /// The extra loss heard by `rx` from `tx`, dB.
+    pub fn pair_loss(&self, rx: usize, tx: usize) -> f64 {
+        let m = self.pair_loss_db.lock().unwrap();
+        m.get(rx).and_then(|v| v.get(tx)).copied().unwrap_or(0.0)
+    }
+
     pub fn stats(&self) -> Vec<StationStats> {
         self.stations
             .iter()
@@ -118,6 +142,7 @@ impl Ether {
                 .collect(),
         );
         let channel = Arc::new(Mutex::new(channel));
+        let pair_loss_db: Arc<Mutex<Vec<Vec<f64>>>> = Arc::default();
         let mut mercury_listeners = vec![];
         let mut ports = vec![];
         for (i, c) in cfgs.iter().enumerate() {
@@ -132,13 +157,19 @@ impl Ether {
             spawn_app_audio(al, stations.clone(), i, stop.clone());
         }
         {
-            let (stations, channel, stop) = (stations.clone(), channel.clone(), stop.clone());
+            let (stations, channel, pair_loss, stop) = (
+                stations.clone(),
+                channel.clone(),
+                pair_loss_db.clone(),
+                stop.clone(),
+            );
             std::thread::Builder::new()
                 .name("ether".into())
-                .spawn(move || run(stations, channel, mercury_listeners, stop))?;
+                .spawn(move || run(stations, channel, pair_loss, mercury_listeners, stop))?;
         }
         Ok(Ether {
             channel,
+            pair_loss_db,
             ports,
             stations,
             stop,
@@ -406,6 +437,7 @@ fn read_exact_timeout(s: &mut UnixStream, buf: &mut [u8]) -> std::io::Result<()>
 fn run(
     stations: Arc<Vec<Mutex<Station>>>,
     channel: Arc<Mutex<Channel>>,
+    pair_loss: Arc<Mutex<Vec<Vec<f64>>>>,
     listeners: Vec<UnixListener>,
     stop: Arc<AtomicBool>,
 ) {
@@ -444,6 +476,7 @@ fn run(
         let ch = channel.lock().unwrap().clone();
         let noise_rms = 10f64.powf(ch.noise_dbfs / 20.0) * (FS / 2.0 / 2500.0).sqrt();
         let gain = 10f64.powf(-ch.path_loss_db / 20.0);
+        let extra = pair_loss.lock().unwrap().clone();
         let now: Vec<(f64, bool, bool)> = stations
             .iter()
             .map(|s| {
@@ -484,6 +517,10 @@ fn run(
                     path_tail[r][t] = path_tail[r][t].saturating_sub(BLOCK);
                 }
                 if delta.abs() < 4000.0 && path_tail[r][t] > 0 {
+                    let gain = match extra.get(r).and_then(|v| v.get(t)) {
+                        Some(&db) if db != 0.0 => gain * 10f64.powf(-db / 20.0),
+                        _ => gain,
+                    };
                     let (path, out) = (&mut paths[r][t], &mut rx[r]);
                     path.process(&tx_prev[t], delta, gain, ch.fading, out);
                 }

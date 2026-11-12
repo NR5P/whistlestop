@@ -640,6 +640,9 @@ pub struct Outgoing {
     pub files: u64,
     /// Next offset to hand to the modem; None until the peer accepts.
     pub next: Option<u64>,
+    /// The station it's for: offered (and resumed) only on a link with them.
+    /// None: picked while not linked; it goes to the next station linked.
+    pub to: Option<String>,
 }
 
 impl Outgoing {
@@ -653,6 +656,7 @@ impl Outgoing {
             zipped,
             files,
             next: None,
+            to: None,
         }
     }
     pub fn offer(&self) -> Link {
@@ -730,6 +734,10 @@ impl Incoming {
         self.have() >= self.size
     }
     pub fn save_partial(&self) {
+        // Nothing received yet: nothing to resume from (and no empty file).
+        if self.data.is_empty() {
+            return;
+        }
         if let Some(p) = self.partial_path.parent() {
             let _ = std::fs::create_dir_all(p);
         }
@@ -854,6 +862,9 @@ pub enum TableBody {
     },
     Speed {
         mode_index: u8,
+        /// The host's newest message id (0: none). Optional on the wire
+        /// (older stations don't send it, and ignore it).
+        last_id: u64,
     },
     Again {
         of: String,
@@ -928,8 +939,11 @@ impl TableFrame {
             } => {
                 w.str(table_name).i8(*snr_of_host);
             }
-            TableBody::Speed { mode_index } => {
+            TableBody::Speed { mode_index, last_id } => {
                 w.u8(*mode_index);
+                if *last_id > 0 {
+                    w.uv(*last_id);
+                }
             }
             TableBody::Again { of, id, missing } => {
                 w.call(of).uv(*id).uv(*missing);
@@ -991,6 +1005,7 @@ impl TableFrame {
                 },
                 0x13 => TableBody::Speed {
                     mode_index: r.u8()?,
+                    last_id: r.uv().unwrap_or(0),
                 },
                 0x14 => TableBody::Again {
                     of: r.call()?,
@@ -1115,7 +1130,15 @@ pub struct TableAssembler {
     parts: HashMap<(String, u64), Partial>,
     done: HashMap<(String, u64), Instant>,
     done_order: VecDeque<((String, u64), Instant)>,
+    /// Each sender's newest message id seen: a jump means messages we never
+    /// heard a single frame of (a one-frame message lost whole).
+    latest: HashMap<String, u64>,
+    /// Those messages (asked for whole), and since when.
+    wanted: HashMap<(String, u64), Instant>,
 }
+
+/// At most this many skipped messages per sender are asked for.
+const TABLE_GAP_MAX: u64 = 16;
 
 impl TableAssembler {
     pub fn add(&mut self, from: &str, id: u64, part: u8, total: u8, data: &[u8]) -> Option<String> {
@@ -1137,6 +1160,8 @@ impl TableAssembler {
             return None;
         }
         let key = (from.to_string(), id);
+        self.wanted.remove(&key);
+        self.note_latest_at(now, from, id, false);
         if self.done.contains_key(&key) {
             return None;
         }
@@ -1181,6 +1206,11 @@ impl TableAssembler {
     pub fn expire(&mut self, now: Instant) {
         self.parts
             .retain(|_, p| now.saturating_duration_since(p.last) < TABLE_PARTIAL_TTL);
+        self.wanted
+            .retain(|_, t| now.saturating_duration_since(*t) < TABLE_PARTIAL_TTL);
+        if self.latest.len() > 256 {
+            self.latest.clear();
+        }
         while let Some((k, t)) = self.done_order.front() {
             if now.saturating_duration_since(*t) < TABLE_DONE_TTL {
                 break;
@@ -1189,6 +1219,41 @@ impl TableAssembler {
                 self.done.remove(k);
             }
             self.done_order.pop_front();
+        }
+    }
+
+    /// `from` has sent messages up to `id` (inclusive: the host's heartbeat
+    /// says so; not inclusive: a frame of message `id` itself arrived). Any
+    /// we never heard of are asked for whole. The first id heard from a
+    /// sender only sets where we start (no asking for the table's past).
+    pub fn note_latest(&mut self, from: &str, id: u64, inclusive: bool) {
+        self.note_latest_at(Instant::now(), from, id, inclusive)
+    }
+
+    pub fn note_latest_at(&mut self, now: Instant, from: &str, id: u64, inclusive: bool) {
+        if id == 0 {
+            return;
+        }
+        let Some(&h) = self.latest.get(from) else {
+            self.latest.insert(from.to_string(), if inclusive { id } else { id - 1 });
+            return;
+        };
+        if id + 64 < h {
+            // The sender restarted (ids count from 1 again).
+            self.latest.insert(from.to_string(), id);
+            return;
+        }
+        let end = if inclusive { id } else { id - 1 };
+        if end > h && end - h <= TABLE_GAP_MAX {
+            for g in h + 1..=end {
+                let k = (from.to_string(), g);
+                if !self.done.contains_key(&k) && !self.parts.contains_key(&k) {
+                    self.wanted.entry(k).or_insert(now);
+                }
+            }
+        }
+        if id > h {
+            self.latest.insert(from.to_string(), id);
         }
     }
 
@@ -1213,6 +1278,16 @@ impl TableAssembler {
                 (from.clone(), *id, m)
             })
             .filter(|x| x.2 != 0)
+            .chain(
+                self.wanted
+                    .iter()
+                    .filter(|(k, t)| {
+                        now.saturating_duration_since(**t) < TABLE_PARTIAL_TTL
+                            && !self.done.contains_key(*k)
+                            && !self.parts.contains_key(*k)
+                    })
+                    .map(|((from, id), _)| (from.clone(), *id, u64::MAX)),
+            )
             .collect()
     }
 }
@@ -1501,7 +1576,8 @@ mod tests {
                 table_name: "EVENING".into(),
                 snr_of_host: -4,
             },
-            TableBody::Speed { mode_index: 0 },
+            TableBody::Speed { mode_index: 0, last_id: 0 },
+            TableBody::Speed { mode_index: 1, last_id: 300 },
             TableBody::Again {
                 of: "K1ABC".into(),
                 id: 7,

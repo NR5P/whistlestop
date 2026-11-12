@@ -182,7 +182,7 @@ pub const H_LOCK: Topic = ("Lock on", "Tune the radio to this SDR hit and fine-l
 
 pub const BW_BUTTONS: Topic = (
     "Bandwidth limit",
-    "How wide Whistlestop may go, from 250 Hz to 2750 Hz. 1:1 links use Mercury's narrow ladder below 2300 Hz and the full ladder at 2300/2750; the narrower of the two stations' limits wins. Roundtables use any mode inside the limit. Below 1700 Hz the whistle switches to its narrow profile.",
+    "How wide Whistlestop may go, from 250 Hz to 2750 Hz. 1:1 links use Mercury's narrow ladder below 2300 Hz and the full ladder at 2300/2750; the narrower of the two stations' limits wins. Roundtables use any mode inside the limit. Below 1700 Hz the whistle switches to its narrow profile. Locked during a 1:1 link (it applies from the next one).",
     "Bandwidth and speed",
 );
 
@@ -207,7 +207,7 @@ pub const GUIDE_BTN: Topic = (
     "Help mode and the Guide",
 );
 pub const L_CONNECT: Topic =
-    ("Connect", "Call a station by callsign. Mercury places the call; when it answers, the link header shows their name, grid and signal report.", "Chat");
+    ("Connect", "Call a station by callsign. Mercury places the call; when it answers, the link header shows their name, grid and signal report. A CQ you're calling stops first. Not while you're at a Roundtable (Leave first).", "Chat");
 pub const L_DISCONNECT: Topic = ("Disconnect (73)", "Says goodbye, lets Mercury deliver anything still queued, then hangs up.", "Chat");
 pub const C_INPUT: Topic = (
     "Message",
@@ -227,6 +227,16 @@ pub const F_ESTIMATE: Topic =
     ("Estimate", "Pick any file to see how long it would take at every bandwidth and several signal levels, plus at the current SNR.", "Files");
 pub const F_ACCEPT: Topic = ("Accept", "Receive this file. If part of it arrived before (a dropped link), the transfer resumes from there.", "Files");
 pub const F_DECLINE: Topic = ("Decline", "Refuse this file; the sender is told.", "Files");
+pub const ST_BUSY: Topic = (
+    "Listen before transmitting",
+    "While not linked, Mercury's busy-channel detector listens: a CQ, Station ID or automatic deliver/collect call waits while someone else is transmitting (at most 60 s, then it goes anyway). What you send by hand goes at once. Turn off if the channel always reads busy (a receive filter narrower than ~1.8 kHz). On by default.",
+    "Listen before transmitting",
+);
+pub const F_SHOW: Topic = (
+    "Show",
+    "Show the received file in its folder (Finder on macOS, Explorer on Windows; on Linux the folder opens). Hover for its full path.",
+    "Files",
+);
 pub const F_CANCEL: Topic = ("Cancel", "Stop this transfer on both sides. A partly received file is kept so it can resume later.", "Files");
 
 pub const T_JOIN: Topic = ("Join here", "Join the named Roundtable on the frequency you're on (the host's frequency). Off during a 1:1 link: disconnect first.", "Roundtables");

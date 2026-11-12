@@ -1,15 +1,16 @@
-# Two-station test bench (real Mercury)
+# Two- and three-station test bench (real Mercury)
 
 `src/bin/twotest.rs` runs **two real Mercury modems and two Whistlestop
-engines on one computer**, joined by the **ether** (`src/ether.rs`), a
-simulated HF band:
+engines on one computer** (three, with CHARLIE, for the three-station
+scenarios), joined by the **ether** (`src/ether.rs`), a simulated HF band:
 
 - a virtual radio per station: a rigctld server tracking dial and PTT;
 - Mercury's own `-x sock` lockstep audio protocol (`audioio/sock_wire.h`);
 - an audio link for Whistlestop (its whistle goes on the air);
 - the channel between them: shift by the difference of dial frequencies
   (USB), band noise, optional fading, a 300–2700 Hz passband, and the
-  receiver muted while its station transmits.
+  receiver muted while its station transmits; with three stations, extra
+  loss on single paths (`Ether::set_pair_loss`), so the paths can differ.
 
 ## Build Mercury from source
 
@@ -168,6 +169,89 @@ Fixed after a review of the engine and the apps:
 Not changed: after a "measure again" hop in search, a silent next look
 still waits for the CQ at the re-measured frequency, which may be the
 stale one. Worth a look with the `scan` scenario.
+
+## Three-station scenarios
+
+Naming any of these adds a third station, **CHARLIE**, always an engine
+station (its own Mercury on control port 8340 and broadcast 8140, rigctld
+4652, app audio 7320, all moved by `TWOTEST_PORT_OFFSET`; logs
+`mercury-CHARLIE.log`, `whistlestop-CHARLIE.log`). It waits on 14.098 MHz, out of
+earshot, until a scenario tunes it to ALPHA's 14.10315 MHz. Without one of
+these names the bench is the two-station bench, unchanged.
+
+| Name | What it checks |
+|---|---|
+| `table3` | ALPHA hosts a Roundtable; CHARLIE is far away (it and ALPHA hear each other 25 dB weaker, channel SNR ≈ +8 dB; BRAVO hears both at ≈ +33 dB). The host's CALL heard by both; CHARLIE joins first, then BRAVO; the host sees both joins; a ~300-character message from each station reaches the other two; the host runs at the speed the weakest member can copy (not faster) and CHARLIE copies it; CHARLIE then only listens for 5+ minutes while BRAVO talks: the host must stay at CHARLIE's speed; CHARLIE leaves (LEAVE seen by host and BRAVO); the host may speed up for BRAVO; CHARLIE joins again after the speed-up (heard? the table slows for it?); everyone leaves: all three listen in DATAC3 again and hear ALPHA's next CQ CALL. About 20 min. |
+| `relay3` | ALPHA posts Depot mail for CHARLIE via BRAVO (relay on). ALPHA links BRAVO: the mail is In Transit at BRAVO (hops 1, handed by ALPHA) and ALPHA shows it Delivered, taken by BRAVO (MAILACK). BRAVO links CHARLIE by hand: it arrives in CHARLIE's Arrivals exactly once, hops 1 on the wire, and BRAVO's In Transit empties. Then twice more by automation: CHARLIE away with automatic collection hears BRAVO's Station ID listing it and collects by itself; BRAVO away with automatic delivery hears CHARLIE's Station ID and delivers by itself. About 8 min. |
+| `cq_pileup` | ALPHA calls CQ (20 s whistle, 2 cycles); BRAVO and CHARLIE both search with automatic answer, find it and call it at the same moment. ALPHA links with exactly one; the winner's link carries a chat; the other gives up cleanly (no link, no call or incoming call left showing, search stopped, its Mercury back to LISTENING); no whistle reported anywhere once ALPHA is linked; the other links ALPHA once the first link ends; no Mercury left out of LISTENING. About 8 min. |
+| `busy3` | BRAVO and CHARLIE linked on ALPHA's frequency, an 8 KB file BRAVO→CHARLIE, ALPHA parked there: ALPHA calls BRAVO (busy) and must give up cleanly while their link and file carry on; ALPHA's whistle watch must report no whistles from their traffic; ALPHA then calls CQ on top of them (how long it transmits over them is measured) and their link must survive; once they're done ALPHA links BRAVO; no Mercury stuck. About 8 min. |
+
+`... bench-run table3 relay3 cq_pileup busy3` takes about 45 min.
+
+## Three stations (2026-11-11): 28/32
+
+Mercury 1.9.23 ×3 on the ether, Ubuntu on WSL 2; two full runs, 28/32
+each, the same four failing (all product behaviour, listed below). The
+standard two-station set on the same build: 34/34.
+
+| Test | Result |
+|---|---|
+| Roundtable: host's CALL heard | **FAIL** (every three-station run): the CALL frame went out in DATAC16, 14 bytes, and every receiver discarded it |
+| Roundtable: joins, a 300-char message from each member to the other two | PASS: both joins in 4 s; messages across in 11–36 s |
+| Roundtable: speed for the weakest member | PASS: host stayed DATAC3 for CHARLIE (+7 dB report) though BRAVO could do more; CHARLIE copied the host |
+| Roundtable: weakest member only listens for 5 min | **FAIL**: host sped up to DATAC1 once CHARLIE's JOIN was 5 minutes old (CHARLIE, at ≈ +5 dB, still copied it this time, under the 3 dB margin) |
+| Roundtable: LEAVE; speed-up when the weak member left | PASS / PASS (already DATAC1, see above) |
+| Roundtable: a station joining after the speed-up | **FAIL**: its JOIN goes out in DATAC3, the host listens in DATAC1 and never hears it |
+| Roundtable: everyone left → DATAC3, next CQ CALL heard | PASS |
+| Relay: hand-over to BRAVO, MAILACK | PASS: 23 s; In Transit at BRAVO with hops 1, ALPHA's Delivered says BRAVO |
+| Relay: BRAVO links CHARLIE | PASS: arrived once, hops 1 on the wire, BRAVO's transit empty |
+| Relay: CHARLIE (away) collects after BRAVO's Station ID | PASS: alert in 4 s, collected in 22–30 s, hung up |
+| Relay: BRAVO (away) delivers after CHARLIE's Station ID | PASS: delivered in 39 s, hung up |
+| CQ pileup: both answer, ALPHA links exactly one | PASS: both CONNECTs within the same second; CHARLIE won after 113 s |
+| CQ pileup: winner's link, loser clean, loser links later, no modem stuck | PASS ×4: but neither call got through at first (no PENDING at ALPHA, so its second CQ whistle went out on top of both callers); CHARLIE linked 70 s after both called, and BRAVO's Mercury kept calling for 139 s, 50 s into the ALPHA–CHARLIE link (a chat took 55 s) |
+| CQ pileup: no false whistles once linked | **FAIL** (both runs): BRAVO, its call over, reported whistles (−10 Hz; −16 Hz) from the ALPHA–CHARLIE traffic |
+| Busy channel: ALPHA calls BRAVO (in a link with CHARLIE) | PASS: ALPHA gave up after 111–118 s; their link and 8 KB file fine |
+| Busy channel: no false whistles at ALPHA; CQ on top; ALPHA links later; no modem stuck | PASS ×4: ALPHA's CQ keyed 17.5 s, 5–7 s of it over their transmissions; nothing held it back |
+
+What they found (product code, for the product's own fixes):
+
+- **The CQ's CALL packet can go out in the wrong mode.** `step_cq` sends
+  `CQFRAME` and queues the CALL broadcast frame at once. When the frame
+  reaches Mercury while it is still sending the CQFRAME (DATAC16), Mercury
+  sends it in DATAC16, cut to 14 bytes ("Discarding broadcast frame: size 14
+  != expected 126" at every receiver). With three Mercuries on one computer
+  it happened every time for the first CQ of the run. A Roundtable that
+  isn't heard doesn't show under Heard. (Mercury: the switch back to the
+  listen mode for broadcast TX is skipped while `trx == TX`.)
+- **A Roundtable that has sped up can't be joined.** A JOIN is sent in
+  DATAC3, and the host listens only in the table's mode. The first member
+  that is strong enough makes the host speed up at once, so a second station
+  joining a few seconds later is never heard.
+- **Members report once, and the host forgets them.** A member's "hears the
+  host at" figure is sent only in its JOIN, and the host counts only members
+  heard in the last 5 minutes. A member that only listens drops out of the
+  ramp after 5 minutes and the host speeds up past it.
+- **A JOIN reports the last frame heard from anyone.** It takes Mercury's
+  latest `SN`, which is of whatever frame came last: BRAVO reported +10 dB
+  "hears the host", the SNR of CHARLIE's JOIN, while it heard ALPHA's frames
+  at +20–25.
+- **A station that answers a CQ automatically doesn't show it is calling**
+  (`calling` stays empty, the whistle watch keeps running), and its Mercury
+  kept calling for 139 s after losing a pileup, on top of the winner's link.
+- **The whistle watch still mistakes other stations' traffic for a whistle
+  now and then** (once in the pileup's link, once for BRAVO's CALL bursts at
+  CHARLIE during `relay3`).
+- **No listen-before-talk.** CQ (whistle and CQFRAME) and a call to a busy
+  station go out on top of a link already on the frequency (Mercury's
+  `BUSYDETECT` is not used). Their link survived on this bench.
+- **Two calls at once hide each other.** Neither got through at first, so
+  ALPHA's Mercury never said PENDING and the CQ went on to its next whistle
+  and CQFRAME on top of both callers.
+- **The relay hand-over is logged as delivered to the final station**: ALPHA's
+  Log said "✓ Mail delivered to CHARLIE" when BRAVO took it.
+- **Mercury's SNR depends on the mode measured.** At +33 dB on the ether,
+  DATAC3 frames read +9…+12 dB and DATAC16 ones +20…+25 dB, so a table whose
+  members report from DATAC3 frames never ramps beyond DATAC1.
 
 ## Cancel, resume, Require, away timeout (2026-11-11)
 

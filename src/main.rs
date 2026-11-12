@@ -3,6 +3,7 @@
 
 mod gui;
 
+use anyhow::Context;
 use clap::{Parser, Subcommand};
 use whistlestop::whistle::{WhistleParams, profile, whistle};
 
@@ -21,10 +22,10 @@ enum Command {
     WhistleWav {
         #[arg(default_value = "whistle.wav")]
         path: String,
-        #[arg(long, default_value_t = 6.0)]
+        /// 0.5 to 600 s.
+        #[arg(long, default_value_t = 6.0, value_parser = seconds_0_5_to_600)]
         seconds: f64,
-        /// wide or narrow
-        #[arg(long, default_value = "wide")]
+        #[arg(long, default_value = "wide", value_parser = ["wide", "narrow"])]
         profile: String,
     },
     /// List audio devices.
@@ -45,10 +46,19 @@ enum Command {
     CqDemo {
         #[arg(default_value = "demo-sounds")]
         dir: String,
-        /// Whistle length in the demo (the app's default is 24 s).
-        #[arg(long, default_value_t = 10.0)]
+        /// Whistle length in the demo, 0.5 to 600 s (the app's default is 10 s).
+        #[arg(long, default_value_t = 10.0, value_parser = seconds_0_5_to_600)]
         whistle: f64,
     },
+}
+
+/// A length in seconds a sound can sensibly have (and memory can hold).
+fn seconds_0_5_to_600(s: &str) -> Result<f64, String> {
+    let v: f64 = s.parse().map_err(|_| format!("{s:?} isn't a number of seconds"))?;
+    if !(0.5..=600.0).contains(&v) {
+        return Err(format!("{s} s is out of range: use 0.5 to 600 s"));
+    }
+    Ok(v)
 }
 
 fn main() -> anyhow::Result<()> {
@@ -70,7 +80,7 @@ fn main() -> anyhow::Result<()> {
             let p: WhistleParams = profile(&name).with_fs(48_000);
             let audio = whistle(seconds, &p);
             let spec = hound::WavSpec { channels: 1, sample_rate: p.fs, bits_per_sample: 16, sample_format: hound::SampleFormat::Int };
-            let mut w = hound::WavWriter::create(&path, spec)?;
+            let mut w = hound::WavWriter::create(&path, spec).with_context(|| format!("can't write {path}"))?;
             for s in audio {
                 w.write_sample((s * i16::MAX as f32) as i16)?;
             }
@@ -107,7 +117,7 @@ const DEMO_FS: u32 = 16_000;
 fn write_wav(path: &std::path::Path, x: &[f64]) -> anyhow::Result<()> {
     let peak = x.iter().fold(0.0f64, |m, v| m.max(v.abs())).max(1e-9);
     let spec = hound::WavSpec { channels: 1, sample_rate: DEMO_FS, bits_per_sample: 16, sample_format: hound::SampleFormat::Int };
-    let mut w = hound::WavWriter::create(path, spec)?;
+    let mut w = hound::WavWriter::create(path, spec).with_context(|| format!("can't write {}", path.display()))?;
     for v in x {
         w.write_sample((v / peak * 0.8 * i16::MAX as f64) as i16)?;
     }
@@ -176,7 +186,7 @@ fn on_air(x: &[f64], offset_hz: f64, snr_db: f64, seed: u64) -> Vec<f64> {
 
 fn cq_demo(dir: &str, whistle_s: f64) -> anyhow::Result<()> {
     let dir = std::path::Path::new(dir);
-    std::fs::create_dir_all(dir)?;
+    std::fs::create_dir_all(dir).with_context(|| format!("can't create the folder {}", dir.display()))?;
     let fs = DEMO_FS as f64;
     let silence = |s: f64| vec![0.0f64; (s * fs) as usize];
     let p = profile("wide").with_fs(DEMO_FS);
@@ -254,6 +264,6 @@ fn write_png(path: &str, w: u32, h: u32, rgba: &[u8]) -> anyhow::Result<()> {
     chunk(&mut out, b"IHDR", &ihdr);
     chunk(&mut out, b"IDAT", &z);
     chunk(&mut out, b"IEND", &[]);
-    std::fs::write(path, out)?;
+    std::fs::write(path, out).with_context(|| format!("can't write {path}"))?;
     Ok(())
 }

@@ -182,8 +182,12 @@ impl Tnc {
     }
 
     pub async fn setup(&mut self, mycall: &str, arq_bw: u32) -> Result<()> {
-        self.command(&format!("MYCALL {}", mycall.to_ascii_uppercase()))
-            .await?;
+        // Without a real callsign Mercury isn't given one (the engine refuses
+        // to call or CQ until there is one).
+        let mycall = mycall.trim().to_ascii_uppercase();
+        if crate::protocol::valid_call(&mycall) {
+            self.command(&format!("MYCALL {mycall}")).await?;
+        }
         self.command(&format!("BW{arq_bw}")).await?;
         self.command("LISTEN ON").await
     }

@@ -58,8 +58,14 @@ pub async fn run(p: BotPorts, stop: std::sync::Arc<std::sync::atomic::AtomicBool
     let mut dec = LinkDecoder::default();
     let mut peer: Option<String> = None;
     let mut chat_id = 0u64;
-    let mut incoming: Option<(u64, u64, Vec<u8>, [u8; 32])> = None;
-    let mut offer: Option<Outgoing> = None;
+    // Files coming in, by fid (size, data so far, sha): any number at once.
+    let mut incoming: std::collections::HashMap<u64, (u64, Vec<u8>, [u8; 32])> = Default::default();
+    // K7BOT's files: offered (next None) or being sent. Chunks go to
+    // Mercury only as its buffer empties, so a CANCEL stops them.
+    let mut offers: Vec<Outgoing> = vec![];
+    let mut mercury_buf = 0usize; // file bytes waiting in Mercury
+    let mut mercury_reported = 0usize; // its last BUFFER
+    let mut last_write = Instant::now();
     let mut table_msg = 0u64;
     let mut next_cq = Instant::now() + Duration::from_secs(4);
     let mut tick = tokio::time::interval(Duration::from_millis(250));
@@ -118,9 +124,26 @@ pub async fn run(p: BotPorts, stop: std::sync::Arc<std::sync::atomic::AtomicBool
                     }
                     TncEvent::Line(l) if l.starts_with("DISCONNECTED") => {
                         peer = None;
-                        incoming = None;
-                        offer = None;
-                        next_cq = Instant::now() + Duration::from_secs(20);
+                        incoming.clear();
+                        offers.clear();
+                        mercury_buf = 0;
+                        mercury_reported = 0;
+                        next_cq =Instant::now() + Duration::from_secs(20);
+                    }
+                    TncEvent::Line(l) if l.starts_with("BUFFER ") => {
+                        // As the engine counts it: bytes are counted when
+                        // written, and only Mercury's decreases (bytes sent)
+                        // are taken off (a report can trail the socket).
+                        if let Some(n) = l.split_whitespace().nth(1).and_then(|n| n.parse::<usize>().ok()) {
+                            let prev = std::mem::replace(&mut mercury_reported, n);
+                            if n < prev {
+                                mercury_buf = mercury_buf.saturating_sub(prev - n);
+                            }
+                            mercury_buf = mercury_buf.max(n);
+                            if n == 0 && last_write.elapsed() > Duration::from_secs(2) {
+                                mercury_buf = 0;
+                            }
+                        }
                     }
                     TncEvent::Line(_) => {}
                     TncEvent::Data(d) => {
@@ -134,7 +157,8 @@ pub async fn run(p: BotPorts, stop: std::sync::Arc<std::sync::atomic::AtomicBool
                                         let body = "Welcome to Whistlestop!\n\nThis file came from K7BOT over a real Mercury link.\n73\n".to_string().repeat(20);
                                         let o = Outgoing::new(500, "welcome-from-k7bot.txt".into(), body.into_bytes(), false, 1);
                                         tnc.send_data(&o.offer().encode()).await?;
-                                        offer = Some(o);
+                                        offers.retain(|x| x.fid != o.fid);
+                                        offers.push(o);
                                         "Sure, offering you a file now.".to_string()
                                     } else if t.contains("73") || t.contains("bye") {
                                         "73! Thanks for the contact.".to_string()
@@ -145,35 +169,44 @@ pub async fn run(p: BotPorts, stop: std::sync::Arc<std::sync::atomic::AtomicBool
                                     later.push((Instant::now() + Duration::from_secs(2), Link::Chat { id: chat_id, text: reply }.encode()));
                                 }
                                 Link::Offer { fid, size, sha, .. } => {
-                                    incoming = Some((fid, size, vec![], sha));
                                     tnc.send_data(&Link::Answer { fid, accept: true, resume_from: 0 }.encode()).await?;
+                                    if size == 0 {
+                                        // No chunks will come.
+                                        tnc.send_data(&Link::Done { fid, ok: sha256(&[]) == sha }.encode()).await?;
+                                    } else {
+                                        incoming.insert(fid, (size, vec![], sha));
+                                    }
                                 }
                                 Link::Chunk { fid, offset, data } => {
                                     let mut done = None;
-                                    if let Some((f, size, buf, sha)) = incoming.as_mut()
-                                        && *f == fid && offset == buf.len() as u64 {
+                                    if let Some((size, buf, sha)) = incoming.get_mut(&fid)
+                                        && offset == buf.len() as u64 {
                                             buf.extend_from_slice(&data);
                                             if buf.len() as u64 >= *size {
-                                                done = Some((fid, sha256(buf) == *sha));
+                                                done = Some(sha256(buf) == *sha);
                                             }
                                         }
-                                    if let Some((fid, ok)) = done {
-                                        incoming = None;
+                                    if let Some(ok) = done {
+                                        incoming.remove(&fid);
                                         tnc.send_data(&Link::Done { fid, ok }.encode()).await?;
                                         chat_id += 1;
-                                        later.push((Instant::now() + Duration::from_secs(1), Link::Chat { id: chat_id, text: "File received, checksum good. Nice!".into() }.encode()));
+                                        let t = if ok { "File received, checksum good. Nice!" } else { "That file arrived damaged (checksum wrong), sorry." };
+                                        later.push((Instant::now() + Duration::from_secs(1), Link::Chat { id: chat_id, text: t.into() }.encode()));
                                     }
                                 }
+                                // Either way: a file coming in is dropped, one going out stops.
+                                Link::Cancel { fid } => {
+                                    incoming.remove(&fid);
+                                    offers.retain(|o| o.fid != fid);
+                                }
                                 Link::Answer { fid, accept, resume_from } => {
-                                    if let Some(mut o) = offer.take()
-                                        && o.fid == fid && accept {
+                                    if accept {
+                                        if let Some(o) = offers.iter_mut().find(|o| o.fid == fid) {
                                             o.next = Some(resume_from);
-                                            let mut w = vec![];
-                                            while let Some(c) = o.next_chunk() {
-                                                w.extend(c.encode());
-                                            }
-                                            tnc.send_data(&w).await?;
                                         }
+                                    } else {
+                                        offers.retain(|o| o.fid != fid);
+                                    }
                                 }
                                 Link::Mail { id, .. } => {
                                     tnc.send_data(&Link::MailAck { id }.encode()).await?;
@@ -196,7 +229,7 @@ pub async fn run(p: BotPorts, stop: std::sync::Arc<std::sync::atomic::AtomicBool
                                 Some("K7BOT joining the table. Good evening all!")
                             }
                             TableBody::Text { part, total, .. } if part == total => Some("K7BOT: copy all, solid copy here."),
-                            TableBody::Speed { mode_index } => {
+                            TableBody::Speed { mode_index, .. } => {
                                 let _ = tnc.command(&format!("MODE {mode_index}")).await;
                                 None
                             }
@@ -221,6 +254,21 @@ pub async fn run(p: BotPorts, stop: std::sync::Arc<std::sync::atomic::AtomicBool
                 for (_, d) in due {
                     if peer.is_some() {
                         tnc.send_data(&d).await?;
+                    }
+                }
+                // Files out: keep about two chunks waiting in Mercury.
+                while peer.is_some() && mercury_buf < 2 * CHUNK {
+                    let Some(i) = offers.iter().position(|o| o.next.is_some()) else { break };
+                    match offers[i].next_chunk() {
+                        Some(c) => {
+                            let w = c.encode();
+                            mercury_buf += w.len();
+                            last_write = Instant::now();
+                            tnc.send_data(&w).await?;
+                        }
+                        None => {
+                            offers.remove(i);
+                        }
                     }
                 }
                 let (due, keep): (Vec<_>, Vec<_>) = later_bc.drain(..).partition(|(at, _)| *at <= now);

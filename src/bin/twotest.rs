@@ -1,12 +1,14 @@
 //! Two-station test bench: two real Mercury modems and two Whistlestop
 //! engines on one computer, joined by the ether (a simulated HF band).
+//! Naming a three-station scenario (`table3 relay3 cq_pileup busy3`) adds a
+//! third station, CHARLIE, with its own Mercury.
 //!
 //!   cargo run --release --bin twotest -- <path/to/mercury> [workdir] [--a=KIND] [--b=KIND] [scenario...]
 //!
 //! Scenarios run in order; name some to run only those. KIND picks what runs
 //! each station: `engine` (default, in this process), `desktop` (the desktop
 //! app), `ios` (the iPhone app in the booted Simulator) or `android` (the
-//! Android app in the emulator); the apps run their own real Mercury.
+//! Android app in the emulator); the apps run their own real Mercury. See docs/BENCH.md.
 
 #[cfg(unix)]
 fn main() -> anyhow::Result<()> {
@@ -29,16 +31,28 @@ mod bench {
     use whistlestop::config::Config;
     use whistlestop::engine::{self, Cmd, Dir, Handle, State, Who, XferState};
     use whistlestop::ether::{Channel, Ether, StationCfg};
-    use whistlestop::modes::Bandwidth;
+    use whistlestop::modes::{self, Bandwidth};
 
     const A: &str = "ALPHA";
     const B: &str = "BRAVO";
     const A_DIAL: f64 = 14_103_150.0;
+    /// The third station, started only when a three-station scenario is
+    /// named. It waits 5 kHz below ALPHA, out of earshot, until one tunes it.
+    const C: &str = "CHARLIE";
+    const C_DIAL: f64 = 14_098_000.0;
+    /// CHARLIE's Mercury control and broadcast ports, rigctld, app audio.
+    /// Scenarios that need CHARLIE.
+    const THREE: &[&str] = &["table3", "relay3", "cq_pileup", "busy3"];
+    /// table3: how much weaker CHARLIE hears ALPHA (and ALPHA CHARLIE) than
+    /// BRAVO does, dB.
+    const TABLE3_WEAK_DB: f64 = 25.0;
 
     struct Bench {
         ether: Ether,
         a: Handle,
         b: Handle,
+        /// CHARLIE, when a three-station scenario runs.
+        c: Option<Handle>,
         mercs: Vec<Child>,
         stations: Vec<Station>,
         work: PathBuf,
@@ -76,7 +90,13 @@ mod bench {
         let mut c = Config {
             callsign: call.into(),
             name: format!("{call} test station"),
-            grid: if call == A { "EM12".into() } else { "FN31".into() },
+            grid: if call == A {
+                "EM12".into()
+            } else if call == C {
+                "EN61".into()
+            } else {
+                "FN31".into()
+            },
             demo: false,
             mercury_host: "127.0.0.1".into(),
             mercury_port: port,
@@ -99,24 +119,34 @@ mod bench {
     }
 
     impl Bench {
-        fn start(mercury: &Path, work: PathBuf, kinds: [Kind; 2]) -> anyhow::Result<Bench> {
+        fn start(mercury: &Path, work: PathBuf, kinds: [Kind; 2], three: bool) -> anyhow::Result<Bench> {
             std::fs::create_dir_all(&work)?;
             let work = std::fs::canonicalize(&work)?;
             // Files the scenarios send; any of them may run without `files`.
             std::fs::create_dir_all(work.join("to-send"))?;
             let sa = work.join("a.sock");
             let sb = work.join("b.sock");
-            let ether = Ether::start(
-                vec![
-                    StationCfg { name: A.into(), sock_path: sa.clone(), rig_port: 4632 + off(), audio_port: 7300 + off(), dial_hz: A_DIAL, hear_own_tx: false },
-                    StationCfg { name: B.into(), sock_path: sb.clone(), rig_port: 4642 + off(), audio_port: 7310 + off(), dial_hz: 14_100_200.0, hear_own_tx: false },
-                ],
-                Channel::default(),
-            )?;
+            let sc = work.join("c.sock");
+            let mut ecfg = vec![
+                StationCfg { name: A.into(), sock_path: sa.clone(), rig_port: 4632 + off(), audio_port: 7300 + off(), dial_hz: A_DIAL, hear_own_tx: false },
+                StationCfg { name: B.into(), sock_path: sb.clone(), rig_port: 4642 + off(), audio_port: 7310 + off(), dial_hz: 14_100_200.0, hear_own_tx: false },
+            ];
+            if three {
+                ecfg.push(StationCfg { name: C.into(), sock_path: sc.clone(), rig_port: 4652 + off(), audio_port: 7320 + off(), dial_hz: C_DIAL, hear_own_tx: false });
+            }
+            let ether = Ether::start(ecfg, Channel::default())?;
             let mut mercs = vec![];
             let (st_a, a) = Station::start(kinds[0], 0, mercury, &work, &sa, &mut mercs)?;
             let (st_b, b) = Station::start(kinds[1], 1, mercury, &work, &sb, &mut mercs)?;
-            Ok(Bench { ether, a, b, mercs, stations: vec![st_a, st_b], work, results: vec![], started: Instant::now(), mark: (0, 0) })
+            let mut stations = vec![st_a, st_b];
+            let c = if three {
+                let (st_c, c) = Station::start(Kind::Engine, 2, mercury, &work, &sc, &mut mercs)?;
+                stations.push(st_c);
+                Some(c)
+            } else {
+                None
+            };
+            Ok(Bench { ether, a, b, c, mercs, stations, work, results: vec![], started: Instant::now(), mark: (0, 0) })
         }
 
         fn st<'a>(&self, h: &'a Handle) -> std::sync::MutexGuard<'a, State> {
@@ -160,7 +190,14 @@ mod bench {
         }
 
         fn update(&self, h: &Handle, f: impl FnOnce(&mut Config)) {
-            let mut c = self.stations[if std::ptr::eq(h, &self.a) { 0 } else { 1 }].cfg.clone();
+            let i = if std::ptr::eq(h, &self.a) {
+                0
+            } else if self.c.as_ref().is_some_and(|c| std::ptr::eq(h, c)) {
+                2
+            } else {
+                1
+            };
+            let mut c = self.stations[i].cfg.clone();
             f(&mut c);
             h.send(Cmd::Update(c));
         }
@@ -193,9 +230,12 @@ mod bench {
 
         fn s_ready(&mut self) {
             // An app's own Mercury starts with the app; give it time.
-            let ok = self.wait(120.0, |a, b| a.mercury_ok && b.mercury_ok && a.rig_ok && b.rig_ok && a.audio_ok && b.audio_ok);
+            let mut ok = self.wait(120.0, |a, b| a.mercury_ok && b.mercury_ok && a.rig_ok && b.rig_ok && a.audio_ok && b.audio_ok);
+            if ok.is_some() && self.c.is_some() {
+                ok = self.wait3(30.0, |_, _, c| c.mercury_ok && c.rig_ok && c.audio_ok);
+            }
             let stats = self.ether.stats();
-            let detail = format!(
+            let mut detail = format!(
                 "ready after {:.0} s; Mercury links {}/{}, ether sees Mercury {}/{} and apps {}/{}",
                 ok.map(|d| d.as_secs_f64()).unwrap_or(-1.0),
                 self.st(&self.a).mercury_ok,
@@ -205,6 +245,14 @@ mod bench {
                 stats[0].app_connected,
                 stats[1].app_connected
             );
+            if let Some(c) = &self.c {
+                detail += &format!(
+                    "; CHARLIE: Mercury link {}, ether sees Mercury {} and app {}",
+                    self.st(c).mercury_ok,
+                    stats[2].mercury_connected,
+                    stats[2].app_connected
+                );
+            }
             self.record("ready", ok.is_some(), detail);
         }
 
@@ -558,6 +606,11 @@ mod bench {
             // real radio does on TX), and the first trial would measure that.
             self.wait_air_quiet(25.0, 240.0);
             let w = Config::default().whistle_s;
+            // This measures the scan, not listen-before-transmit: the bench
+            // steps the noise up 22-28 dB at once, which Mercury's busy
+            // detector reads as a signal for minutes (and a real CQ would
+            // then wait up to a minute for a clear channel).
+            self.update(&self.a, |c| c.busy_detect = false);
             let base = self.ether.channel.lock().unwrap().noise_dbfs;
             for (label, extra_db) in [("normal", 0.0), ("weak", 22.0), ("very weak", 28.0)] {
                 self.ether.channel.lock().unwrap().noise_dbfs = base + extra_db;
@@ -607,6 +660,7 @@ mod bench {
                 );
             }
             self.ether.channel.lock().unwrap().noise_dbfs = base;
+            self.update(&self.a, |c| c.busy_detect = true);
         }
 
         /// QSY and the library over real Mercury, BRAVO away and serving:
@@ -1076,12 +1130,881 @@ mod bench {
             self.b.send(Cmd::SetBandwidth(Bandwidth::Hz2300));
         }
 
-        fn report(&self) -> String {
-            let mut s = format!(
-                "# Whistlestop two-station bench (real Mercury 1.9.23 ×2)\n\nALPHA: {}. BRAVO: {}.\n\n",
-                self.stations[0].kind.label(),
-                self.stations[1].kind.label()
+        // ------------------------------------------------------ three stations
+
+        fn c(&self) -> &Handle {
+            self.c.as_ref().expect("CHARLIE runs only when a three-station scenario is named")
+        }
+
+        fn all(&self) -> [&Handle; 3] {
+            [&self.a, &self.b, self.c()]
+        }
+
+        fn handle_of(&self, call: &str) -> Option<&Handle> {
+            match call {
+                A => Some(&self.a),
+                B => Some(&self.b),
+                C => self.c.as_ref(),
+                _ => None,
+            }
+        }
+
+        /// Wait for a condition on all three stations' state.
+        fn wait3(&self, secs: f64, f: impl Fn(&State, &State, &State) -> bool) -> Option<Duration> {
+            let t = Instant::now();
+            while t.elapsed() < Duration::from_secs_f64(secs) {
+                if self.peek3(|a, b, c| f(a, b, c)) {
+                    return Some(t.elapsed());
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            None
+        }
+
+        /// Read all three stations' state at once.
+        fn peek3<T>(&self, f: impl FnOnce(&State, &State, &State) -> T) -> T {
+            let (a, b, c) = (self.a.state.lock().unwrap(), self.b.state.lock().unwrap(), self.c().state.lock().unwrap());
+            f(&a, &b, &c)
+        }
+
+        fn pick<'s>(call: &str, a: &'s State, b: &'s State, c: &'s State) -> &'s State {
+            match call {
+                A => a,
+                B => b,
+                _ => c,
+            }
+        }
+
+        fn linked_with(s: &State, peer: &str) -> bool {
+            s.link.as_ref().is_some_and(|l| l.peer == peer)
+        }
+
+        fn took(d: Option<Duration>) -> String {
+            d.map(|d| format!("in {:.0} s", d.as_secs_f64())).unwrap_or("NO".into())
+        }
+
+        /// Everyone leaves any table and link, and stops calling and searching.
+        fn disconnect_all(&self) {
+            for h in self.all() {
+                if self.st(h).table.is_some() {
+                    h.send(Cmd::LeaveTable);
+                }
+            }
+            for _ in 0..3 {
+                let Some(h) = self.all().into_iter().find(|h| self.st(h).link.is_some()) else { break };
+                let peer = self.st(h).link.as_ref().map(|l| l.peer.clone()).unwrap_or_default();
+                h.send(Cmd::Disconnect);
+                let t = Instant::now();
+                while t.elapsed() < Duration::from_secs(90) {
+                    if self.st(h).link.is_none() && self.handle_of(&peer).is_none_or(|p| self.st(p).link.is_none()) {
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(200));
+                }
+            }
+            for h in self.all() {
+                h.send(Cmd::StopCq);
+                h.send(Cmd::StopSearch);
+            }
+            std::thread::sleep(Duration::from_secs(2));
+        }
+
+        /// `from` calls `to` (both on ALPHA's frequency); records the connect.
+        fn link3(&mut self, from: &str, to: &str, label: &str) -> bool {
+            self.handle_of(from).unwrap().send(Cmd::Connect(to.into()));
+            let t = self.wait3(180.0, |a, b, c| Self::linked_with(Self::pick(from, a, b, c), to) && Self::linked_with(Self::pick(to, a, b, c), from));
+            self.record(label, t.is_some(), format!("{from} → {to} linked {}", Self::took(t)));
+            t.is_some()
+        }
+
+        /// Where a station's log ends now (it keeps only its last 500 lines,
+        /// so a plain index would drift).
+        fn log_mark(&self, h: &Handle) -> (usize, Option<String>) {
+            let g = self.st(h);
+            (g.log.len(), g.log.back().map(|l| l.1.clone()))
+        }
+
+        fn log_after(&self, h: &Handle, mark: &(usize, Option<String>)) -> Vec<String> {
+            let g = self.st(h);
+            let start = match &mark.1 {
+                None => 0,
+                Some(t) => (0..mark.0.min(g.log.len())).rev().find(|&i| &g.log[i].1 == t).map(|i| i + 1).unwrap_or(0),
+            };
+            g.log.iter().skip(start).map(|l| l.1.clone()).collect()
+        }
+
+        fn count_after(&self, h: &Handle, mark: &(usize, Option<String>), pat: &str) -> usize {
+            self.log_after(h, mark).iter().filter(|l| l.contains(pat)).count()
+        }
+
+        fn merc_log(&self, tag: &str) -> String {
+            let call = match tag {
+                "A" => A,
+                "B" => B,
+                "C" => C,
+                t => t,
+            };
+            std::fs::read_to_string(self.work.join(format!("mercury-{call}.log"))).unwrap_or_default()
+        }
+
+        /// Mercury's ARQ state after its last change ("conn: X -> Y" in its
+        /// log), and how many times it went to `to` after byte `from`.
+        fn merc_state(&self, tag: &str) -> String {
+            self.merc_log(tag)
+                .lines()
+                .rev()
+                .find_map(|l| l.split("conn: ").nth(1).and_then(|s| s.split("-> ").nth(1)).map(|s| s.trim().to_string()))
+                .unwrap_or("?".into())
+        }
+
+        fn merc_count(&self, tag: &str, from: usize, pat: &str) -> usize {
+            let log = self.merc_log(tag);
+            log.get(from.min(log.len())..).unwrap_or("").lines().filter(|l| l.contains(pat)).count()
+        }
+
+        fn merc_len(&self, tag: &str) -> usize {
+            self.merc_log(tag).len()
+        }
+
+        /// Seconds of the day of the first line after byte `from` with `pat`
+        /// ("2026-11-11 19:05:13.257 …").
+        fn merc_time(&self, tag: &str, from: usize, pat: &str) -> Option<f64> {
+            let log = self.merc_log(tag);
+            let l = log.get(from.min(log.len())..)?.lines().find(|l| l.contains(pat))?;
+            let hms = l.split_whitespace().nth(1)?;
+            let mut p = hms.split(':');
+            let (h, m, s): (f64, f64, f64) = (p.next()?.parse().ok()?, p.next()?.parse().ok()?, p.next()?.parse().ok()?);
+            Some(h * 3600.0 + m * 60.0 + s)
+        }
+
+        /// The channel SNR of every path (from the TX levels seen so far).
+        fn snr3_note(&self) -> String {
+            let s = self.ether.stats();
+            let ch = self.ether.channel.lock().unwrap().clone();
+            let nominal = s.iter().map(|x| x.tx_rms).fold(0.0, f64::max);
+            let lvl = |r: f64| if r > 0.0 { 20.0 * r.log10() } else { -99.0 };
+            let names = ["A", "B", "C"];
+            let mut v = vec![];
+            for t in 0..3 {
+                for r in 0..3 {
+                    if r != t {
+                        let tx = if s[t].tx_rms > 0.0 { s[t].tx_rms } else { nominal };
+                        v.push(format!("{}→{} {:+.0} dB", names[t], names[r], lvl(tx) - ch.path_loss_db - self.ether.pair_loss(r, t) - ch.noise_dbfs));
+                    }
+                }
+            }
+            format!("channel SNR {}", v.join(", "))
+        }
+
+        fn accept_on(&self, rx: &Handle, name: &str, secs: f64) -> Option<(u64, u64)> {
+            let t = Instant::now();
+            loop {
+                let found = self
+                    .st(rx)
+                    .transfers
+                    .iter()
+                    .rev()
+                    .find(|t| t.dir == Dir::In && t.name == name && t.state == XferState::WaitingForYou)
+                    .map(|t| (t.fid, t.done));
+                if let Some((fid, have)) = found {
+                    rx.send(Cmd::AnswerOffer { fid, accept: true });
+                    return Some((fid, have));
+                }
+                if t.elapsed().as_secs_f64() > secs {
+                    return None;
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
+        }
+
+        fn member(s: &State, who: &str) -> bool {
+            s.table.as_ref().is_some_and(|t| t.members.contains_key(who))
+        }
+
+        fn has_line(s: &State, from: &str, text: &str) -> bool {
+            s.table.as_ref().is_some_and(|t| t.lines.iter().any(|l| l.1 == from && l.2 == text))
+        }
+
+        fn table_mode(s: &State) -> &'static str {
+            s.table.as_ref().map(|t| t.mode.name).unwrap_or("-")
+        }
+
+        fn table_bps(s: &State) -> f64 {
+            s.table.as_ref().map(|t| t.mode.payload_bps).unwrap_or(0.0)
+        }
+
+        fn listen(s: &State) -> &'static str {
+            s.listen_mode.map(|m| m.name).unwrap_or("?")
+        }
+
+        /// The host's members and what each reported.
+        fn reports(s: &State) -> String {
+            let mut v: Vec<String> = s
+                .table
+                .as_ref()
+                .map(|t| t.members.iter().map(|(k, m)| format!("{k} {}", m.snr_of_host.map(|v| format!("{v:+} dB")).unwrap_or("?".into()))).collect())
+                .unwrap_or_default();
+            v.sort();
+            if v.is_empty() { "none".into() } else { v.join(", ") }
+        }
+
+        fn now_s() -> u64 {
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+        }
+
+        fn heard_since(s: &State, call: &str, what: &str, since: u64) -> bool {
+            s.heard.iter().any(|h| h.call == call && h.what == what && h.at.0 >= since)
+        }
+
+        /// A Roundtable of three on unequal paths. CHARLIE is far away: it
+        /// hears ALPHA (the host) `TABLE3_WEAK_DB` weaker than BRAVO does,
+        /// and ALPHA hears it as weakly; BRAVO and CHARLIE hear each other
+        /// well. The weak member joins first: a JOIN goes out in DATAC3, so a
+        /// host that has already sped up for a strong member couldn't hear it
+        /// (that case is checked at the end, as a late join).
+        fn s_table3(&mut self) {
+            const NAME: &str = "Three Table";
+            self.disconnect_all();
+            self.wait_air_quiet(10.0, 120.0);
+            self.ether.set_pair_loss(0, 2, TABLE3_WEAK_DB);
+            self.b.send(Cmd::SetFreq(A_DIAL));
+            self.c().send(Cmd::SetFreq(A_DIAL));
+            self.update(&self.a, |c| {
+                c.whistle_s = 6.0;
+                c.cq_cycles = 1;
+                c.cq_listen_s = 5.0;
+            });
+            std::thread::sleep(Duration::from_secs(3));
+            self.a.send(Cmd::CallCq { table: Some(NAME.into()) });
+            let called = |s: &State| s.heard.iter().any(|h| h.call == A && h.table.as_deref() == Some(NAME));
+            let heard = self.wait3(60.0, |_, b, c| called(b) && called(c));
+            println!("   table3 paths: {}", self.snr3_note());
+            self.c().send(Cmd::JoinTable(NAME.into()));
+            let cj = self.wait3(90.0, |a, _, _| Self::member(a, C));
+            std::thread::sleep(Duration::from_secs(5));
+            self.b.send(Cmd::JoinTable(NAME.into()));
+            let bj = self.wait3(90.0, |a, _, _| Self::member(a, B));
+            let (reports, hb, hc) = self.peek3(|a, b, c| (Self::reports(a), called(b), called(c)));
+            // Joining needs only the table's name ("Join here"), so the CALL
+            // is a check of its own.
+            self.record(
+                "table3: the host's CALL is heard (Roundtable under Heard)",
+                heard.is_some(),
+                format!("BRAVO {hb}, CHARLIE {hc} ({} after the CQ began)", Self::took(heard)),
             );
+            self.record(
+                "table3: host sees both joins",
+                cj.is_some() && bj.is_some(),
+                format!(
+                    "CHARLIE's join seen by the host {}, BRAVO's {}; host's members (as they hear the host): {reports}; table speed now host {}",
+                    Self::took(cj),
+                    Self::took(bj),
+                    Self::table_mode(&self.st(&self.a))
+                ),
+            );
+            if cj.is_none() && bj.is_none() {
+                self.disconnect_all();
+                self.ether.set_pair_loss(0, 2, 0.0);
+                return;
+            }
+
+            // A multi-frame message from each station, one after another.
+            let mut all_ok = true;
+            let mut notes = vec![];
+            let mut c_spoke = Instant::now();
+            for who in [A, B, C] {
+                let text = format!(
+                    "{who} here with a longer Roundtable message, split over several broadcast frames, to check that every station puts it back together in the right order. "
+                )
+                .repeat(2)
+                    + "73";
+                if who == C {
+                    c_spoke = Instant::now();
+                }
+                self.handle_of(who).unwrap().send(Cmd::TableSay(text.clone()));
+                let t = self.wait3(300.0, |a, b, c| [(A, a), (B, b), (C, c)].iter().all(|(n, s)| *n == who || Self::has_line(s, who, &text)));
+                let got: Vec<&str> =
+                    self.peek3(|a, b, c| [(A, a), (B, b), (C, c)].iter().filter(|(n, s)| *n != who && Self::has_line(s, who, &text)).map(|(n, _)| *n).collect());
+                all_ok &= t.is_some();
+                notes.push(format!("{who}'s {} chars reached {} {}", text.len(), if got.is_empty() { "nobody".into() } else { got.join(" and ") }, Self::took(t)));
+            }
+            let modes_now = self.peek3(|a, b, c| format!("table speed A {} / B {} / C {}", Self::table_mode(a), Self::table_mode(b), Self::table_mode(c)));
+            self.record("table3: a multi-frame message from each member reaches the other two", all_ok, format!("{}; {modes_now}", notes.join("; ")));
+
+            // The host re-checks the speed every 30 s: give it two goes.
+            std::thread::sleep(Duration::from_secs(65));
+            let (ma, mb, mc, worst, reports) = self.peek3(|a, b, c| {
+                (
+                    Self::table_mode(a),
+                    Self::table_mode(b),
+                    Self::table_mode(c),
+                    a.table.as_ref().and_then(|t| t.members.values().filter_map(|m| m.snr_of_host).min()),
+                    Self::reports(a),
+                )
+            });
+            let want = worst.map(|w| modes::best_mode(Bandwidth::Hz2300, w as f64, 3.0).name).unwrap_or("-");
+            let probe = "ALPHA at the table's speed: CHARLIE, do you copy?";
+            self.a.send(Cmd::TableSay(probe.into()));
+            let copied = self.wait3(240.0, |_, _, c| Self::has_line(c, A, probe));
+            self.record(
+                "table3: host runs at the speed the weakest member can copy",
+                ma == want && mb == ma && mc == ma && copied.is_some(),
+                format!(
+                    "host {ma}, BRAVO {mb}, CHARLIE {mc}; reports {reports} → weakest {worst:?} dB → {want} expected (3 dB margin); CHARLIE copied the host at that speed {}",
+                    Self::took(copied)
+                ),
+            );
+
+            // CHARLIE now only listens while BRAVO keeps talking. The host
+            // counts only reports from members heard in the last 5 minutes.
+            let mut said = 0;
+            while c_spoke.elapsed() < Duration::from_secs(330) {
+                said += 1;
+                self.b.send(Cmd::TableSay(format!("BRAVO again ({said})")));
+                std::thread::sleep(Duration::from_secs(60).min(Duration::from_secs(331).saturating_sub(c_spoke.elapsed())));
+            }
+            // Two ramp checks, and a switch announced in DATAC3 (~10 s).
+            std::thread::sleep(Duration::from_secs(70));
+            let (ma, mc) = self.peek3(|a, _, c| (Self::table_mode(a), Self::table_mode(c)));
+            let probe = "ALPHA again, after CHARLIE has listened for five minutes";
+            self.a.send(Cmd::TableSay(probe.into()));
+            let copied = self.wait3(150.0, |_, _, c| Self::has_line(c, A, probe));
+            self.record(
+                "table3: host stays at the weakest member's speed while that member only listens",
+                ma == want && copied.is_some(),
+                format!(
+                    "CHARLIE silent {:.0} s, BRAVO spoke {said}×; host {ma} (CHARLIE listening in {mc}), {want} expected; CHARLIE copied the host {}",
+                    c_spoke.elapsed().as_secs_f64(),
+                    Self::took(copied)
+                ),
+            );
+
+            // The weak member leaves.
+            let before_leave = Self::table_mode(&self.st(&self.a));
+            self.c().send(Cmd::LeaveTable);
+            let left_line = |s: &State| s.table.as_ref().is_some_and(|t| t.lines.iter().any(|l| l.1.is_empty() && l.2 == format!("{C} left")));
+            let left = self.wait3(120.0, |a, b, c| !Self::member(a, C) && left_line(a) && left_line(b) && c.table.is_none());
+            let back = self.wait3(30.0, |_, _, c| Self::listen(c) == "DATAC3");
+            let (lc, ra) = self.peek3(|a, _, c| (Self::listen(c), Self::reports(a)));
+            self.record(
+                "table3: LEAVE handled (host and the other member)",
+                left.is_some() && back.is_some(),
+                format!("CHARLIE gone from the host's members, \"{C} left\" at ALPHA and BRAVO {}; CHARLIE listens in {lc}; host's members now {ra}", Self::took(left)),
+            );
+
+            // Only BRAVO (strong) is left: the host may speed up.
+            let dc3 = modes::mode_by_name("DATAC3").unwrap().payload_bps;
+            let faster = self.wait3(180.0, |a, b, _| Self::table_bps(a) > dc3 && Self::table_mode(b) == Self::table_mode(a));
+            let talk = if faster.is_some() {
+                let t = "BRAVO at the new speed";
+                self.b.send(Cmd::TableSay(t.into()));
+                self.wait3(120.0, |a, _, _| Self::has_line(a, B, t))
+            } else {
+                None
+            };
+            let (ma, mb) = self.peek3(|a, b, _| (Self::table_mode(a), Self::table_mode(b)));
+            self.record(
+                "table3: host speeds up once the weak member has left",
+                faster.is_some() && talk.is_some(),
+                format!(
+                    "host {before_leave} when CHARLIE left, now {ma}, BRAVO {mb} (faster than DATAC3 {}); BRAVO→ALPHA at that speed {}",
+                    Self::took(faster),
+                    Self::took(talk)
+                ),
+            );
+
+            // A station joining now: its JOIN goes out in DATAC3, which the
+            // host hears at its next join window (every 3 minutes, 20 s).
+            if faster.is_some() {
+                self.c().send(Cmd::JoinTable(NAME.into()));
+                let lj = self.wait3(240.0, |a, _, _| Self::member(a, C));
+                let slowed = if lj.is_some() { self.wait3(90.0, |a, _, c| Self::table_bps(a) <= dc3 && Self::table_mode(c) == Self::table_mode(a)) } else { None };
+                let (ma, mc, ra) = self.peek3(|a, _, c| (Self::table_mode(a), Self::table_mode(c), Self::reports(a)));
+                self.record(
+                    "table3: a station joining after the speed-up is heard (and the table slows for it)",
+                    lj.is_some() && slowed.is_some(),
+                    format!("CHARLIE's JOIN (sent in DATAC3) seen by the host {}; slowed {}; host {ma}, CHARLIE {mc}; host's members {ra}", Self::took(lj), Self::took(slowed)),
+                );
+            }
+
+            // Everyone leaves: back to DATAC3, the calling mode.
+            self.b.send(Cmd::LeaveTable);
+            std::thread::sleep(Duration::from_secs(1));
+            if self.st(self.c()).table.is_some() {
+                self.c().send(Cmd::LeaveTable);
+            }
+            std::thread::sleep(Duration::from_secs(1));
+            self.a.send(Cmd::LeaveTable);
+            let calling = self.wait3(120.0, |a, b, c| [a, b, c].iter().all(|s| s.table.is_none() && Self::listen(s) == "DATAC3"));
+            let lm = self.peek3(|a, b, c| format!("A {} / B {} / C {}", Self::listen(a), Self::listen(b), Self::listen(c)));
+            // And they hear calls again: ALPHA calls CQ, whose CALL packet goes
+            // out in DATAC3.
+            self.wait_air_quiet(5.0, 60.0);
+            self.update(&self.a, |c| {
+                c.whistle_s = 4.0;
+                c.cq_cycles = 1;
+                c.cq_listen_s = 5.0;
+            });
+            std::thread::sleep(Duration::from_secs(1));
+            let t0 = Self::now_s();
+            self.a.send(Cmd::CallCq { table: None });
+            let cq = self.wait3(60.0, |_, b, c| Self::heard_since(b, A, "CQ (chat)", t0) && Self::heard_since(c, A, "CQ (chat)", t0));
+            self.a.send(Cmd::StopCq);
+            self.record(
+                "table3: after everyone leaves, all listen in DATAC3 (calling mode)",
+                calling.is_some() && cq.is_some(),
+                format!("listen modes {lm} {}; ALPHA's next CQ CALL heard by BRAVO and CHARLIE {}", Self::took(calling), Self::took(cq)),
+            );
+            self.ether.set_pair_loss(0, 2, 0.0);
+            self.update(&self.a, |_| {});
+            std::thread::sleep(Duration::from_secs(3));
+        }
+
+        /// ALPHA posts mail for CHARLIE via BRAVO; returns its id.
+        fn post_via_b(&self, text: &str) -> Option<u64> {
+            self.a.send(Cmd::DepotPost { to: C.into(), via: Some(B.into()), text: text.into() });
+            self.wait3(10.0, |a, _, _| a.depot.departures.iter().any(|m| m.text == text))?;
+            self.st(&self.a).depot.departures.iter().find(|m| m.text == text).map(|m| m.id)
+        }
+
+        fn in_transit(s: &State, id: u64) -> bool {
+            s.depot.transit.iter().any(|m| m.id == id)
+        }
+
+        fn delivered_to(s: &State, id: u64, by: &str) -> bool {
+            s.depot.delivered.iter().any(|m| m.id == id && m.handed.as_deref() == Some(by))
+        }
+
+        fn arrivals(s: &State, id: u64) -> usize {
+            s.depot.arrivals.iter().filter(|m| m.id == id).count()
+        }
+
+        /// ALPHA hands mail `id` to BRAVO over a link; true when BRAVO has it
+        /// In Transit and ALPHA shows it delivered to BRAVO.
+        fn hand_to_relay(&mut self, id: u64, label: &str) -> Option<Duration> {
+            self.disconnect_all();
+            self.wait_air_quiet(10.0, 120.0);
+            if !self.link3(A, B, label) {
+                return None;
+            }
+            let t = self.wait3(180.0, |a, b, _| Self::in_transit(b, id) && Self::delivered_to(a, id, B));
+            self.disconnect_all();
+            t
+        }
+
+        /// Store and forward: ALPHA's mail for CHARLIE goes via BRAVO (relay
+        /// on). Hand-over to the relay, then BRAVO links CHARLIE by hand;
+        /// then CHARLIE (away, automatic collection) hears BRAVO's Station
+        /// ID and collects by itself; then BRAVO (away, automatic delivery)
+        /// hears CHARLIE's Station ID and delivers by itself.
+        fn s_relay3(&mut self) {
+            self.disconnect_all();
+            self.wait_air_quiet(10.0, 120.0);
+            self.b.send(Cmd::SetFreq(A_DIAL));
+            self.c().send(Cmd::SetFreq(A_DIAL));
+            self.update(&self.b, |c| c.relay = true);
+            std::thread::sleep(Duration::from_secs(2));
+
+            // 1. ALPHA → BRAVO (the relay).
+            let Some(id1) = self.post_via_b("Relay test 1: ALPHA to CHARLIE via BRAVO") else {
+                self.record("relay3: post", false, "ALPHA's mail never showed in Departures".into());
+                return;
+            };
+            if !self.link3(A, B, "relay3: ALPHA links BRAVO") {
+                self.disconnect_all();
+                return;
+            }
+            let handed = self.wait3(180.0, |a, b, _| Self::in_transit(b, id1) && Self::delivered_to(a, id1, B));
+            std::thread::sleep(Duration::from_secs(5));
+            let (ok, detail) = self.peek3(|a, b, c| {
+                let tr = b.depot.transit.iter().find(|m| m.id == id1);
+                let dl = a.depot.delivered.iter().find(|m| m.id == id1);
+                let still = a.depot.departures.iter().any(|m| m.id == id1);
+                let at_c = Self::arrivals(c, id1);
+                (
+                    tr.is_some_and(|m| m.hops == 1 && m.handed.as_deref() == Some(A)) && dl.is_some_and(|m| m.handed.as_deref() == Some(B)) && !still && at_c == 0,
+                    format!(
+                        "BRAVO In Transit: {}; ALPHA Delivered: {}; still in ALPHA's Departures {still}; at CHARLIE already {at_c}",
+                        tr.map(|m| format!("for {} hops {} handed by {:?}", m.to, m.hops, m.handed)).unwrap_or("no".into()),
+                        dl.map(|m| format!("taken by {:?}", m.handed)).unwrap_or("no".into()),
+                    ),
+                )
+            });
+            self.record("relay3: mail In Transit at BRAVO, ALPHA shows it delivered (MAILACK)", handed.is_some() && ok, format!("{} {detail}", Self::took(handed)));
+            self.disconnect_all();
+
+            // 2. BRAVO links CHARLIE by hand.
+            self.wait_air_quiet(10.0, 120.0);
+            let mc = self.log_mark(self.c());
+            if self.link3(B, C, "relay3: BRAVO links CHARLIE") {
+                let got = self.wait3(180.0, |_, b, c| Self::arrivals(c, id1) > 0 && !Self::in_transit(b, id1));
+                // Time for a repeat to show up.
+                std::thread::sleep(Duration::from_secs(15));
+                let said = self.count_after(self.c(), &mc, "Mail from ALPHA arrived");
+                let (ok, detail) = self.peek3(|_, b, c| {
+                    let m = c.depot.arrivals.iter().find(|m| m.id == id1);
+                    let n = Self::arrivals(c, id1);
+                    let by = Self::delivered_to(b, id1, C);
+                    (
+                        n == 1 && m.is_some_and(|m| m.hops == 1 && m.from == A) && by && !Self::in_transit(b, id1),
+                        format!(
+                            "CHARLIE's Arrivals hold it {n}×{}; BRAVO's In Transit {} left, Delivered to CHARLIE {by}",
+                            m.map(|m| format!(" (from {}, hops {} on the wire)", m.from, m.hops)).unwrap_or_default(),
+                            b.depot.transit.len()
+                        ),
+                    )
+                });
+                self.record(
+                    "relay3: BRAVO links CHARLIE: mail arrives once, hops 1, transit empties",
+                    got.is_some() && ok && said == 1,
+                    format!("{} {detail}; CHARLIE logged the arrival {said}×", Self::took(got)),
+                );
+            }
+
+            // 3. CHARLIE away, collecting by itself, hears BRAVO's Station ID.
+            let id2 = self.post_via_b("Relay test 2: collected by CHARLIE on its own");
+            let carried2 = id2.and_then(|id| self.hand_to_relay(id, "relay3: ALPHA hands BRAVO a second message"));
+            if let (Some(id2), Some(_)) = (id2, carried2) {
+                self.wait_air_quiet(10.0, 120.0);
+                self.update(self.c(), |c| c.auto_collect = true);
+                self.c().send(Cmd::SetAway(true));
+                std::thread::sleep(Duration::from_secs(2));
+                let mc = self.log_mark(self.c());
+                self.b.send(Cmd::BeaconNow);
+                let alert = self.wait3(90.0, |_, _, c| c.mail_alerts.iter().any(|m| m.call == B && !m.ours));
+                let col = self.wait3(300.0, |_, b, c| Self::arrivals(c, id2) > 0 && !Self::in_transit(b, id2));
+                let hung = self.wait3(150.0, |_, b, c| b.link.is_none() && c.link.is_none());
+                let went = self.count_after(self.c(), &mc, "connecting to BRAVO to collect");
+                let n = self.peek3(|_, _, c| Self::arrivals(c, id2));
+                self.record(
+                    "relay3: away CHARLIE hears BRAVO's Station ID and collects by itself",
+                    alert.is_some() && col.is_some() && hung.is_some() && went >= 1 && n == 1,
+                    format!(
+                        "\"BRAVO has mail\" shown {}; CHARLIE connected by itself {went}×; mail arrived {} ({n}×), BRAVO's transit empty; link hung up {}",
+                        Self::took(alert),
+                        Self::took(col),
+                        Self::took(hung)
+                    ),
+                );
+                self.disconnect_all();
+                self.c().send(Cmd::SetAway(false));
+                self.update(self.c(), |_| {});
+            } else {
+                self.record("relay3: second message handed to BRAVO", false, format!("posted {id2:?}, handed {}", Self::took(carried2)));
+            }
+
+            // 4. BRAVO away, delivering by itself, hears CHARLIE's Station ID.
+            let id3 = self.post_via_b("Relay test 3: delivered by BRAVO on its own");
+            let carried3 = id3.and_then(|id| self.hand_to_relay(id, "relay3: ALPHA hands BRAVO a third message"));
+            if let (Some(id3), Some(_)) = (id3, carried3) {
+                self.wait_air_quiet(10.0, 120.0);
+                self.update(&self.b, |c| {
+                    c.relay = true;
+                    c.auto_deliver = true;
+                });
+                self.b.send(Cmd::SetAway(true));
+                std::thread::sleep(Duration::from_secs(2));
+                let mb = self.log_mark(&self.b);
+                self.c().send(Cmd::BeaconNow);
+                let del = self.wait3(300.0, |_, b, c| Self::arrivals(c, id3) > 0 && !Self::in_transit(b, id3) && Self::delivered_to(b, id3, C));
+                let hung = self.wait3(150.0, |_, b, c| b.link.is_none() && c.link.is_none());
+                let went = self.count_after(&self.b, &mb, "connecting to CHARLIE to deliver");
+                let n = self.peek3(|_, _, c| Self::arrivals(c, id3));
+                self.record(
+                    "relay3: away BRAVO hears CHARLIE's Station ID and delivers by itself",
+                    del.is_some() && hung.is_some() && went >= 1 && n == 1,
+                    format!("BRAVO connected by itself {went}×; delivered and confirmed {} ({n}×); link hung up {}", Self::took(del), Self::took(hung)),
+                );
+                self.disconnect_all();
+                self.b.send(Cmd::SetAway(false));
+            } else {
+                self.record("relay3: third message handed to BRAVO", false, format!("posted {id3:?}, handed {}", Self::took(carried3)));
+            }
+            self.update(&self.b, |_| {});
+        }
+
+        /// ALPHA calls CQ; BRAVO and CHARLIE both search with automatic
+        /// answer on, find it and call it at about the same moment.
+        fn s_cq_pileup(&mut self) {
+            self.disconnect_all();
+            self.wait_air_quiet(25.0, 240.0);
+            self.update(&self.a, |c| {
+                c.whistle_s = 20.0;
+                c.cq_cycles = 2;
+                c.cq_listen_s = 20.0;
+            });
+            self.update(&self.b, |c| c.auto_answer = true);
+            self.update(self.c(), |c| c.auto_answer = true);
+            self.b.send(Cmd::SetFreq(14_096_000.0));
+            self.c().send(Cmd::SetFreq(14_100_600.0));
+            std::thread::sleep(Duration::from_secs(2));
+            self.b.send(Cmd::StartSearch(SearchScope::CurrentBand));
+            self.c().send(Cmd::StartSearch(SearchScope::CurrentBand));
+            std::thread::sleep(Duration::from_secs(2));
+            let (mb, mc) = (self.log_mark(&self.b), self.log_mark(self.c()));
+            let mlen: Vec<usize> = ["A", "B", "C"].iter().map(|t| self.merc_len(t)).collect();
+            self.a.send(Cmd::CallCq { table: None });
+
+            // Watch: who ALPHA links with, and never both at once.
+            let t0 = Instant::now();
+            let mut a_peers: Vec<String> = vec![];
+            let mut both = false;
+            let mut linked_at: Option<Instant> = None;
+            let mut marks = None;
+            while t0.elapsed() < Duration::from_secs(300) {
+                let (ap, bl, cl) = self.peek3(|a, b, c| (a.link.as_ref().map(|l| l.peer.clone()), Self::linked_with(b, A), Self::linked_with(c, A)));
+                if let Some(p) = ap {
+                    if !a_peers.contains(&p) {
+                        a_peers.push(p);
+                    }
+                    if linked_at.is_none() {
+                        linked_at = Some(Instant::now());
+                        marks = Some([self.log_mark(&self.a), self.log_mark(&self.b), self.log_mark(self.c())]);
+                    }
+                }
+                both |= bl && cl;
+                // Mercury gives up a call after about 45 s: watch 90 s more.
+                if linked_at.is_some_and(|t| t.elapsed() > Duration::from_secs(90)) {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(200));
+            }
+            let (ans_b, ans_c) = (self.count_after(&self.b, &mb, "Auto-answering ALPHA"), self.count_after(self.c(), &mc, "Auto-answering ALPHA"));
+            let (tb, tc) = (self.merc_time("B", mlen[1], "CONNECT BRAVO ALPHA"), self.merc_time("C", mlen[2], "CONNECT CHARLIE ALPHA"));
+            let gap = tb.zip(tc).map(|(b, c)| format!("{:.1} s apart", (b - c).abs())).unwrap_or("—".into());
+            self.record(
+                "cq_pileup: both callers answer ALPHA's CQ",
+                ans_b >= 1 && ans_c >= 1,
+                format!("BRAVO auto-answered {ans_b}×, CHARLIE {ans_c}×; their CONNECTs reached Mercury {gap}"),
+            );
+            let winner = a_peers.first().cloned();
+            self.record(
+                "cq_pileup: ALPHA links with exactly one",
+                a_peers.len() == 1 && !both,
+                format!(
+                    "ALPHA's link peers {a_peers:?} (first after {}); both linked to ALPHA at once: {both}",
+                    linked_at.map(|t| format!("{:.0} s", (t - t0).as_secs_f64())).unwrap_or("—".into())
+                ),
+            );
+            let Some(winner) = winner else {
+                self.disconnect_all();
+                self.update(&self.a, |_| {});
+                self.update(self.c(), |_| {});
+                return;
+            };
+            let loser = if winner == B { C } else { B };
+            let (ltag, wtag) = if loser == B { ("B", "C") } else { ("C", "B") };
+            let lidx = if loser == B { 1 } else { 2 };
+
+            // The winner's link carries traffic.
+            let wh = self.handle_of(&winner).unwrap();
+            wh.send(Cmd::Chat("Pileup winner checking in".into()));
+            let chat = self.wait3(150.0, |a, b, c| {
+                a.chat.iter().any(|l| l.who == Who::Them && l.text == "Pileup winner checking in")
+                    && Self::pick(&winner, a, b, c).chat.iter().any(|l| l.who == Who::Me && l.text == "Pileup winner checking in" && l.delivered)
+            });
+            // The loser: no link, no call hanging, not searching, Mercury idle.
+            let clean = self.wait3(90.0, |a, b, c| {
+                let l = Self::pick(loser, a, b, c);
+                l.link.is_none() && l.calling.is_none() && !l.incoming_call && !l.search.active && !a.incoming_call
+            });
+            let lstate = self.merc_state(ltag);
+            let lcalls = self.merc_count(ltag, mlen[lidx], "-> CALLING");
+            let (lv, ai) = self.peek3(|a, b, c| {
+                let l = Self::pick(loser, a, b, c);
+                (format!("link {:?}, calling {:?}, incoming {}, search {}", l.link.as_ref().map(|l| l.peer.clone()), l.calling, l.incoming_call, l.search.active), a.incoming_call)
+            });
+            self.record(
+                "cq_pileup: the winner's link works",
+                chat.is_some(),
+                format!("{winner} → ALPHA chat delivered {}", Self::took(chat)),
+            );
+            self.record(
+                "cq_pileup: the other caller gives up cleanly",
+                clean.is_some() && lstate == "LISTENING" && lcalls >= 1,
+                format!("{loser}: {lv} {}; its Mercury went CALLING {lcalls}× and is now {lstate}; ALPHA incoming_call {ai}", Self::took(clean)),
+            );
+            // ALPHA's CQ ended when the link came up: any whistle reported
+            // after that is someone's data heard as one.
+            let reports: Vec<String> = marks
+                .iter()
+                .flat_map(|m| {
+                    [(A, &self.a), (B, &self.b), (C, self.c())]
+                        .into_iter()
+                        .zip(m.iter())
+                        .flat_map(|((n, h), mk)| self.log_after(h, mk).into_iter().filter(|l| l.contains("Whistle heard")).map(move |l| format!("{n}: {l}")))
+                })
+                .collect();
+            self.record(
+                "cq_pileup: no false whistles once ALPHA is linked",
+                marks.is_some() && reports.is_empty(),
+                format!("whistle reports after the link came up: {}", if reports.is_empty() { "none".into() } else { reports.join("; ") }),
+            );
+
+            // The first link ends; the other caller now gets through.
+            self.disconnect_all();
+            self.wait_air_quiet(10.0, 120.0);
+            let later = self.link3(loser, A, &format!("cq_pileup: {loser} links ALPHA after the first link ends"));
+            self.disconnect_all();
+            self.wait_air_quiet(10.0, 120.0);
+            let states: Vec<String> = ["A", "B", "C"].iter().map(|t| format!("{t} {}", self.merc_state(t))).collect();
+            self.record(
+                "cq_pileup: no modem left stuck",
+                later && states.iter().all(|s| s.ends_with("LISTENING")),
+                format!("Mercury states at the end: {}; winner {wtag}", states.join(", ")),
+            );
+            self.update(&self.a, |_| {});
+            self.update(&self.b, |_| {});
+            self.update(self.c(), |_| {});
+        }
+
+        /// A busy channel: BRAVO and CHARLIE in a 1:1 link on ALPHA's
+        /// frequency, ALPHA parked there. ALPHA's whistle watch must not
+        /// mistake their traffic for whistles; ALPHA calls BRAVO (busy) and
+        /// then calls CQ on top of them: what happens to their link, and is
+        /// everyone left in a clean state?
+        fn s_busy3(&mut self) {
+            self.disconnect_all();
+            self.wait_air_quiet(25.0, 240.0);
+            self.b.send(Cmd::SetFreq(A_DIAL));
+            self.c().send(Cmd::SetFreq(A_DIAL));
+            self.update(&self.a, |c| {
+                c.whistle_s = 10.0;
+                c.cq_cycles = 1;
+                c.cq_listen_s = 10.0;
+            });
+            std::thread::sleep(Duration::from_secs(2));
+            let ma = self.log_mark(&self.a);
+            if !self.link3(B, C, "busy3: BRAVO links CHARLIE") {
+                self.disconnect_all();
+                return;
+            }
+            let p = self.work.join("to-send/busy.bin");
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            let data = Self::noise_bytes(8000, 41);
+            std::fs::write(&p, &data).unwrap();
+            self.b.send(Cmd::SendFiles { paths: vec![p], zip: false });
+            let Some((fid, _)) = self.accept_on(self.c(), "busy.bin", 120.0) else {
+                self.record("busy3: file offer", false, "offer never arrived".into());
+                self.disconnect_all();
+                return;
+            };
+            self.wait3(300.0, |_, _, c| Self::row(c, fid, Dir::In).is_some_and(|t| t.done >= 1024));
+
+            // ALPHA calls BRAVO, who is busy with CHARLIE.
+            let la = self.merc_len("A");
+            self.a.send(Cmd::Connect(B.into()));
+            std::thread::sleep(Duration::from_secs(3));
+            let calling0 = self.st(&self.a).calling.clone();
+            let mut a_linked = false;
+            let t = Instant::now();
+            let mut gave_up = None;
+            while t.elapsed() < Duration::from_secs(180) {
+                let (al, ac) = self.peek3(|a, _, _| (a.link.is_some(), a.calling.is_some()));
+                a_linked |= al;
+                if !al && !ac {
+                    gave_up = Some(t.elapsed());
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(200));
+            }
+            let a_merc = self.merc_state("A");
+            let a_calls = self.merc_count("A", la, "-> CALLING");
+            let (bc, flags) = self.peek3(|_, b, c| {
+                (Self::linked_with(b, C) && Self::linked_with(c, B), format!("BRAVO incoming_call {}, CHARLIE incoming_call {}", b.incoming_call, c.incoming_call))
+            });
+            self.record(
+                "busy3: calling a station that is in another link ends cleanly",
+                calling0.is_some() && gave_up.is_some() && !a_linked && bc,
+                format!(
+                    "ALPHA showed calling {calling0:?}; gave up {} later; ALPHA ever linked {a_linked}; Mercury A went CALLING {a_calls}× and is now {a_merc}; BRAVO–CHARLIE still linked {bc}; {flags}",
+                    gave_up.map(|d| format!("{:.0} s", d.as_secs_f64())).unwrap_or("NOT".into())
+                ),
+            );
+
+            let done = self.wait3(600.0, |_, b, c| Self::sent_ok(b, fid) && Self::received(c, fid).is_some());
+            let exact = Self::received(&self.st(self.c()), fid).and_then(|p| std::fs::read(p).ok()).is_some_and(|d| d == data);
+            let st = self.peek3(|_, b, c| format!("B {}, C {}", Self::state_of(b, fid, Dir::Out), Self::state_of(c, fid, Dir::In)));
+            self.record("busy3: their 8 KB file gets through ALPHA's call, byte-exact", done.is_some() && exact, format!("{} — {st}", Self::took(done)));
+            let fw = self.count_after(&self.a, &ma, "Whistle heard");
+            self.record(
+                "busy3: no false whistles at the bystander during their link",
+                fw == 0,
+                format!("ALPHA (parked, not linked) reported {fw} whistle(s) while BRAVO and CHARLIE linked and sent a file"),
+            );
+
+            // ALPHA calls CQ on the busy frequency.
+            if self.st(&self.b).link.is_some() {
+                let t0 = Self::now_s();
+                self.a.send(Cmd::CallCq { table: None });
+                let start = Instant::now();
+                let (mut overlap, mut a_tx) = (0.0, 0.0);
+                let mut seen_cq = false;
+                while start.elapsed() < Duration::from_secs(90) {
+                    let s = self.ether.stats();
+                    let a_on = s[0].rig_ptt || s[0].mercury_ptt;
+                    if a_on {
+                        a_tx += 0.1;
+                        if s[1].mercury_ptt || s[2].mercury_ptt {
+                            overlap += 0.1;
+                        }
+                    }
+                    let active = self.st(&self.a).cq.active;
+                    seen_cq |= active;
+                    if seen_cq && !active {
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(100));
+                }
+                self.b.send(Cmd::Chat("Still here after ALPHA's CQ".into()));
+                let chat = self.wait3(180.0, |_, b, c| {
+                    c.chat.iter().any(|l| l.who == Who::Them && l.text.contains("after ALPHA's CQ")) && b.chat.iter().any(|l| l.who == Who::Me && l.text.contains("after ALPHA's CQ") && l.delivered)
+                });
+                let (up, heard) = self.peek3(|_, b, c| {
+                    (
+                        Self::linked_with(b, C) && Self::linked_with(c, B),
+                        format!("CQ seen while linked: BRAVO {}, CHARLIE {}", Self::heard_since(b, A, "CQ", t0), Self::heard_since(c, A, "CQ", t0)),
+                    )
+                });
+                self.record(
+                    "busy3: ALPHA's CQ on a busy channel: their link survives",
+                    chat.is_some() && up,
+                    format!(
+                        "ALPHA keyed {a_tx:.1} s for the CQ, {overlap:.1} s of it while BRAVO or CHARLIE was transmitting (nothing held it back); link still up {up}; chat across afterwards {}; {heard}",
+                        Self::took(chat)
+                    ),
+                );
+            }
+
+            // Once they're done, ALPHA gets through.
+            self.disconnect_all();
+            self.wait_air_quiet(10.0, 120.0);
+            let later = self.link3(A, B, "busy3: ALPHA links BRAVO once the channel is free");
+            self.disconnect_all();
+            self.wait_air_quiet(10.0, 120.0);
+            let states: Vec<String> = ["A", "B", "C"].iter().map(|t| format!("{t} {}", self.merc_state(t))).collect();
+            self.record(
+                "busy3: no modem left stuck",
+                later && states.iter().all(|s| s.ends_with("LISTENING")),
+                format!("Mercury states at the end: {}", states.join(", ")),
+            );
+            self.update(&self.a, |_| {});
+        }
+
+        fn report(&self) -> String {
+            let mut s = if self.c.is_some() {
+                format!(
+                    "# Whistlestop three-station bench (real Mercury 1.9.23 ×3)\n\nALPHA: {}. BRAVO: {}. CHARLIE: engine.\n\n",
+                    self.stations[0].kind.label(),
+                    self.stations[1].kind.label()
+                )
+            } else {
+                format!(
+                    "# Whistlestop two-station bench (real Mercury 1.9.23 ×2)\n\nALPHA: {}. BRAVO: {}.\n\n",
+                    self.stations[0].kind.label(),
+                    self.stations[1].kind.label()
+                )
+            };
             s += &format!("Run time {:.0} s. {}\n\n| Result | Test | Details |\n|---|---|---|\n", self.started.elapsed().as_secs_f64(), self.snr_note());
             for (n, ok, d) in &self.results {
                 s += &format!("| {} | {n} | {d} |\n", if *ok { "PASS" } else { "**FAIL**" });
@@ -1092,7 +2015,7 @@ mod bench {
         }
 
         fn dump_logs(&self) {
-            for (h, n) in [(&self.a, A), (&self.b, B)] {
+            for (h, n) in [(&self.a, A), (&self.b, B)].into_iter().chain(self.c.as_ref().map(|c| (c, C))) {
                 let g = h.state.lock().unwrap();
                 let lines: Vec<String> = g.log.iter().map(|(at, l)| format!("{} {l}", at.hhmm())).collect();
                 let _ = std::fs::write(self.work.join(format!("whistlestop-{n}.log")), lines.join("\n"));
@@ -1237,18 +2160,18 @@ mod bench {
     }
 
     impl Station {
-        /// Start a station: `i` 0 for ALPHA, 1 for BRAVO.
+        /// Start a station: `i` 0 for ALPHA, 1 for BRAVO, 2 for CHARLIE.
         fn start(kind: Kind, i: usize, mercury: &Path, work: &Path, sock: &Path, mercs: &mut Vec<Child>) -> anyhow::Result<(Station, Handle)> {
-            let call = [A, B][i];
-            let (rig, audio) = ([4632u16, 4642][i] + off(), [7300u16, 7310][i] + off());
+            let call = [A, B, C][i];
+            let (rig, audio) = ([4632u16, 4642, 4652][i] + off(), [7300u16, 7310, 7320][i] + off());
             // Host Mercury ports per station; the iPhone's Mercury shares the
             // computer's network too, so it gets its own.
             let (port, bport) = match kind {
-                Kind::Ios => ([8320u16, 8330][i] + off(), [8120u16, 8130][i] + off()),
+                Kind::Ios => ([8320u16, 8330, 8350][i] + off(), [8120u16, 8130, 8150][i] + off()),
                 Kind::Android => (8300, 8100),
-                _ => ([8300u16, 8310][i] + off(), [8100u16, 8110][i] + off()),
+                _ => ([8300u16, 8310, 8340][i] + off(), [8100u16, 8110, 8140][i] + off()),
             };
-            let remote_port = [7381u16, 7382][i] + off();
+            let remote_port = [7381u16, 7382, 7383][i] + off();
             let mut cfg = cfg_for(call, port, bport, rig, audio, work);
             let dir = match kind {
                 Kind::Engine | Kind::Desktop => work.to_path_buf(),
@@ -1461,8 +2384,9 @@ mod bench {
             }
         }
         let run = |n: &str| only.is_empty() || only.iter().any(|o| o == n);
-        let mut b = Bench::start(&mercury, work, kinds)?;
-        println!("Bench up: 2× Mercury on the ether. Work dir {}", b.work.display());
+        let three = only.iter().any(|o| THREE.contains(&o.as_str()));
+        let mut b = Bench::start(&mercury, work, kinds, three)?;
+        println!("Bench up: {}× Mercury on the ether. Work dir {}", if three { 3 } else { 2 }, b.work.display());
         b.s_ready();
         if run("watch") {
             b.s_whistle_watch();
@@ -1522,6 +2446,19 @@ mod bench {
         }
         if named("away_weak") {
             b.s_away_long("away, long transfer, weak signal", 60.0, 27.0, 3000);
+        }
+        // Three stations (CHARLIE is on the band only when one is named).
+        if named("table3") {
+            b.s_table3();
+        }
+        if named("relay3") {
+            b.s_relay3();
+        }
+        if named("cq_pileup") {
+            b.s_cq_pileup();
+        }
+        if named("busy3") {
+            b.s_busy3();
         }
         b.dump_logs();
         let rep = b.report();

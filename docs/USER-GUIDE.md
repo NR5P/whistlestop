@@ -164,6 +164,16 @@ When someone answers, Mercury reports the incoming call and the CQ goes on hold 
 
 > Courtesy: listen first. The whistle is a calling signal, not a beacon. Keep it as short as the searchers need, and don't call on a busy frequency.
 
+### Listen before transmitting
+
+Whistlestop also listens for you before it transmits on its own. It turns on Mercury's busy-channel detector while you're not in a link, and while that reads the frequency as busy (someone else transmitting):
+
+- a **CQ** holds its whistle ("CQ waits: someone is transmitting on this frequency" in the Log), between cycles too;
+- a **Station ID** waits;
+- the Away **automatic deliver and collect** calls wait. The Station ID or CQ that sets one off has only just ended, so the detector usually still reads it for a moment; the call goes out once the channel clears.
+
+A CQ, Station ID or automatic call waits at most **60 s**, then goes anyway and the Log says so. If an automatic call is still waiting after 90 s, or you come back, start something else or the mail is gone, it is dropped. Going anyway matters because a detector that reads busy all the time mustn't silence your station. That happens behind a receive filter narrower than about 1.8 kHz, so use a wide filter, or turn it off (**Settings → Search & CQ → Listen before transmitting**, on by default). What you send by hand (Connect, Send, a Station ID you press) always goes at once. During a link the detector is off, so the link behaves as it always has.
+
 ## Finding stations
 
 There are three ways to find a calling station: searching with your one radio, the whistle watch while you're parked, and the wide search with an SDR. None is required: you can always tune by hand and press **Connect**.
@@ -184,7 +194,7 @@ Listening is in two stages, the way military ALE scanners pause on a promising c
 - If it holds a hint of one (about 15 % of empty channels do, and almost every real whistle), the search **listens longer**, up to 2 s, and decides on that.
 - Otherwise it moves on. Fast where nothing is there, patient where something might be.
 
-When it finds a whistle it **retunes** by the coarse offset, **measures** the whistle precisely on the new frequency (three patterns, 1.2 s) and fine-tunes, then **waits up to 45 s for the CQ**. Right after a retune the whistle should be within about 10 Hz; if the measurement says **25 Hz or more**, the radio or sound card was probably still catching up when it listened, so Whistlestop retunes there and measures once more before locking ("Measured … Hz off after retuning; checking again there" in the Log; up to 3 retunes in all, counting the "further" ones). When Mercury decodes the caller's CQFRAME, the call appears under **Heard**. With **Answer automatically** ticked, Whistlestop connects as soon as the caller has stopped transmitting: right after its CQFRAME the caller sends its CALL packet (about 3.7 s), so Whistlestop waits until that packet is heard, or **4.5 s** at most, before calling. A call sent sooner would land on top of the caller's own transmission and go unheard.
+When it finds a whistle it **retunes** by the coarse offset, **measures** the whistle precisely on the new frequency (three patterns, 1.2 s) and fine-tunes, then **waits up to 45 s for the CQ**. Right after a retune the whistle should be within about 10 Hz; if the measurement says **25 Hz or more**, the radio or sound card was probably still catching up when it listened, so Whistlestop retunes there and measures once more before locking ("Measured … Hz off after retuning; checking again there" in the Log; up to 3 retunes in all, counting the "further" ones). When Mercury decodes the caller's CQFRAME, the call appears under **Heard**. With **Answer automatically** ticked, Whistlestop connects as soon as the caller has stopped transmitting: right after its CQFRAME the caller sends its CALL packet (about 3.7 s), so Whistlestop waits until that packet is heard, or **4.5 s** at most, before calling. A call sent sooner would land on top of the caller's own transmission and go unheard. If no link comes up within **60 s** of calling (say another station answered first), it gives up, so its call doesn't go on over the new link.
 
 On a simulated busy band with fading, a half-second listen catches 82–84 % of whistles at −10 dB SNR (in 2500 Hz) on the first look, and 94–97 % at −5 dB; those it misses at first mostly get the 2 s listen, which catches 96–99 % at −10 dB. Weaker than about −10 dB, Mercury itself struggles to link.
 
@@ -211,7 +221,8 @@ The **Heard** card lists recent CQs (from Mercury's CQFRAME decodes), Roundtable
 
 Chat is a 1:1 conversation over Mercury's ARQ, which retransmits until everything arrives intact.
 
-- **Connecting**: answer a CQ, or type a callsign in the box at the top of the Chat tab and press **Connect**. "Calling …" shows while Mercury places the call.
+- **Connecting**: answer a CQ, or type a callsign in the box at the top of the Chat tab and press **Connect**. "Calling …" shows while Mercury places the call. A CQ you're calling stops first. Connect is refused while you're already linked or calling, while you're at a Roundtable (Leave first: a 1:1 link and a Roundtable don't mix), and until your own callsign is set (Settings → Station): without one Whistlestop sends nothing at all, and says so in the Log.
+- **History**: the Chat tab keeps the newest **500** lines and the Files tab the newest **200** finished transfers (transfers still going are never dropped), so an unattended station running for days stays light. Depot mail is kept in full.
 - **The link header** shows the other station's call, name and grid (from their HELLO), the agreed bandwidth, how they hear you ("hears you +7 dB", from their reports), the time since linking, and **Disconnect (73)**.
 - **Messages** show **"… sending"** until the other station's app confirms they arrived, then **"✓ delivered"**. There are no read receipts and no typing indicators: they would cost airtime.
 - **Time estimate**: under the input, "N bytes on air · ≈ T at R bps" tells you how long a message will take at the current link speed.
@@ -229,7 +240,8 @@ The **Files** tab sends and receives files over a 1:1 link.
 - **Zip before sending** (on by default) packs everything into one zip with maximum compression. Folders are always zipped. Two files with the same name (from different folders) are both kept, the second as `name-1.ext`. Text and logs often shrink to a few percent; photos and already-compressed files don't shrink.
 - Each transfer is **offered** first: the other station sees the name, size, zip contents and predicted time, and presses **Accept** or **Decline**.
 - Progress shows bytes done, the measured speed, and the time left. **Cancel** stops a transfer on either side. (Each station numbers its own files from a random starting point, so a cancel from either end always names the right one.)
-- If the link ends while an offer is still waiting for an answer, it shows **link ended before you answered**. The sender offers it again on the next link (with resume).
+- If the link ends while an offer is still waiting for an answer, it shows **link ended before you answered**. The sender offers it again the next time the two of you link (with resume).
+- **A file goes only to the station it was for.** A file sent during a link, or one cut off by a dropped link, is offered again (with resume) only on a link with that same station, never to whoever links next (while you're Away, that could be anyone). A file picked while not linked goes to the next station you link with.
 
 ### Receiving
 
@@ -266,8 +278,13 @@ Type in the Roundtable tab and press Enter. Messages go out over Mercury's **bro
 
 Broadcast frames are not acknowledged, so Whistlestop adds:
 
-- **Asking again**: if a station is missing parts of a message, it asks for just those parts every 20 s, and the sender repeats them. A message already complete isn't shown twice when its parts are repeated for someone else, and a message still incomplete after 10 minutes is given up.
-- **Speed ramp-up**: each member reports how well it hears the host. The host picks the fastest mode that the **weakest** member can copy, with **3 dB** of margin, within your bandwidth setting. It announces the change twice in the current mode, waits until both announcements are on the air, then everyone switches together. It slows down at once if someone reports worse, and speeds up only after 2 minutes without a downgrade. Turn this off in Settings ("Roundtable speed ramp-up").
+- **Asking again**: if a station is missing parts of a message, it asks for just those parts every 20 s, and the sender repeats them. A message missed whole (a short one-frame line, say) shows up as a gap in the sender's message numbers, either at its next message or at the host's 90 s heartbeat, which carries the host's newest number. Missed messages are asked for whole: up to 16 per sender. A message already complete isn't shown twice when its parts are repeated for someone else, and a message still incomplete after 10 minutes is given up.
+- **Speed ramp-up**: each member reports how well it hears the host (measured on the host's own frames) when it joins and again every **2 minutes**; a member silent for 7 minutes (three missed reports) no longer holds the table back. The host picks the fastest mode that the **weakest** member can copy, with **3 dB** of margin, within your bandwidth setting. It announces the change twice in the current mode, waits until both announcements are on the air, then everyone switches together. It slows down at once if someone reports worse, and speeds up only after 2 minutes without a downgrade. Turn this off in Settings ("Roundtable speed ramp-up").
+- **Join windows**: a newcomer always calls and listens at DATAC3, so once a table has sped up it couldn't hear them. Every **3 minutes** a sped-up table drops to DATAC3 for **20 s**: the host announces it, everyone switches, the host sends the table's CALL (so stations nearby see it under **Heard** with **Join**), and anyone joining then is heard. Then the table goes back to its speed, or slower if a newcomer hears the host less well. You can keep talking during the window, just more slowly. The first window comes 3 minutes after the table first speeds up. A newcomer whose JOIN went out while the table was fast sends it again when it hears the window's CALL.
+- **Staying in step**: broadcasts aren't acknowledged, so a member can miss a speed change. The member most likely to miss one is the weak member the host is slowing down for, because the announcement goes out at the faster speed. So:
+  - A member whose own report says it can't copy the current speed, and which hears no slow-down within **40 s**, moves to DATAC3 by itself.
+  - A host with nothing to say sends a short heartbeat (its current speed) every **90 s**.
+  - A member that hears nothing of the table for **4 minutes** tries, in turn: the speed last announced, DATAC3 (where the join windows are), then the most robust mode. It reports in each time, so the host hears it again.
 - **The floor**: click a member's name to pass them the floor (the "talking stick"). It's a courtesy, not a lock.
 
 > Roundtables are always plain text, even with encryption turned on.
@@ -302,7 +319,7 @@ Away is a convenience, not a licence to leave a station running unattended where
 
 The **Station ID beacon** (Settings → Automation, off by default) sends one short broadcast frame every N minutes (10 to 120, default 30) when the band is quiet: your callsign, grid, whether you're away, and the callsigns you hold mail for (up to what fits in one 120-byte frame). It has **no whistle**: it's an ID, not a call, so it doesn't stop scanning stations.
 
-Stations on your frequency in the calling mode decode it. If your beacon lists their callsign, their Whistlestop shows **📬 … has mail for you** in the Heard card (and collects it, if they're away with automatic collection on). **Send one now** sends one immediately. A beacon is never sent during a link, a CQ, a search or a Roundtable, and (with the segment guard on) never outside the automatic-control segments: you'll see "Station ID skipped" in the Log instead.
+Stations on your frequency in the calling mode decode it. If your beacon lists their callsign, their Whistlestop shows **📬 … has mail for you** in the Heard card (and collects it, if they're away with automatic collection on). **Send one now** sends one immediately. A beacon (like a CQ and the automatic calls) waits while someone else is transmitting on the frequency (see "Listen before transmitting"), and is never sent during a link, a CQ, a search or a Roundtable, and (with the segment guard on) never outside the automatic-control segments: you'll see "Station ID skipped" in the Log instead.
 
 ## Automatic mail handling
 
@@ -445,7 +462,7 @@ Whistlestop also comes as native phone apps: SwiftUI on the iPhone and iPad (iOS
 
 ### Your bandwidth limit
 
-The **Bandwidth** card sets how wide Whistlestop may go, from narrow to wide: **250, 500, 1000, 1700, 2300, 2750 Hz**. The bar shows how much of a 2.75 kHz channel that is.
+The **Bandwidth** card sets how wide Whistlestop may go, from narrow to wide: **250, 500, 1000, 1700, 2300, 2750 Hz**. The bar shows how much of a 2.75 kHz channel that is. It's locked during a 1:1 link (the link's bandwidth was agreed when it came up) and applies from the next one.
 
 - **1:1 links** use Mercury's two ladders: below 2300 Hz, the narrow **BW500** ladder; at 2300 and 2750, the full ladder. At connect, both stations advertise their limit and the narrower one wins.
 - **Roundtables** use any mode that fits inside your limit.
@@ -640,7 +657,7 @@ They're stored in the settings file (`segments`), so you can change or add them.
 
 ## Settings reference
 
-Settings are saved to `~/Library/Application Support/Whistlestop/whistlestop.toml` (macOS). **Save & connect** applies them and reconnects. Closing the Settings window without it throws your edits away. If the settings file has a value Whistlestop can't read (edited by hand, say), only that setting falls back to its default: the rest are kept, and the Log names each one ("⚠ Settings file: …"). A file that can't be read at all is kept as `whistlestop.toml.bad` and the default settings are used.
+Settings are saved to `~/Library/Application Support/Whistlestop/whistlestop.toml` (macOS). **Save & connect** applies them and reconnects. Closing the Settings window without it throws your edits away. If the settings file has a value Whistlestop can't read (edited by hand, say), only that setting falls back to its default: the rest are kept, and the Log names each one ("⚠ Settings file: …"). A value that's out of range (a negative listen time, a whistle of hours, a port of 0…) is set to the nearest sensible value, and the Log says so ("⚠ Settings: …"); the same goes for settings sent by a remote operator. A callsign is trimmed and upper-cased, and characters other than letters, digits, `/` and `-` are removed. A file that can't be read at all is kept as `whistlestop.toml.bad` and the default settings are used.
 
 | Setting | What it does | Default |
 |---|---|---|
@@ -664,6 +681,7 @@ Settings are saved to `~/Library/Application Support/Whistlestop/whistlestop.tom
 | CQ cycles | How many whistle/CQ/listen cycles before giving up | 5 |
 | Listen after CQ | How long to wait for answers each cycle | 20 s |
 | Whistle watch | Report whistles while parked | on |
+| Listen before transmitting | CQ, Station ID and automatic calls wait while the channel is busy (see "Listen before transmitting") | on |
 | Roundtable speed ramp-up | Host adjusts the table's speed | on |
 | Encryption | Off / Prefer / Require (see Encryption) | Off |
 | Auto-tune on high SWR | Start the antenna tuner after a high-SWR transmission, when quiet (Radio Controls window) | off |
@@ -735,7 +753,7 @@ Reduce audio drive until the ALC barely moves, and turn off speech processing.
 ## Testing without a radio
 
 - **Demo mode** runs everything simulated, with K7BOT to talk to.
-- **`whistlestop whistle-wav`** and **`whistlestop cq-demo`** write sound files of the whistle and a whole CQ.
+- **`whistlestop whistle-wav`** and **`whistlestop cq-demo`** write sound files of the whistle and a whole CQ. Options: `--seconds` (whistle-wav, default 6) and `--whistle` (cq-demo, default 10) take 0.5 to 600 s; `--profile` is `wide` (default) or `narrow`.
 - **The two-station bench** (`docs/BENCH.md`) runs two real Mercury modems and two Whistlestop stations on one computer through a simulated HF band: search, link, chat, files, Roundtables, narrow bandwidth, weak signals and encryption.
 
 ## How it works underneath

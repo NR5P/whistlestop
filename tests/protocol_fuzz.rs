@@ -154,7 +154,8 @@ fn all_table_frames() -> Vec<TableFrame> {
         TableBody::Text { id: u64::MAX, part: 64, total: 64, data: vec![0xC0; 1024] },
         TableBody::Text { id: 0, part: 1, total: 1, data: vec![] },
         TableBody::Join { table_name: "X".into(), snr_of_host: i8::MIN },
-        TableBody::Speed { mode_index: 255 },
+        TableBody::Speed { mode_index: 255, last_id: 0 },
+        TableBody::Speed { mode_index: 255, last_id: u64::MAX },
         TableBody::Again { of: call(12), id: u64::MAX, missing: u64::MAX },
         TableBody::Floor { to: "W1AW".into() },
         TableBody::Leave,
@@ -234,8 +235,20 @@ fn truncated_link_packets_are_errors_not_panics() {
 fn truncated_table_frames_are_dropped() {
     for f in all_table_frames() {
         let b = f.encode();
+        // SPEED's newest-message id is optional (older stations send none):
+        // cut anywhere in it, the frame is still a SPEED without it.
+        let speed_base = match &f.body {
+            TableBody::Speed { mode_index, .. } => {
+                Some(TableFrame { body: TableBody::Speed { mode_index: *mode_index, last_id: 0 }, ..f.clone() }.encode().len())
+            }
+            _ => None,
+        };
         for cut in 0..b.len() {
             let r = TableFrame::decode(&b[..cut]);
+            if speed_base.is_some_and(|n| cut >= n) {
+                assert!(matches!(r, Some(TableFrame { body: TableBody::Speed { last_id: 0, .. }, .. })), "{f:?} cut at {cut} decoded as {r:?}");
+                continue;
+            }
             // LEAVE has no fields: the full header is the whole frame.
             if !(matches!(f.body, TableBody::Leave) && cut == b.len()) {
                 assert!(r.is_none(), "{f:?} cut at {cut} decoded as {r:?}");
@@ -621,4 +634,43 @@ fn wire_size_helpers_match_encoding() {
             + size as usize;
         assert!(file_wire_size("a.zip", size) >= real_min);
     }
+}
+
+/// A one-frame Roundtable message lost whole leaves nothing to ask AGAIN
+/// for, unless the gap in the sender's ids shows it: the next message, or
+/// the host's heartbeat (its newest id), gives it away.
+#[test]
+fn assembler_asks_for_messages_skipped_whole() {
+    let mut a = TableAssembler::default();
+    assert!(a.add("HOST", 3, 1, 1, b"three").is_some());
+    // 4 and 5 never heard; 6 arrives.
+    assert!(a.add("HOST", 6, 1, 1, b"six").is_some());
+    let mut m = a.missing();
+    m.sort();
+    assert_eq!(m, vec![("HOST".to_string(), 4, u64::MAX), ("HOST".to_string(), 5, u64::MAX)]);
+    // A resent part of 4 turns it into an ordinary partial message.
+    assert!(a.add("HOST", 4, 1, 2, b"fo").is_none());
+    assert_eq!(a.add("HOST", 4, 2, 2, b"ur").as_deref(), Some("four"));
+    assert_eq!(a.missing(), vec![("HOST".to_string(), 5, u64::MAX)]);
+    // The heartbeat says 7 went out too.
+    a.note_latest("HOST", 7, true);
+    let mut m = a.missing();
+    m.sort();
+    assert_eq!(m, vec![("HOST".to_string(), 5, u64::MAX), ("HOST".to_string(), 7, u64::MAX)]);
+}
+
+#[test]
+fn assembler_gap_rules() {
+    let mut a = TableAssembler::default();
+    // The first id from a sender: no asking for the table's past.
+    a.note_latest("HOST", 40, true);
+    assert!(a.missing().is_empty());
+    // A huge jump is not chased (at most 16 messages).
+    a.note_latest("HOST", 100, true);
+    assert!(a.missing().is_empty());
+    // A sender that restarted counts from 1 again: no gap storm.
+    assert!(a.add("HOST", 1, 1, 1, b"hi").is_some());
+    assert!(a.missing().is_empty());
+    assert!(a.add("HOST", 2, 1, 1, b"again").is_some());
+    assert!(a.missing().is_empty());
 }

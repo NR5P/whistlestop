@@ -755,7 +755,10 @@ impl App {
         card(ui, "Bandwidth  ·  narrow → wide", |ui| {
             let cur = s.bandwidth.unwrap_or(self.cfg.bandwidth);
             let w = (ui.available_width() - 5.0 * 4.0) / 6.0;
-            ui.horizontal(|ui| {
+            // The link's bandwidth was agreed when it came up (the engine
+            // refuses a change mid-link too).
+            let free = s.link.is_none();
+            ui.add_enabled_ui(free, |ui| ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 4.0;
                 for b in Bandwidth::ALL {
                     let on = b == cur;
@@ -766,6 +769,7 @@ impl App {
                     if ui
                         .add(btn)
                         .on_hover_text(format!("{b}: Roundtable up to {}", b.modes().last().map(|m| m.name).unwrap_or("-")))
+                        .on_disabled_hover_text("Locked during a link: the bandwidth was agreed when it came up. It applies from the next link.")
                         .help(&help::BW_BUTTONS)
                         .clicked()
                     {
@@ -774,7 +778,7 @@ impl App {
                         self.send(Cmd::SetBandwidth(b));
                     }
                 }
-            });
+            }));
             // A bar showing how much of the passband is used.
             let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), 10.0), Sense::hover());
             let p = ui.painter();
@@ -1096,7 +1100,11 @@ impl App {
                     };
                     ui.label(RichText::new(status).size(16.0).color(DIM));
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        let go = ui.add_enabled(s.mercury_ok, egui::Button::new("Connect").fill(TEAL.linear_multiply(0.35))).clicked();
+                        let go = ui
+                            .add_enabled(s.mercury_ok && s.table.is_none(), egui::Button::new("Connect").fill(TEAL.linear_multiply(0.35)))
+                            .help(&help::L_CONNECT)
+                            .on_disabled_hover_text("Leave the Roundtable first: a 1:1 link and a Roundtable don't mix")
+                            .clicked();
                         let r = ui.add(egui::TextEdit::singleline(&mut self.connect_to).hint_text("Callsign").desired_width(120.0)).help(&help::L_CONNECT);
                         if (go || (r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)))) && !self.connect_to.trim().is_empty() {
                             self.send(Cmd::Connect(self.connect_to.trim().to_string()));
@@ -1198,7 +1206,7 @@ impl App {
                     .margin(Margin::symmetric(10, 8)),
             );
             let r = r.help(&help::C_INPUT);
-            let send = ui.add_sized([80.0, 34.0], egui::Button::new(RichText::new("Send").strong()).fill(BRASS.linear_multiply(0.5))).clicked()
+            let send = ui.add_sized([80.0, 34.0], egui::Button::new(RichText::new("Send").strong()).fill(BRASS.linear_multiply(0.5))).help(&help::C_INPUT).clicked()
                 || (r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)));
             if send && !self.chat_input.trim().is_empty() {
                 self.send(Cmd::Chat(self.chat_input.trim().to_string()));
@@ -1235,7 +1243,7 @@ impl App {
                     });
                 } else {
                     ui.horizontal(|ui| {
-                        ui.add(egui::TextEdit::singleline(&mut self.join_name).hint_text("Roundtable name").desired_width(220.0));
+                        ui.add(egui::TextEdit::singleline(&mut self.join_name).hint_text("Roundtable name").desired_width(220.0)).help(&help::T_JOIN);
                         let join = ui.add_enabled(s.link.is_none(), egui::Button::new("Join here")).help(&help::T_JOIN).on_disabled_hover_text("Disconnect the 1:1 link first");
                         if join.clicked() && !self.join_name.trim().is_empty() {
                             self.send(Cmd::JoinTable(self.join_name.trim().into()));
@@ -1306,7 +1314,7 @@ impl App {
                     .margin(Margin::symmetric(10, 8)),
             );
             let r = r.help(&help::T_INPUT);
-            let send = ui.add_sized([80.0, 34.0], egui::Button::new(RichText::new("Send").strong()).fill(TEAL.linear_multiply(0.4))).clicked()
+            let send = ui.add_sized([80.0, 34.0], egui::Button::new(RichText::new("Send").strong()).fill(TEAL.linear_multiply(0.4))).help(&help::T_INPUT).clicked()
                 || (r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)));
             if send && !self.table_input.trim().is_empty() {
                 self.send(Cmd::TableSay(self.table_input.trim().into()));
@@ -1426,7 +1434,7 @@ impl App {
                         ui.end_row();
                     }
                 });
-                if ui.small_button("Close estimate").clicked() {
+                if ui.small_button("Close estimate").help(&help::F_ESTIMATE).clicked() {
                     self.plan_bytes = None;
                 }
             }
@@ -1471,7 +1479,7 @@ impl App {
                                 }
                             }
                             XferState::Done(Some(p)) => {
-                                if ui.small_button("Show").clicked() {
+                                if ui.small_button("Show").on_hover_text(p.display().to_string()).help(&help::F_SHOW).clicked() {
                                     reveal(p);
                                 }
                                 ui.label(RichText::new("✓ received").color(GREEN));
@@ -2069,7 +2077,9 @@ impl App {
                                 for d in &self.devices.0 {
                                     ui.selectable_value(&mut c.audio_in, d.clone(), d);
                                 }
-                            });
+                            })
+                            .response
+                            .help(&help::ST_AUDIO);
                             ui.end_row();
                             ui.label("Audio out").help(&help::ST_AUDIO);
                             egui::ComboBox::from_id_salt("aout").width(280.0).selected_text(if c.audio_out.is_empty() { "System default" } else { &c.audio_out }).show_ui(ui, |ui| {
@@ -2077,7 +2087,9 @@ impl App {
                                 for d in &self.devices.1 {
                                     ui.selectable_value(&mut c.audio_out, d.clone(), d);
                                 }
-                            });
+                            })
+                            .response
+                            .help(&help::ST_AUDIO);
                             ui.end_row();
                         });
                     });
@@ -2118,6 +2130,7 @@ impl App {
                             ui.end_row();
                         });
                         ui.checkbox(&mut c.whistle_watch, "Whistle watch while parked on a frequency").help(&help::ST_WATCH);
+                        ui.checkbox(&mut c.busy_detect, "Listen before transmitting (CQ, Station ID, automatic calls)").help(&help::ST_BUSY);
                         ui.checkbox(&mut c.auto_ramp, "Roundtable speed ramp-up (host)").help(&help::ST_RAMP);
                     });
                     ui.add_space(6.0);
@@ -2418,6 +2431,7 @@ impl eframe::App for App {
             self.audio_seen = g.audio_seq;
             let rows: std::collections::VecDeque<_> = g.audio_rows.iter().skip(g.audio_rows.len() - fresh).cloned().collect();
             State {
+                channel_busy: g.channel_busy,
                 running: g.running,
                 demo: g.demo,
                 mycall: g.mycall.clone(),

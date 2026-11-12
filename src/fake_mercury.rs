@@ -9,13 +9,13 @@
 use crate::e2e::{Channel, Notice, Policy};
 use crate::protocol::*;
 use anyhow::Result;
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::net::tcp::OwnedWriteHalf;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 
 #[derive(Clone)]
 pub struct FakeOptions {
@@ -50,6 +50,7 @@ impl Default for FakeOptions {
 pub struct FakeMercury {
     pub port: u16,
     pub bcast_port: u16,
+    stop: watch::Sender<bool>,
 }
 
 enum In {
@@ -70,23 +71,65 @@ impl FakeMercury {
         };
         let bc = TcpListener::bind("127.0.0.1:0").await?;
         let bcast_port = bc.local_addr()?.port();
-        tokio::spawn(serve(ctl, data, bc, opts));
-        Ok(Self { port, bcast_port })
+        let (stop, stop_rx) = watch::channel(false);
+        tokio::spawn(serve(ctl, data, bc, opts, stop_rx));
+        Ok(Self {
+            port,
+            bcast_port,
+            stop,
+        })
+    }
+
+    /// Shut this Mercury down: its three listening sockets, any open
+    /// control/data/broadcast connections and all of its tasks end (at
+    /// their next await, i.e. at once). Safe to call more than once.
+    ///
+    /// Dropping a `FakeMercury` does NOT stop it (tests keep only its
+    /// ports); whoever starts one for a while (the engine's Demo mode) keeps
+    /// it and calls `stop()` when done with it.
+    pub fn stop(&self) {
+        self.stop.send_replace(true);
     }
 }
 
-async fn serve(ctl: TcpListener, data: TcpListener, bc: TcpListener, opts: FakeOptions) {
+/// Resolves once `stop()` is called (never, if the FakeMercury is dropped
+/// without it).
+async fn stopped(mut rx: watch::Receiver<bool>) {
+    if rx.wait_for(|s| *s).await.is_err() {
+        std::future::pending::<()>().await;
+    }
+}
+
+/// A task that is aborted when this handle is dropped.
+struct Task(tokio::task::JoinHandle<()>);
+
+impl Drop for Task {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+async fn serve(
+    ctl: TcpListener,
+    data: TcpListener,
+    bc: TcpListener,
+    opts: FakeOptions,
+    stop: watch::Receiver<bool>,
+) {
     let bc_w: Arc<tokio::sync::Mutex<Option<OwnedWriteHalf>>> = Default::default();
-    let (in_tx, mut in_rx) = mpsc::unbounded_channel::<In>();
-    {
+    let (in_tx, in_rx) = mpsc::unbounded_channel::<In>();
+    let _bc_task = {
         let bc_w = bc_w.clone();
         let in_tx = in_tx.clone();
-        tokio::spawn(async move {
+        Task(tokio::spawn(async move {
+            // Readers end with this task (aborted when serve() ends).
+            let mut readers: Vec<Task> = vec![];
             while let Ok((s, _)) = bc.accept().await {
+                readers.retain(|t| !t.0.is_finished());
                 let (mut r, w) = s.into_split();
                 *bc_w.lock().await = Some(w);
                 let in_tx = in_tx.clone();
-                tokio::spawn(async move {
+                readers.push(Task(tokio::spawn(async move {
                     let mut dec = KissDecoder::default();
                     let mut buf = vec![0u8; 8192];
                     while let Ok(n) = r.read(&mut buf).await {
@@ -97,10 +140,27 @@ async fn serve(ctl: TcpListener, data: TcpListener, bc: TcpListener, opts: FakeO
                             let _ = in_tx.send(In::Bcast(p));
                         }
                     }
-                });
+                })));
             }
-        });
+        }))
+    };
+    tokio::select! {
+        _ = stopped(stop) => {}
+        _ = serve_links(ctl, data, &bc_w, opts, in_tx, in_rx) => {}
     }
+    // Everything else (listeners, connections, reader tasks) is dropped,
+    // closed or aborted here.
+    bc_w.lock().await.take();
+}
+
+async fn serve_links(
+    ctl: TcpListener,
+    data: TcpListener,
+    bc_w: &tokio::sync::Mutex<Option<OwnedWriteHalf>>,
+    opts: FakeOptions,
+    in_tx: mpsc::UnboundedSender<In>,
+    mut in_rx: mpsc::UnboundedReceiver<In>,
+) {
     loop {
         let Ok((cs, _)) = ctl.accept().await else {
             return;
@@ -111,7 +171,7 @@ async fn serve(ctl: TcpListener, data: TcpListener, bc: TcpListener, opts: FakeO
         let (mut cr, mut cw) = cs.into_split();
         let (mut dr, mut dw) = ds.into_split();
         let t1 = in_tx.clone();
-        let rd_ctl = tokio::spawn(async move {
+        let rd_ctl = Task(tokio::spawn(async move {
             let mut buf = vec![0u8; 1024];
             let mut line = vec![];
             while let Ok(n) = cr.read(&mut buf).await {
@@ -127,9 +187,9 @@ async fn serve(ctl: TcpListener, data: TcpListener, bc: TcpListener, opts: FakeO
                     }
                 }
             }
-        });
+        }));
         let t2 = in_tx.clone();
-        let rd_data = tokio::spawn(async move {
+        let _rd_data = Task(tokio::spawn(async move {
             let mut buf = vec![0u8; 65536];
             while let Ok(n) = dr.read(&mut buf).await {
                 if n == 0 {
@@ -137,7 +197,7 @@ async fn serve(ctl: TcpListener, data: TcpListener, bc: TcpListener, opts: FakeO
                 }
                 let _ = t2.send(In::Data(buf[..n].to_vec()));
             }
-        });
+        }));
 
         let mut s = Session::new(opts.clone());
         let tick_ms = if opts.fast { 5 } else { 200 };
@@ -174,19 +234,20 @@ async fn serve(ctl: TcpListener, data: TcpListener, bc: TcpListener, opts: FakeO
                     s.bcast_out.clear();
                 }
             }
-            if dead || rd_ctl.is_finished() {
+            if dead || rd_ctl.0.is_finished() {
                 break;
             }
         }
-        rd_ctl.abort();
-        rd_data.abort();
+        // The readers are aborted as rd_ctl/_rd_data drop here.
     }
 }
 
-/// A timed action.
+/// A timed action. `epoch`: the link (or call) it belongs to; it is
+/// dropped if that has ended by the time it is due.
 struct Later {
     at: f64,
     what: Act,
+    epoch: Option<u64>,
 }
 
 enum Act {
@@ -214,8 +275,14 @@ struct Session {
     ch: Option<Channel>,
     pending: VecDeque<Link>,
     bot_chat_id: u64,
-    incoming: Option<(u64, u64, Vec<u8>, [u8; 32])>, // fid, size, data, sha
-    bot_offer: Option<Outgoing>,
+    /// Files coming to the bot, by fid: size, data so far, sha.
+    incoming: HashMap<u64, (u64, Vec<u8>, [u8; 32])>,
+    /// The bot's files: offered (`next` None) or being sent, a chunk at a
+    /// time as the air takes them (so a CANCEL stops them).
+    bot_out: Vec<Outgoing>,
+    /// Bumped whenever a link or call ends (or a link starts): timed
+    /// actions of an older epoch are stale and dropped.
+    epoch: u64,
     next_report: f64,
     next_cq: f64,
     table_msg_id: u64,
@@ -242,8 +309,9 @@ impl Session {
             ch: None,
             pending: VecDeque::new(),
             bot_chat_id: 0,
-            incoming: None,
-            bot_offer: None,
+            incoming: HashMap::new(),
+            bot_out: vec![],
+            epoch: 0,
             next_report: 5.0,
             next_cq: 3.0,
             table_msg_id: 0,
@@ -258,7 +326,21 @@ impl Session {
 
     fn after(&mut self, s: f64, what: Act) {
         let at = self.delay(s);
-        self.later.push(Later { at, what });
+        self.later.push(Later {
+            at,
+            what,
+            epoch: None,
+        });
+    }
+
+    /// Like `after`, but only if the current call/link is still on then.
+    fn after_link(&mut self, s: f64, what: Act) {
+        let at = self.delay(s);
+        self.later.push(Later {
+            at,
+            what,
+            epoch: Some(self.epoch),
+        });
     }
 
     fn reply(&mut self, l: &str) {
@@ -309,8 +391,8 @@ impl Session {
                 self.after(3.1, Act::Line("CANCELPENDING".into()));
                 if self.o.answer_cq && self.peer.is_none() && !self.answered_cq {
                     self.answered_cq = true;
-                    self.after(9.0, Act::Line("PENDING".into()));
-                    self.after(12.0, Act::Connect);
+                    self.after_link(9.0, Act::Line("PENDING".into()));
+                    self.after_link(12.0, Act::Connect);
                 }
             }
             "CONNECT" => {
@@ -319,33 +401,28 @@ impl Session {
                     .nth(2)
                     .unwrap_or("")
                     .to_ascii_uppercase();
+                // Both are cancelled by a DISCONNECT/ABORT before they're due.
                 if them.eq_ignore_ascii_case(&self.o.bot_call) {
                     self.reply("OK");
-                    self.after(6.0, Act::Connect);
+                    self.after_link(6.0, Act::Connect);
                 } else {
                     // Nobody by that call is on the air.
                     self.reply("OK");
-                    self.after(40.0, Act::Line("DISCONNECTED".into()));
+                    self.after_link(40.0, Act::Line("DISCONNECTED".into()));
                 }
             }
             "DISCONNECT" | "ABORT" => {
                 self.reply("OK");
-                if self.ptt {
-                    self.ptt = false;
-                    self.reply("PTT OFF");
-                }
-                self.reply("DISCONNECTED");
-                self.peer = None;
-                self.ch = None;
-                self.pending.clear();
-                self.uplink.clear();
-                self.downlink.clear();
+                self.end_link();
             }
             "TUNE" => {
                 self.reply("OK");
                 let on = w.next() != Some("OFF");
                 self.reply(if on { "PTT ON" } else { "PTT OFF" });
             }
+            // Every command gets an answer (unknown ones WRONG), so the app
+            // never waits out its reply time-out. (BUSYDETECT ON/OFF/bare
+            // are all OK above.)
             _ => self.reply("WRONG"),
         }
     }
@@ -353,6 +430,41 @@ impl Session {
     fn bot_send(&mut self, p: Link) {
         self.pending.push_back(p);
         self.flush();
+    }
+
+    /// Offer a file (a new offer of the same fid replaces the old one).
+    fn offer_file(&mut self, out: Outgoing) {
+        self.bot_send(out.offer());
+        self.bot_out.retain(|o| o.fid != out.fid);
+        self.bot_out.push(out);
+    }
+
+    /// A file to the bot is complete.
+    fn file_in(&mut self, fid: u64, ok: bool) {
+        self.bot_send(Link::Done { fid, ok });
+        let t = if ok {
+            "File received fine, checksum good. Nice!"
+        } else {
+            "That file arrived damaged (checksum wrong), sorry."
+        };
+        self.after_link(2.0, Act::BotChat(t.into()));
+    }
+
+    /// Hand the air the next chunks of the bot's accepted files, only as
+    /// fast as it takes them (about `budget` bytes per tick), so a CANCEL
+    /// stops a file within a chunk or so.
+    fn pump_files(&mut self, budget: usize) {
+        while self.ch.is_some() && self.pending.len() < 2 && self.downlink.len() < budget {
+            let Some(i) = self.bot_out.iter().position(|o| o.next.is_some()) else {
+                break;
+            };
+            match self.bot_out[i].next_chunk() {
+                Some(c) => self.bot_send(c),
+                None => {
+                    self.bot_out.remove(i);
+                }
+            }
+        }
     }
 
     /// Send what the bot's security layer lets through (all of it once
@@ -366,11 +478,33 @@ impl Session {
         }
     }
 
+    /// The bot hangs up (BYE, or a security failure).
     fn hang_up(&mut self) {
+        self.end_link();
+    }
+
+    /// The link (or the call being placed) ends, whoever ended it: unkey,
+    /// say DISCONNECTED, forget everything of it (nothing of it may reach
+    /// the next link) and cancel what was scheduled for it.
+    fn end_link(&mut self) {
+        if self.ptt {
+            self.ptt = false;
+            self.reply("PTT OFF");
+        }
+        if self.last_buffer != 0 {
+            self.last_buffer = 0;
+            self.reply("BUFFER 0");
+        }
         self.reply("DISCONNECTED");
         self.peer = None;
         self.ch = None;
+        self.dec = LinkDecoder::default();
         self.pending.clear();
+        self.uplink.clear();
+        self.downlink.clear();
+        self.incoming.clear();
+        self.bot_out.clear();
+        self.epoch += 1;
     }
 
     fn connect_bot(&mut self) {
@@ -381,6 +515,13 @@ impl Session {
         self.peer = Some(bot.clone());
         self.dec = LinkDecoder::default();
         self.pending.clear();
+        self.uplink.clear();
+        self.downlink.clear();
+        self.incoming.clear();
+        self.bot_out.clear();
+        // A new link: what an earlier call scheduled (an absent station's
+        // time-out, another answer) no longer applies.
+        self.epoch += 1;
         let l = format!("CONNECTED {} {} 2300", bot, self.mycall);
         self.reply(&l);
         let hello = Link::Hello {
@@ -427,8 +568,7 @@ impl Session {
                         false,
                         1,
                     );
-                    self.bot_send(out.offer());
-                    self.bot_offer = Some(out);
+                    self.offer_file(out);
                     "Sure, offering you a file now.".to_string()
                 } else if t.contains("73") || t.contains("bye") {
                     "73! Thanks for the contact.".to_string()
@@ -438,49 +578,53 @@ impl Session {
                         text.trim()
                     )
                 };
-                self.after(4.0, Act::BotChat(reply));
+                self.after_link(4.0, Act::BotChat(reply));
             }
+            // Any number of files at once, told apart by fid.
             Link::Offer { fid, size, sha, .. } => {
-                self.incoming = Some((fid, size, vec![], sha));
                 self.bot_send(Link::Answer {
                     fid,
                     accept: true,
                     resume_from: 0,
                 });
+                if size == 0 {
+                    // No chunks will come.
+                    self.file_in(fid, sha256(&[]) == sha);
+                } else {
+                    self.incoming.insert(fid, (size, vec![], sha));
+                }
             }
             Link::Chunk { fid, offset, data } => {
                 let mut done = None;
-                if let Some((f, size, buf, sha)) = &mut self.incoming
-                    && *f == fid
+                if let Some((size, buf, sha)) = self.incoming.get_mut(&fid)
                     && offset == buf.len() as u64
                 {
                     buf.extend_from_slice(&data);
                     if buf.len() as u64 >= *size {
-                        done = Some((fid, sha256(buf) == *sha));
+                        done = Some(sha256(buf) == *sha);
                     }
                 }
-                if let Some((fid, ok)) = done {
-                    self.incoming = None;
-                    self.bot_send(Link::Done { fid, ok });
-                    self.after(
-                        2.0,
-                        Act::BotChat("File received fine, checksum good. Nice!".into()),
-                    );
+                if let Some(ok) = done {
+                    self.incoming.remove(&fid);
+                    self.file_in(fid, ok);
                 }
+            }
+            // Either way: a file coming in is dropped, one going out stops.
+            Link::Cancel { fid } => {
+                self.incoming.remove(&fid);
+                self.bot_out.retain(|o| o.fid != fid);
             }
             Link::Answer {
                 fid,
                 accept,
                 resume_from,
             } => {
-                if let Some(mut out) = self.bot_offer.take()
-                    && out.fid == fid
-                    && accept
-                {
-                    out.next = Some(resume_from);
-                    while let Some(c) = out.next_chunk() {
-                        self.bot_send(c);
+                if accept {
+                    if let Some(out) = self.bot_out.iter_mut().find(|o| o.fid == fid) {
+                        out.next = Some(resume_from);
                     }
+                } else {
+                    self.bot_out.retain(|o| o.fid != fid);
                 }
             }
             Link::Mail { id, .. } => self.bot_send(Link::MailAck { id }),
@@ -541,8 +685,7 @@ impl Session {
                         false,
                         1,
                     );
-                    self.bot_send(out.offer());
-                    self.bot_offer = Some(out);
+                    self.offer_file(out);
                 } else {
                     self.bot_send(Link::FetchAnswer {
                         id,
@@ -587,11 +730,7 @@ impl Session {
             self.table_msg_id += 1;
             if let Ok(frames) = table_text_frames(fr.table, &bot, self.table_msg_id, &t, 123) {
                 for (i, f) in frames.into_iter().enumerate() {
-                    let at = self.delay(9.0 + i as f64 * 3.2);
-                    self.later.push(Later {
-                        at,
-                        what: Act::BotBcast(f),
-                    });
+                    self.after(9.0 + i as f64 * 3.2, Act::BotBcast(f));
                 }
             }
         }
@@ -606,14 +745,12 @@ impl Session {
             due
         };
         for l in due {
+            if l.epoch.is_some_and(|e| e != self.epoch) {
+                continue; // its call or link has ended since
+            }
             match l.what {
-                Act::Line(s) => {
-                    if s == "DISCONNECTED" {
-                        self.peer = None;
-                        self.ch = None;
-                    }
-                    self.reply(&s)
-                }
+                Act::Line(s) if s == "DISCONNECTED" => self.end_link(),
+                Act::Line(s) => self.reply(&s),
                 Act::Connect => {
                     if self.peer.is_none() {
                         self.connect_bot()
@@ -634,62 +771,7 @@ impl Session {
         // in reality; good enough to show progress and ETAs).
         let speed = if self.o.fast { 1e9 } else { self.o.bps };
         let budget = ((speed / 8.0) * dt).ceil() as usize;
-        if self.peer.is_some() {
-            let n = budget.min(self.uplink.len());
-            if n > 0 {
-                if !self.ptt {
-                    self.ptt = true;
-                    self.reply("PTT ON");
-                }
-                let bytes: Vec<u8> = self.uplink.drain(..n).collect();
-                match self.dec.feed_bodies(&bytes) {
-                    Ok(bodies) => {
-                        for b in bodies {
-                            let Some(ch) = self.ch.as_mut() else { break };
-                            match ch.on_body(&b) {
-                                Ok(step) => {
-                                    for w in step.send {
-                                        self.downlink.extend(w);
-                                    }
-                                    if let Some(Notice::Secure { sas }) = step.notice {
-                                        self.bot_chat_id += 1;
-                                        let t = format!(
-                                            "🔒 Encrypted now. My screen shows the code {sas}; does yours?"
-                                        );
-                                        self.pending.push_back(Link::Chat {
-                                            id: self.bot_chat_id,
-                                            text: t,
-                                        });
-                                    }
-                                    step.app.into_iter().for_each(|p| self.on_link(p));
-                                }
-                                // Policy refused, or tampering: hang up, like Whistlestop.
-                                Err(_) => self.hang_up(),
-                            }
-                        }
-                        self.flush();
-                    }
-                    Err(_) => self.dec = LinkDecoder::default(),
-                }
-            } else if self.ptt {
-                self.ptt = false;
-                self.reply("PTT OFF");
-            }
-            let n = budget.min(self.downlink.len());
-            self.data_out.extend(self.downlink.drain(..n));
-            if self.uplink.len() != self.last_buffer {
-                self.last_buffer = self.uplink.len();
-                let l = format!("BUFFER {}", self.last_buffer);
-                self.reply(&l);
-            }
-            if self.now >= self.next_report {
-                self.next_report = self.delay(5.0);
-                self.reply("BITRATE (25) 3100 BPS");
-                self.reply("SN 12.4");
-            }
-        } else {
-            self.uplink.clear();
-        }
+        self.air(budget);
 
         // The bot calls CQ on its frequency; Mercury decodes the CQFRAME only
         // when our radio is tuned within its +/-55 Hz capture window.
@@ -716,6 +798,80 @@ impl Session {
                     self.bcast_out.push(call.encode());
                 }
             }
+        }
+    }
+
+    /// One tick of the link: `budget` bytes each way.
+    fn air(&mut self, budget: usize) {
+        if self.peer.is_none() {
+            self.uplink.clear();
+            if self.ptt {
+                self.ptt = false;
+                self.reply("PTT OFF");
+            }
+            return;
+        }
+        let n = budget.min(self.uplink.len());
+        if n > 0 {
+            if !self.ptt {
+                self.ptt = true;
+                self.reply("PTT ON");
+            }
+            let bytes: Vec<u8> = self.uplink.drain(..n).collect();
+            match self.dec.feed_bodies(&bytes) {
+                Ok(bodies) => {
+                    for b in bodies {
+                        let Some(ch) = self.ch.as_mut() else { break };
+                        match ch.on_body(&b) {
+                            Ok(step) => {
+                                for w in step.send {
+                                    self.downlink.extend(w);
+                                }
+                                if let Some(Notice::Secure { sas }) = step.notice {
+                                    self.bot_chat_id += 1;
+                                    let t = format!(
+                                        "🔒 Encrypted now. My screen shows the code {sas}; does yours?"
+                                    );
+                                    self.pending.push_back(Link::Chat {
+                                        id: self.bot_chat_id,
+                                        text: t,
+                                    });
+                                }
+                                for p in step.app {
+                                    // After a BYE the rest is not for this link.
+                                    if self.peer.is_none() {
+                                        break;
+                                    }
+                                    self.on_link(p);
+                                }
+                            }
+                            // Policy refused, or tampering: hang up, like Whistlestop.
+                            Err(_) => self.hang_up(),
+                        }
+                    }
+                    self.flush();
+                }
+                Err(_) => self.dec = LinkDecoder::default(),
+            }
+            if self.peer.is_none() {
+                return; // the bot hung up; end_link said all there is to say
+            }
+        } else if self.ptt {
+            self.ptt = false;
+            self.reply("PTT OFF");
+        }
+        self.pump_files(budget);
+        let n = budget.min(self.downlink.len());
+        self.data_out.extend(self.downlink.drain(..n));
+        if self.uplink.len() != self.last_buffer {
+            self.last_buffer = self.uplink.len();
+            let l = format!("BUFFER {}", self.last_buffer);
+            self.reply(&l);
+        }
+        if self.now >= self.next_report {
+            self.next_report = self.delay(5.0);
+            self.reply("BITRATE (25) 3100 BPS");
+            self.reply("SN 12.4");
         }
     }
 }
