@@ -143,3 +143,10 @@ Tests: `cargo test --release` (82, including click tests that drive the real
 window through its accessibility tree, a full headless demo: search →
 lock → CQ → connect → chat → zipped file, and the same over an encrypted
 link).
+
+## License
+
+Whistlestop is free software under the
+[GNU General Public License v3.0 or later](LICENSE). The phone apps build in
+Rhizomatica's [Mercury](https://github.com/Rhizomatica/mercury) modem, which
+is GPL-3.0.
