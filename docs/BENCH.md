@@ -166,9 +166,11 @@ Fixed after a review of the engine and the apps:
 - **The bench crashed** in any scenario that sends a file (narrow, e2e,
   resume…) when run without `files`, which made the `to-send` folder.
 
-Not changed: after a "measure again" hop in search, a silent next look
-still waits for the CQ at the re-measured frequency, which may be the
-stale one. Worth a look with the `scan` scenario.
+Fixed since: a "measure again" hop could chase stale audio. A look right
+after a retune that read 25 Hz or more off moved by that much, but audio
+from before the retune shows the whistle where it was, so the move retuned
+twice, and a silent next look then waited for the CQ there. Search now
+listens again in place first and moves only if two looks agree.
 
 ## Three-station scenarios
 
@@ -187,6 +189,55 @@ these names the bench is the two-station bench, unchanged.
 | `busy3` | BRAVO and CHARLIE linked on ALPHA's frequency, an 8 KB file BRAVO→CHARLIE, ALPHA parked there: ALPHA calls BRAVO (busy) and must give up cleanly while their link and file carry on; ALPHA's whistle watch must report no whistles from their traffic; ALPHA then calls CQ on top of them (how long it transmits over them is measured) and their link must survive; once they're done ALPHA links BRAVO; no Mercury stuck. About 8 min. |
 
 `... bench-run table3 relay3 cq_pileup busy3` takes about 45 min.
+
+## Busy channel, Roundtable sync, merged with the phone work (2026-11-12)
+
+Mercury 1.9.23 on the ether, Ubuntu on WSL 2, after merging `cde492a`
+(phones, deferred auto-answer, pending joins, bench by station kind):
+
+| Set | Result |
+|---|---|
+| Standard two-station | 31/34. The three scan-speed tests failed because of a bench bug: `update` starts from each station's own settings every time, so every scan trial turned listen-before-transmit back on, and ALPHA's CQ waited out Mercury's busy reading. Fixed. Rerun of `watch link scan`: 7/8. Scan speed normal 4/4 (median 4.9 s), weak 4/4 (4.8 s), very weak 3/4 (7.6 s). The miss came after a false alarm on an empty channel at +5 dB. |
+| `cancel chat_during resume e2e_require away_long away_weak` | 18/18 |
+| Three-station (`table3 relay3 cq_pileup busy3`) | **32/32** (from 26/32 earlier in the day, and 28/32 on 11-11) |
+
+Found and fixed on the way (real Mercury, then the fake one):
+
+- **Automatic deliver/collect never happened with listen-before-transmit
+  on.** The Station ID that sets one off has only just ended, so Mercury's
+  busy detector still reads it; the call was skipped and not retried. It
+  now waits for the channel to clear (90 s at most).
+- **Mercury's busy detector sticks on a sudden noise step.** The bench steps
+  the noise up 22–28 dB at once, and the detector then read BUSY for
+  minutes (a 60 s wait for every CQ). Whistlestop's 60 s cap lets the CQ go
+  anyway. The scan test turns listen-before-transmit off. Turning the
+  setting off now also drops a BUSY already latched, and sends
+  `BUSYDETECT OFF`.
+- **A weak Roundtable member lost the table.** The host slowed down for it,
+  but announced that at the faster speed, which it couldn't copy: host and
+  member on different modes for 7 minutes, LEAVE unheard, the next join
+  unheard. Now:
+  - a member whose report says it can't copy the speed moves to DATAC3
+    itself when no announcement comes within 40 s;
+  - the host sends a heartbeat (SPEED, with its newest message id) when
+    quiet for 90 s;
+  - a member hearing nothing for 4 minutes tries the other likely modes;
+  - a member the host may not know re-sends its JOIN at the join window's
+    CALL.
+- **A one-frame Roundtable message lost whole was never asked for.** Gaps in
+  a sender's message ids (or the heartbeat's) are now asked for with AGAIN,
+  at most 3 requests every 20 s.
+- **The first join window came 40 s after the table first sped up**; now a
+  full 3 minutes.
+- **Connect by hand was refused while an auto-answer waited** (it should
+  replace it), and an automatic call's 60 s give-up stayed armed after
+  Disconnect, so it could ABORT the next call made by hand.
+- The GUI click test `click_library_and_qsy_row` checked for the QSY row
+  before a frame had drawn the new link (a race in the test).
+
+Native Windows: Smart App Control blocks the build scripts of a fresh
+build, so the Windows target was checked from WSL with
+`cargo check --target x86_64-pc-windows-msvc`.
 
 ## Three stations (2026-11-11): 28/32
 

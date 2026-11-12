@@ -372,7 +372,10 @@ fn join_table_then_connect_does_not_break() {
     stn.wait("link", 15.0, |s| s.link.is_some());
     chat_roundtrip(&stn, "linked after leaving the table", 10.0);
     stn.send(Cmd::JoinTable("another".into()));
-    stn.wait("join refused while linked", 3.0, |s| s.log.iter().any(|l| l.1.contains("you're in a 1:1 link")));
+    stn.wait("join refused while linked", 3.0, |s| {
+        s.log.iter().any(|l| l.1.contains("end the link first") || l.1.contains("you're in a 1:1 link"))
+    });
+    assert!(stn.st().table.is_none() && stn.st().link.is_some(), "{}", dump(&stn.h));
     link_down(&stn, 10.0);
     assert_idle(&stn, "after table + link");
     // Back in the calling mode afterwards.

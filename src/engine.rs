@@ -286,6 +286,8 @@ const TABLE_LOST_AFTER: Duration = Duration::from_secs(240);
 /// host to slow down; if no announcement comes in this time, it slows down
 /// by itself (it would never copy the one sent at the faster speed).
 const SLOWDOWN_WAIT: Duration = Duration::from_secs(40);
+/// Roundtable: at most this many AGAIN requests every 20 s.
+const AGAIN_PER_ROUND: usize = 3;
 
 /// An automatic call (auto-answer, deliver, collect) that hasn't linked by
 /// then is abandoned.
@@ -1303,6 +1305,9 @@ impl Station {
     /// (`Cmd::ReconnectModem`), never polled.
     async fn connect_modem(&mut self) -> bool {
         let (host, port, bport) = self.modem.clone();
+        self.chan_busy = false;
+        self.busy_wait = None;
+        self.set(|g| g.channel_busy = false);
         let (etx, erx) = mpsc::unbounded_channel();
         match Tnc::connect(&host, port, Some(bport), etx).await {
             Ok(mut t) => match t.setup(&self.mycall(), self.bw.mercury_arq_bw()).await {
@@ -1735,6 +1740,14 @@ impl Station {
                 self.log(format!("Calling {call}…"));
             }
             Cmd::Disconnect => {
+                // Nothing automatic stays armed: a waiting auto-answer would
+                // still call, and an automatic call's give-up timer would
+                // ABORT whatever is called by hand next.
+                self.answer_at = None;
+                self.auto_pending = None;
+                if self.peer.is_none() {
+                    self.auto_call = None;
+                }
                 if self.peer.is_some() {
                     self.hang_up("73").await?;
                 } else {
@@ -2314,11 +2327,28 @@ impl Station {
                             // within the scan detector's ~10 Hz. Further off
                             // means the look likely caught audio from before
                             // the retune (a radio or sound card slow to
-                            // follow): go there and measure once more before
-                            // locking.
+                            // follow). Such audio shows the whistle where it
+                            // was before the retune, so moving by it would
+                            // retune twice: listen here once more first.
+                            Some(off) if off.abs() >= RECHECK_HZ && hops < 3 && !again => {
+                                self.log(format!(
+                                    "🚂 Measured {off:+.0} Hz off after retuning; listening again here"
+                                ));
+                                s.phase = SearchPhase::Verify {
+                                    target,
+                                    from: audio::now_count(&self.rx).max(1),
+                                    coarse,
+                                    again: true,
+                                    // Counts as a hop: if the whistle has
+                                    // ended meanwhile, wait for its CQ here.
+                                    hops: hops + 1,
+                                };
+                            }
+                            // Two looks agree it's that far off: go there and
+                            // measure once more before locking.
                             Some(off) if off.abs() >= RECHECK_HZ && hops < 3 => {
                                 self.log(format!(
-                                    "🚂 Measured {off:+.0} Hz off after retuning; checking again there"
+                                    "🚂 Measured {off:+.0} Hz off again; checking there"
                                 ));
                                 s.phase = SearchPhase::Verify {
                                     target: target + off,
@@ -2631,6 +2661,14 @@ impl Station {
             let phase = match &cq.phase {
                 CqPhase::Whistle { .. } => "whistling".to_string(),
                 CqPhase::Frame { .. } => "sending CQFRAME".into(),
+                // The next cycle is due but someone is on the frequency.
+                CqPhase::Listen { until } if Instant::now() >= *until && self.chan_busy => {
+                    let waited = self.busy_wait.map(|(t, _)| t.elapsed().as_secs()).unwrap_or(0);
+                    format!(
+                        "waiting for a clear channel ({}s)",
+                        BUSY_WAIT_MAX.as_secs().saturating_sub(waited)
+                    )
+                }
                 CqPhase::Listen { until } => {
                     format!(
                         "listening for answers ({}s)",
@@ -4625,7 +4663,12 @@ impl Station {
                 self.last_again = Instant::now();
                 let id = self.table_id().unwrap();
                 let me = self.mycall();
-                for (of, mid, missing) in self.table_asm.missing() {
+                // A few per round, oldest first: each is a frame on the air,
+                // and a long gap (or a sender gone for good) mustn't keep
+                // this station transmitting.
+                let mut wanted = self.table_asm.missing();
+                wanted.sort_by(|a, b| (&a.0, a.1).cmp(&(&b.0, b.1)));
+                for (of, mid, missing) in wanted.into_iter().take(AGAIN_PER_ROUND) {
                     self.table_tx(
                         TableFrame {
                             table: id,
@@ -4906,13 +4949,23 @@ impl Station {
         if !crate::protocol::valid_call(&self.mycall()) {
             anyhow::bail!("set your own callsign first (Settings → Station)");
         }
-        if self.peer.is_some() || self.st.lock().unwrap().calling.is_some() {
+        let calling = self.st.lock().unwrap().calling.is_some() && self.answer_at.is_none();
+        if self.peer.is_some() || calling {
             anyhow::bail!("already linked (or calling): disconnect first");
         }
         if self.st.lock().unwrap().table.is_some() {
             anyhow::bail!("you're at a Roundtable: Leave it first, then call");
         }
         self.stop_cq("CQ stopped: calling a station").await;
+        // This call replaces automatic ones: a waiting auto-answer or
+        // deliver/collect, and the give-up timer of an earlier one (which
+        // would otherwise ABORT this call).
+        if self.answer_at.take().is_some() {
+            self.set(|g| g.calling = None);
+        }
+        self.auto_pending = None;
+        self.auto_call = None;
+        self.link_auto = None;
         Ok(())
     }
 
@@ -5014,6 +5067,7 @@ impl Station {
         };
         let still = self.away
             && if deliver { self.cfg.auto_deliver } else { self.cfg.auto_collect }
+            && self.pending_join.is_none()
             && self.quiet()
             && self.peer.is_none()
             && self.cq.is_none()

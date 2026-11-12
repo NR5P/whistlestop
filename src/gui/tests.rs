@@ -348,6 +348,9 @@ fn click_library_and_qsy_row() {
     type_into(&mut h, "Callsign", "K7BOT");
     click_exact(&mut h, "Connect");
     wait(&mut h, 40.0, "link", |_, s| s.link.is_some());
+    // `wait` returns as soon as the engine says so, maybe before a frame
+    // has drawn it.
+    frames(&mut h, 3);
     assert!(has_text(&h, "Move this link to"));
     click(&mut h, "Files");
     click(&mut h, "Browse");

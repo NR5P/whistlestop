@@ -620,9 +620,12 @@ mod bench {
                 for trial in 0..trials {
                     self.a.send(Cmd::StopCq);
                     self.b.send(Cmd::StopSearch);
+                    // (`update` starts from the station's own settings each
+                    // time, so busy_detect is turned off here too.)
                     self.update(&self.a, |c| {
                         c.whistle_s = w;
                         c.cq_cycles = 1;
+                        c.busy_detect = false;
                     });
                     self.update(&self.b, |c| c.auto_answer = false);
                     self.b.send(Cmd::SetFreq(14_096_000.0 + 2300.0 * trial as f64));
