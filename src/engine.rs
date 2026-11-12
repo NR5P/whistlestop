@@ -5007,7 +5007,12 @@ impl Station {
                 at: Instant::now(),
             });
         });
-        let quiet = self.quiet() && self.cq.is_none() && self.search.is_none();
+        // (Not at a Roundtable: the call would be dropped there, and the
+        // 15-minute cool-down below spent for nothing.)
+        let quiet = self.quiet()
+            && self.cq.is_none()
+            && self.search.is_none()
+            && !self.at_table_or_joining();
         if self.away
             && self.cfg.auto_deliver
             && quiet
@@ -5050,7 +5055,12 @@ impl Station {
             });
         });
         self.log(format!("📬 {call} has mail for you"));
-        let quiet = self.quiet() && self.cq.is_none() && self.search.is_none();
+        // (Not at a Roundtable: the call would be dropped there, and the
+        // 15-minute cool-down below spent for nothing.)
+        let quiet = self.quiet()
+            && self.cq.is_none()
+            && self.search.is_none()
+            && !self.at_table_or_joining();
         if self.away
             && self.cfg.auto_collect
             && quiet
