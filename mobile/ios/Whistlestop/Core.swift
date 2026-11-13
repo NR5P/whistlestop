@@ -149,6 +149,21 @@ final class Core: ObservableObject {
         return ok
     }
 
+    /// Change one setting and save just that, leaving any other edits
+    /// still waiting for Settings → Save (a switch outside Settings, like
+    /// Answer automatically, mustn't save those for you).
+    @discardableResult
+    func saveOne(_ key: String, _ value: Any) -> Bool {
+        let saved = take(ws_config())
+        guard var obj = (try? JSONSerialization.jsonObject(with: Data(saved.utf8))) as? [String: Any] else { return false }
+        obj[key] = value
+        guard let data = try? JSONSerialization.data(withJSONObject: obj),
+              let s = String(data: data, encoding: .utf8) else { return false }
+        let ok = ws_set_config(s) == 0
+        if ok { config[key] = value }
+        return ok
+    }
+
     func string(_ key: String) -> String { config[key] as? String ?? "" }
     func bool(_ key: String) -> Bool { config[key] as? Bool ?? false }
     func number(_ key: String) -> Double { (config[key] as? NSNumber)?.doubleValue ?? 0 }

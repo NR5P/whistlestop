@@ -15,6 +15,8 @@ struct EngineState: Decodable {
     var bandwidth: String? = nil
     var link: Link? = nil
     var incomingCall: Bool? = nil
+    /// A call going out (Connect, or an automatic one), until it links.
+    var calling: String? = nil
     var chat: [ChatLine]? = nil
     var heard: [Heard]? = nil
     var whistle: Whistle? = nil
@@ -210,6 +212,10 @@ struct Mail: Decodable, Identifiable {
 // MARK: formatting
 
 enum Fmt {
+    /// A kHz number as typed: "14103.5" or, with a comma decimal, "14103,5".
+    static func kHz(_ s: String) -> Double? {
+        Double(s.trimmingCharacters(in: .whitespaces).replacingOccurrences(of: ",", with: "."))
+    }
     /// 14.103 150 MHz → "14.103.15"
     static func dial(_ hz: Double) -> String {
         guard hz > 0 else { return "—" }

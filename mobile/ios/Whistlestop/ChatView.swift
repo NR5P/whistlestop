@@ -65,8 +65,10 @@ struct LinkChatView: View {
                     }
                     .padding(16)
                 }
-                .onChange(of: lines.count) { _, n in
-                    withAnimation { proxy.scrollTo(n - 1, anchor: .bottom) }
+                // Not the count: it stays at the engine's cap (500 lines)
+                // once old lines scroll away.
+                .onChange(of: "\(lines.count)|\(lines.last?.at ?? 0)|\(lines.last?.text ?? "")") { _, _ in
+                    withAnimation { proxy.scrollTo(lines.count - 1, anchor: .bottom) }
                 }
                 .onAppear { proxy.scrollTo(lines.count - 1, anchor: .bottom) }
             }
@@ -231,8 +233,8 @@ struct TableView: View {
                     .padding(16)
                     .frame(maxWidth: .infinity, alignment: .leading)
                 }
-                .onChange(of: t.lines.count) { _, n in
-                    withAnimation { proxy.scrollTo(n - 1, anchor: .bottom) }
+                .onChange(of: "\(t.lines.count)|\(t.lines.last?.at ?? 0)|\(t.lines.last?.text ?? "")") { _, _ in
+                    withAnimation { proxy.scrollTo(t.lines.count - 1, anchor: .bottom) }
                 }
                 .onAppear { proxy.scrollTo(t.lines.count - 1, anchor: .bottom) }
             }

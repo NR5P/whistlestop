@@ -52,7 +52,7 @@ enum class HelpTopic(val title: String, val body: String) {
     ),
     away(
         "Away",
-        "You're away from the radio: stations that connect get your away message, what they type is saved to your Arrivals, and quiet links hang up so others can get through.",
+        "You're away from the radio: stations that connect get your away message, what they type is saved to your Arrivals, and quiet links hang up so others can get through. With Settings → While away → Accept files by myself on, files offered within the size limit are accepted for you. Tap Here/Away to switch.",
     ),
     depot(
         "Depot",

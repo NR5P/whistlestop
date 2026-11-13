@@ -193,6 +193,18 @@ class Station(private val scope: CoroutineScope) {
         return listOf("rig_mode", "rigctld", "cat").any { saved[it] != _config.value[it] }
     }
 
+    /**
+     * Change one setting and save just that: other edits still wait for
+     * Settings → Save (a switch outside Settings, like Answer
+     * automatically, mustn't save them for you).
+     */
+    fun saveOne(key: String, value: JsonElement): Boolean {
+        val saved = runCatching { Json.parseToJsonElement(Core.config()) as JsonObject }.getOrNull() ?: return false
+        val ok = Core.setConfig(JsonObject(saved + (key to value)).toString()) == 0
+        if (ok) edit { it[key] = value }
+        return ok
+    }
+
     /** Save and apply; false if the engine refused them. */
     fun saveConfig(): Boolean {
         val ok = Core.setConfig(_config.value.toString()) == 0
@@ -203,7 +215,8 @@ class Station(private val scope: CoroutineScope) {
     /** Restart the station with the saved settings (e.g. demo on/off). */
     fun restart() {
         send("Stop")
-        send("Start", _config.value)
+        // The saved settings, not edits still waiting for Save.
+        send("Start", runCatching { Json.parseToJsonElement(Core.config()) }.getOrDefault(_config.value))
     }
 
     /** A radio was plugged in, or USB access allowed: reconnect if the radio isn't up. */
@@ -215,8 +228,9 @@ class Station(private val scope: CoroutineScope) {
         // Saving lets the engine adopt a USB radio when none was set up; if
         // that changed the radio settings, the engine restarted the station
         // itself, so restart here only when nothing changed.
+        // The saved settings again (not edits still waiting for Save).
         val before = Core.config()
-        if (saveConfig() && Core.config() == before) restart()
+        if (Core.setConfig(before) == 0 && Core.config() == before) restart()
     }
 
     /** Mercury keys the radio differently from the settings: reopen the app. */

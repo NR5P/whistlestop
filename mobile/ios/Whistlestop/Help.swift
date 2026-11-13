@@ -40,7 +40,7 @@ enum HelpTopic: String, CaseIterable, Identifiable {
         case .qsy:
             ("Move the link (QSY)", "Ask the linked station to move to another frequency with you, to clear the calling frequency. Both radios move, and both go back home when the link ends. They can refuse by their own settings (band, distance from home, SWR).")
         case .away:
-            ("Away", "You're away from the radio: stations that connect get your away message, what they type is saved to your Arrivals, and quiet links hang up so others can get through.")
+            ("Away", "You're away from the radio: stations that connect get your away message, what they type is saved to your Arrivals, and quiet links hang up so others can get through. With Settings → While away → Accept files by myself on, files offered within the size limit are accepted for you. Tap Here/Away to switch.")
         case .depot:
             ("Depot", "Whistlestop's mailbox: Arrivals (mail for you), Departures (mail you wrote, waiting for its station), In Transit (mail you're carrying for others) and Delivered.")
         case .depotPost:

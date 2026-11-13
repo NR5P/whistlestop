@@ -497,7 +497,11 @@ impl App {
                     (None, Some(_)) => ("🛰 Shared", CARD_HI, GREEN),
                     _ => ("🛰 Remote", CARD_HI, TEXT),
                 };
-                let rb = egui::Button::new(RichText::new(rl).size(bs).strong().color(fg)).fill(fill);
+                // One width for all four labels: a LAN client connecting
+                // mustn't push the rest of the top bar sideways.
+                let rb = egui::Button::new(RichText::new(rl).size(bs).strong().color(fg))
+                    .fill(fill)
+                    .min_size(vec2(bs * 7.2, 0.0));
                 let tip = match (&self.client, &self.server) {
                     (Some(c), _) => format!("Operating {}", c.desc),
                     (None, Some(srv)) => format!("Sharing this station on the LAN (port {}); {} connected", srv.port, srv.clients.lock().unwrap().len()),
@@ -2135,8 +2139,8 @@ impl App {
                         ui.checkbox(&mut c.sdr.enabled, "Use an RTL-SDR dongle for the wide waterfall").help(&help::ST_SDR);
                         ui.horizontal(|ui| {
                             ui.label("Connected to").help(&help::ST_SDR);
-                            ui.selectable_value(&mut c.sdr.feed, whistlestop::sdr::Feed::RxOut, "RX OUT (antenna)");
-                            ui.selectable_value(&mut c.sdr.feed, whistlestop::sdr::Feed::IfOut, "IF OUT");
+                            ui.selectable_value(&mut c.sdr.feed, whistlestop::sdr::Feed::RxOut, "RX OUT (antenna)").help(&help::ST_SDR);
+                            ui.selectable_value(&mut c.sdr.feed, whistlestop::sdr::Feed::IfOut, "IF OUT").help(&help::ST_SDR);
                         });
                         if c.sdr.feed == whistlestop::sdr::Feed::IfOut {
                             ui.horizontal(|ui| {

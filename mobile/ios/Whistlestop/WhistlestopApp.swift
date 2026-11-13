@@ -96,6 +96,7 @@ struct StationHeader: View {
                 }
                 Spacer()
                 HelpButton(topic: .status)
+                HelpButton(topic: .away)
                 Button {
                     core.setAway(!(s.away ?? false))
                 } label: {

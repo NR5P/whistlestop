@@ -50,6 +50,8 @@ data class EngineState(
     val table: TableState? = null,
     /** A Roundtable we'll join as soon as Mercury is free. */
     val tablePending: String? = null,
+    /** A call going out (Connect, or an automatic one), until it links. */
+    val calling: String? = null,
 ) {
     companion object {
         fun parse(json: String): EngineState {
@@ -130,6 +132,7 @@ data class EngineState(
                     )
                 },
                 tablePending = s.s("table_pending"),
+                calling = s.s("calling"),
             )
         }
     }

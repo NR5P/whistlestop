@@ -56,18 +56,14 @@ struct SettingsView: View {
                             .multilineTextAlignment(.trailing)
                     }
                     LabeledContent("Port") {
-                        TextField("8300", value: core.intBinding("mercury_port"), format: .number.grouping(.never))
-                            .keyboardType(.numberPad)
-                            .multilineTextAlignment(.trailing)
+                        NumberField(key: "mercury_port", placeholder: "8300", range: 1...65534, decimal: false)
                     }
                 } header: { header("Modem (Mercury)", .modem) }
 
                 Section {
                     Toggle("Accept files by myself", isOn: core.boolBinding("auto_accept_away"))
                     LabeledContent("Each up to (MB)") {
-                        TextField("5", value: core.doubleBinding("auto_accept_max_mb"), format: .number)
-                            .keyboardType(.decimalPad)
-                            .multilineTextAlignment(.trailing)
+                        NumberField(key: "auto_accept_max_mb", placeholder: "5", range: 0.1...200, decimal: true)
                             .frame(width: 80)
                     }
                     .disabled(!core.bool("auto_accept_away"))
@@ -164,5 +160,42 @@ struct SettingsView: View {
                 // directly (and shares it with Mercury).
                 core.config["rig_mode"] = $0.trimmingCharacters(in: .whitespaces).isEmpty ? "External" : "Direct"
             })
+    }
+}
+
+/// A number setting typed as text. Every keystroke that makes a number in
+/// `range` goes into the settings at once (so Save never misses the last
+/// edit), and what you type stays as typed ("2." while on the way to "2.5").
+/// Out of range or not a number: shown in red and not taken.
+struct NumberField: View {
+    @EnvironmentObject var core: Core
+    let key: String
+    let placeholder: String
+    let range: ClosedRange<Double>
+    let decimal: Bool
+    @State private var text = ""
+
+    private func show(_ v: Double) -> String {
+        decimal && v != v.rounded() ? String(v) : String(Int(v))
+    }
+    private var valid: Bool { Fmt.kHz(text).map { range.contains($0) } ?? false }
+
+    var body: some View {
+        TextField(placeholder, text: $text)
+            .keyboardType(decimal ? .decimalPad : .numberPad)
+            .multilineTextAlignment(.trailing)
+            .monospacedDigit()
+            .foregroundStyle(valid || text.isEmpty ? Theme.text : Theme.red)
+            .onAppear { text = show(core.number(key)) }
+            .onChange(of: text) { _, t in
+                if let v = Fmt.kHz(t), range.contains(v) {
+                    core.config[key] = decimal ? v : Double(Int(v))
+                }
+            }
+            // Reloaded (after Save, or a revert): show the saved value,
+            // unless it's what's typed already.
+            .onChange(of: core.number(key)) { _, v in
+                if Fmt.kHz(text) != v { text = show(v) }
+            }
     }
 }

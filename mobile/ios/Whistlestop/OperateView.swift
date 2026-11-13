@@ -10,7 +10,21 @@ struct OperateView: View {
     @State private var cqTable = false
     @State private var tableName = ""
 
-    private let bands = ["160m", "80m", "60m", "40m", "30m", "20m", "17m", "15m", "12m", "10m"]
+
+    /// Linked, or a call going out: the engine refuses another call, a
+    /// retune, a search or a join until it's over.
+    private func busy(_ s: EngineState) -> Bool {
+        s.link != nil || s.calling != nil
+    }
+
+    /// The bands the station has digital segments for (Settings → segments),
+    /// so Search never offers one it would refuse.
+    private var bands: [String] {
+        let fromCfg = (core.config["segments"] as? [[String: Any]] ?? []).compactMap { $0["band"] as? String }
+        var seen = Set<String>()
+        let list = fromCfg.filter { seen.insert($0).inserted }
+        return list.isEmpty ? ["40m", "30m", "20m"] : list
+    }
 
     /// At a Roundtable, only a CQ for that table (as its host) is allowed:
     /// anything else would take the station away from it.
@@ -37,14 +51,15 @@ struct OperateView: View {
                         Field(placeholder: "kHz, e.g. 14103", text: $khz, caps: false)
                             .keyboardType(.decimalPad)
                         Button("Tune") {
-                            if let k = Double(khz.replacingOccurrences(of: ",", with: ".")) {
+                            if let k = Fmt.kHz(khz) {
                                 core.setFreq(khz: k)
                                 khz = ""
                             }
                         }
                         .buttonStyle(QuietButtonStyle())
                         .frame(width: 96)
-                        .disabled(Double(khz) == nil)
+                        // The engine won't retune during a link or a call.
+                        .disabled(Fmt.kHz(khz) == nil || busy(s))
                     }
                 }
 
@@ -56,7 +71,7 @@ struct OperateView: View {
                             Text(search.note.isEmpty
                                  ? "Channel \(search.index + 1) of \(search.total) · \(Fmt.dial(search.channelHz)) kHz"
                                  : search.note)
-                                .font(.callout).foregroundStyle(Theme.text)
+                                .font(.callout.monospacedDigit()).foregroundStyle(Theme.text)
                                 .lineLimit(2, reservesSpace: true)
                             Button("Stop search") { core.stopSearch() }
                                 .buttonStyle(QuietButtonStyle())
@@ -79,13 +94,14 @@ struct OperateView: View {
                             Button("Search all bands") { core.startSearch(.allBands) }
                                 .buttonStyle(QuietButtonStyle())
                         }
-                        // A search retunes the radio away from the table.
-                        .disabled(s.table != nil)
+                        // A search retunes the radio: not at a table, during a
+                        // link or call, or while calling CQ.
+                        .disabled(s.table != nil || busy(s) || s.cq?.active == true)
                     }
                     HStack {
                         Toggle("Answer automatically", isOn: Binding(
                             get: { core.bool("auto_answer") },
-                            set: { core.config["auto_answer"] = $0; core.saveConfig() }))
+                            set: { core.saveOne("auto_answer", $0) }))
                             .font(.callout)
                         HelpButton(topic: .autoAnswer)
                     }
@@ -99,7 +115,7 @@ struct OperateView: View {
                                 Text("\(Fmt.dial(w.dialHz + w.offsetHz)) kHz")
                                     .font(.body.monospacedDigit().weight(.semibold))
                                 Text("score \(String(format: "%.1f", w.score)) · \(Fmt.ago(w.at)) ago")
-                                    .font(.caption).foregroundStyle(Theme.dim)
+                                    .font(.caption.monospacedDigit()).foregroundStyle(Theme.dim)
                             }
                         }
                     } else {
@@ -127,7 +143,7 @@ struct OperateView: View {
                                     }
                                     .buttonStyle(BrassButtonStyle(color: Theme.teal))
                                     .frame(width: 110)
-                                    .disabled(s.link != nil || s.table != nil)
+                                    .disabled(busy(s) || s.table != nil)
                                     .accessibilityLabel("Join \(t)")
                                 } else {
                                     Button("Answer") {
@@ -136,7 +152,7 @@ struct OperateView: View {
                                     }
                                     .buttonStyle(BrassButtonStyle())
                                     .frame(width: 110)
-                                    .disabled(s.link != nil || s.table != nil)
+                                    .disabled(busy(s) || s.table != nil)
                                 }
                             }
                         }
@@ -146,7 +162,7 @@ struct OperateView: View {
                 Card(title: "Call CQ", help: .cq) {
                     if let cq = s.cq, cq.active {
                         Text("Cycle \(cq.cycle) of \(cq.cycles) · \(cq.phase)")
-                            .font(.callout).foregroundStyle(Theme.text)
+                            .font(.callout.monospacedDigit()).foregroundStyle(Theme.text)
                             .lineLimit(1, reservesSpace: true)
                         Button("Stop CQ") { core.stopCq() }
                             .buttonStyle(BrassButtonStyle(color: Theme.red))
@@ -166,22 +182,33 @@ struct OperateView: View {
                             core.callCq(table: cqTable ? tableName : nil)
                         }
                         .buttonStyle(BrassButtonStyle())
-                        .disabled(s.link != nil || s.mercuryOk != true
+                        .disabled(busy(s) || s.mercuryOk != true
                                   || (cqTable && tableName.trimmingCharacters(in: .whitespaces).isEmpty)
                                   || awayFromTable(s))
                     }
                 }
 
                 Card(title: "Connect", help: .connect) {
-                    HStack(spacing: 8) {
-                        Field(placeholder: "Callsign", text: $call)
-                        Button("Connect") {
-                            core.connect(call)
-                            call = ""
+                    if let c = s.calling, s.link == nil {
+                        // A call going out: say so, and let it be cancelled.
+                        HStack(spacing: 8) {
+                            Text("Calling \(c)…").font(.body.weight(.semibold)).foregroundStyle(Theme.brass)
+                            Spacer()
+                            Button("Cancel") { core.disconnect() }
+                                .buttonStyle(QuietButtonStyle())
+                                .frame(width: 110)
                         }
-                        .buttonStyle(QuietButtonStyle())
-                        .frame(width: 110)
-                        .disabled(call.trimmingCharacters(in: .whitespaces).isEmpty || s.link != nil || s.table != nil)
+                    } else {
+                        HStack(spacing: 8) {
+                            Field(placeholder: "Callsign", text: $call)
+                            Button("Connect") {
+                                core.connect(call)
+                                call = ""
+                            }
+                            .buttonStyle(QuietButtonStyle())
+                            .frame(width: 110)
+                            .disabled(call.trimmingCharacters(in: .whitespaces).isEmpty || busy(s) || s.table != nil)
+                        }
                     }
                 }
             }
@@ -217,11 +244,11 @@ struct LinkCard: View {
                 Field(placeholder: "Move to kHz", text: $qsyKhz, caps: false)
                     .keyboardType(.decimalPad)
                 Button("Ask") {
-                    if let k = Double(qsyKhz) { core.qsy(khz: k); qsyKhz = "" }
+                    if let k = Fmt.kHz(qsyKhz) { core.qsy(khz: k); qsyKhz = "" }
                 }
                 .buttonStyle(QuietButtonStyle())
                 .frame(width: 80)
-                .disabled(Double(qsyKhz) == nil)
+                .disabled(Fmt.kHz(qsyKhz) == nil)
                 HelpButton(topic: .qsy)
             }
             if let e2e = link.e2e, e2e != .off {

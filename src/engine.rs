@@ -310,6 +310,12 @@ impl State {
             let excess = self.chat.len() - MAX_CHAT_LINES;
             self.chat.drain(..excess);
         }
+        if let Some(t) = self.table.as_mut()
+            && t.lines.len() > MAX_CHAT_LINES
+        {
+            let excess = t.lines.len() - MAX_CHAT_LINES;
+            t.lines.drain(..excess);
+        }
         let finished = |t: &Transfer| {
             matches!(
                 t.state,
@@ -3932,6 +3938,18 @@ impl Station {
             self.queue_join(name, "the link is still closing");
             return Ok(());
         }
+        // A call going out (Connect, or an automatic one) ends in a link at
+        // any moment; joining now would switch Mercury under it.
+        // A waiting auto-answer is replaced by the join (it would connect
+        // under the table).
+        if let Some((call, _)) = self.answer_at.take() {
+            self.set(|g| g.calling = None);
+            self.log(format!("Auto-answer to {call} cancelled: joining a Roundtable instead"));
+        }
+        let calling = self.st.lock().unwrap().calling.clone();
+        if let Some(c) = calling {
+            anyhow::bail!("calling {c}: wait for the link (or cancel the call), then join");
+        }
         match self.join_table(name.clone(), false).await {
             Err(e) if crate::tnc::is_busy(&e) => {
                 self.queue_join(name, "Mercury is still busy closing the last link");
@@ -6304,6 +6322,47 @@ mod tests {
         });
         h.send(Cmd::Stop);
         std::fs::remove_dir_all(&cfg.download_dir).ok();
+    }
+
+    /// Joining a Roundtable while a call is going out is refused: the link
+    /// comes up any moment, and the join would switch Mercury under it.
+    #[test]
+    fn no_join_while_calling() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let f = rt.block_on(crate::fake_mercury::FakeMercury::start(FakeOptions::default())).unwrap();
+        let h = spawn(|| {});
+        let mut cfg = Config {
+            callsign: "N0CALLJ".into(),
+            demo: false,
+            rigctld: "none".into(),
+            mercury_port: f.port,
+            mercury_bcast_port: f.bcast_port,
+            ..Default::default()
+        };
+        cfg.sdr.enabled = false;
+        cfg.sdr.wide_search = false;
+        h.send(Cmd::Start(cfg));
+        let t = Instant::now();
+        while !h.state.lock().unwrap().mercury_ok {
+            assert!(t.elapsed() < Duration::from_secs(10), "no Mercury");
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        h.send(Cmd::Connect("K7BOT".into()));
+        h.send(Cmd::JoinTable("Evening Table".into()));
+        let t = Instant::now();
+        loop {
+            {
+                let g = h.state.lock().unwrap();
+                assert!(g.table.is_none(), "joined while calling");
+                if g.log.iter().any(|l| l.1.contains("calling K7BOT: wait for the link")) {
+                    break;
+                }
+            }
+            assert!(t.elapsed() < Duration::from_secs(5), "no refusal");
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        h.send(Cmd::Stop);
+        drop(rt);
     }
 
     /// Away with "accept files by myself" on: an offered file within the

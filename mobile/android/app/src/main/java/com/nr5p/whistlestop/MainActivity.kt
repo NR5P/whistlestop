@@ -220,6 +220,7 @@ private fun StationHeader(station: Station, s: EngineState) {
                 modifier = Modifier.background(C.red, CircleShape).padding(horizontal = 8.dp, vertical = 3.dp))
             Spacer(Modifier.weight(1f))
             HelpButton(HelpTopic.status)
+            HelpButton(HelpTopic.away)
             Text(
                 if (s.away) "Away" else "Here",
                 color = if (s.away) C.ink else C.text, fontWeight = FontWeight.SemiBold, fontSize = 13.sp,
@@ -246,7 +247,11 @@ private fun StationHeader(station: Station, s: EngineState) {
 
 // ------------------------------------------------------------------ Operate
 
-private val BANDS = listOf("160m", "80m", "60m", "40m", "30m", "20m", "17m", "15m", "12m", "10m")
+/** A kHz number as typed: "14103.5" or, with a comma decimal, "14103,5". */
+private fun kHz(s: String): Double? = s.trim().replace(',', '.').toDoubleOrNull()
+
+/** Tabular digits: readouts that change don't jiggle the layout. */
+private val TNUM = androidx.compose.ui.text.TextStyle(fontFeatureSettings = "tnum")
 
 @OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
 @Composable
@@ -257,6 +262,14 @@ private fun OperateScreen(station: Station, s: EngineState) {
     var call by rememberSaveable { mutableStateOf("") }
     var band by rememberSaveable { mutableStateOf("20m") }
     var bandMenu by remember { mutableStateOf(false) }
+    // The bands the station has digital segments for, so Search never
+    // offers one it would refuse.
+    val bands = ((cfg["segments"] as? kotlinx.serialization.json.JsonArray) ?: emptyList())
+        .mapNotNull { ((it as? JsonObject)?.get("band") as? JsonPrimitive)?.content }
+        .distinct().ifEmpty { listOf("40m", "30m", "20m") }
+    // Linked, or a call going out: the engine refuses another call, a
+    // retune, a search or a join until it's over.
+    val busy = s.link != null || s.calling != null
     var cqTable by rememberSaveable { mutableStateOf(false) }
     var tableName by rememberSaveable { mutableStateOf("") }
     Column(
@@ -270,8 +283,8 @@ private fun OperateScreen(station: Station, s: EngineState) {
         WCard("Dial", HelpTopic.dial) {
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Field(khz, { khz = it }, "kHz, e.g. 14103", Modifier.weight(1f), caps = false, number = true)
-                QuietButton("Tune", Modifier.width(96.dp), enabled = khz.toDoubleOrNull() != null) {
-                    khz.toDoubleOrNull()?.let { station.setFreq(it); khz = "" }
+                QuietButton("Tune", Modifier.width(96.dp), enabled = kHz(khz) != null && !busy) {
+                    kHz(khz)?.let { station.setFreq(it); khz = "" }
                 }
             }
         }
@@ -283,18 +296,18 @@ private fun OperateScreen(station: Station, s: EngineState) {
                 )
                 Text(
                     s.search.note.ifEmpty { "Channel ${s.search.index + 1} of ${s.search.total} · ${Fmt.dial(s.search.channelHz)} kHz" },
-                    color = C.text, minLines = 2, maxLines = 2,
+                    color = C.text, minLines = 2, maxLines = 2, style = TNUM,
                 )
                 QuietButton("Stop search") { station.stopSearch() }
             } else {
                 // A search retunes the radio away from a Roundtable.
-                val free = s.table == null
+                val free = s.table == null && !busy && !s.cq.active
                 BrassButton("Search current band", enabled = free) { station.searchCurrentBand() }
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     Box(Modifier.weight(1f)) {
                         QuietButton("$band ▾") { bandMenu = true }
                         DropdownMenu(expanded = bandMenu, onDismissRequest = { bandMenu = false }) {
-                            BANDS.forEach { b -> DropdownMenuItem(text = { Text(b) }, onClick = { band = b; bandMenu = false }) }
+                            bands.forEach { b -> DropdownMenuItem(text = { Text(b) }, onClick = { band = b; bandMenu = false }) }
                         }
                     }
                     QuietButton("Search $band", Modifier.weight(1f), enabled = free) { station.searchBand(band) }
@@ -306,7 +319,7 @@ private fun OperateScreen(station: Station, s: EngineState) {
                 HelpButton(HelpTopic.autoAnswer)
                 Switch(
                     checked = (cfg["auto_answer"] as? JsonPrimitive)?.content == "true",
-                    onCheckedChange = { on -> station.edit { it["auto_answer"] = JsonPrimitive(on) }; station.saveConfig() },
+                    onCheckedChange = { on -> station.saveOne("auto_answer", JsonPrimitive(on)) },
                     colors = SwitchDefaults.colors(checkedTrackColor = C.teal),
                     modifier = Modifier.semantics { contentDescription = "Answer automatically" },
                 )
@@ -317,7 +330,7 @@ private fun OperateScreen(station: Station, s: EngineState) {
             if (w == null) Text("None heard yet.", color = C.dim)
             else Column {
                 Text("${Fmt.dial(w.dialHz + w.offsetHz)} kHz", color = C.text, fontWeight = FontWeight.SemiBold)
-                Text("score ${"%.1f".format(w.score)} · ${Fmt.ago(w.agoS)} ago", color = C.dim, fontSize = 12.sp)
+                Text("score ${"%.1f".format(w.score)} · ${Fmt.ago(w.agoS)} ago", color = C.dim, fontSize = 12.sp, style = TNUM)
             }
         }
         WCard("Heard", HelpTopic.heard) {
@@ -331,11 +344,11 @@ private fun OperateScreen(station: Station, s: EngineState) {
                     val table = h.table
                     if (table != null) {
                         BrassButton("Join", Modifier.width(110.dp).semantics { contentDescription = "Join $table" }, color = C.teal,
-                            enabled = s.link == null && s.table == null) {
+                            enabled = !busy && s.table == null) {
                             station.setFreq(h.dialHz / 1000)
                             station.joinTable(table)
                         }
-                    } else BrassButton("Answer", Modifier.width(110.dp), enabled = s.link == null && s.table == null) {
+                    } else BrassButton("Answer", Modifier.width(110.dp), enabled = !busy && s.table == null) {
                         station.setFreq(h.dialHz / 1000)
                         station.connect(h.call)
                     }
@@ -344,7 +357,7 @@ private fun OperateScreen(station: Station, s: EngineState) {
         }
         WCard("Call CQ", HelpTopic.cq) {
             if (s.cq.active) {
-                Text("Cycle ${s.cq.cycle} of ${s.cq.cycles} · ${s.cq.phase}", color = C.text, maxLines = 1, minLines = 1)
+                Text("Cycle ${s.cq.cycle} of ${s.cq.cycles} · ${s.cq.phase}", color = C.text, maxLines = 1, minLines = 1, style = TNUM)
                 BrassButton("Stop CQ", color = C.red) { station.stopCq() }
             } else {
                 Row(verticalAlignment = Alignment.CenterVertically) {
@@ -358,15 +371,22 @@ private fun OperateScreen(station: Station, s: EngineState) {
                 BrassButton(
                     if (cqTable) "Whistle and host the table" else "Whistle and call CQ",
                     // At a Roundtable: only a CQ for that table, as its host.
-                    enabled = s.link == null && s.mercuryOk && (!cqTable || tableName.isNotBlank())
+                    enabled = !busy && s.mercuryOk && (!cqTable || tableName.isNotBlank())
                         && s.table.let { t -> t == null || (cqTable && t.host && t.name.equals(tableName.trim(), ignoreCase = true)) },
                 ) { station.callCq(if (cqTable) tableName else null) }
             }
         }
         WCard("Connect", HelpTopic.connect) {
-            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            val calling = s.calling
+            if (calling != null && s.link == null) {
+                // A call going out: say so, and let it be cancelled.
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("Calling $calling…", color = C.brass, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
+                    QuietButton("Cancel", Modifier.width(120.dp)) { station.disconnect() }
+                }
+            } else Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Field(call, { call = it }, "Callsign", Modifier.weight(1f))
-                QuietButton("Connect", Modifier.width(120.dp), enabled = call.isNotBlank() && s.link == null && s.table == null) {
+                QuietButton("Connect", Modifier.width(120.dp), enabled = call.isNotBlank() && !busy && s.table == null) {
                     station.connect(call); call = ""
                 }
             }
@@ -388,8 +408,8 @@ private fun LinkCard(station: Station, link: Link, qsyNote: String?) {
         }
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             Field(qsy, { qsy = it }, "Move to kHz", Modifier.weight(1f), caps = false, number = true)
-            QuietButton("Ask", Modifier.width(80.dp), enabled = qsy.toDoubleOrNull() != null) {
-                qsy.toDoubleOrNull()?.let { station.qsy(it); qsy = "" }
+            QuietButton("Ask", Modifier.width(80.dp), enabled = kHz(qsy) != null) {
+                kHz(qsy)?.let { station.qsy(it); qsy = "" }
             }
             HelpButton(HelpTopic.qsy)
         }
@@ -424,7 +444,9 @@ private fun E2eBadge(e2e: E2e) {
 private fun ChatScreen(station: Station, s: EngineState) {
     var text by rememberSaveable { mutableStateOf("") }
     val list = rememberLazyListState()
-    LaunchedEffect(s.chat.size) { if (s.chat.isNotEmpty()) list.animateScrollToItem(s.chat.size - 1) }
+    // Not the size alone: it stays at the engine's cap (500) once old
+    // lines scroll away.
+    LaunchedEffect(s.chat.size, s.chat.lastOrNull()) { if (s.chat.isNotEmpty()) list.animateScrollToItem(s.chat.size - 1) }
     Column(Modifier.fillMaxSize().imePadding()) {
         Row(Modifier.fillMaxWidth().background(C.panel).padding(horizontal = 16.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
             Box(Modifier.size(8.dp).background(if (s.link != null) C.teal else C.dim, CircleShape))
@@ -485,7 +507,7 @@ private fun TableScreen(station: Station, s: EngineState) {
     }
     var text by rememberSaveable { mutableStateOf("") }
     val list = rememberLazyListState()
-    LaunchedEffect(t.lines.size) { if (t.lines.isNotEmpty()) list.animateScrollToItem(t.lines.size - 1) }
+    LaunchedEffect(t.lines.size, t.lines.lastOrNull()) { if (t.lines.isNotEmpty()) list.animateScrollToItem(t.lines.size - 1) }
     Column(Modifier.fillMaxSize().imePadding()) {
         Column(Modifier.fillMaxWidth().background(C.panel).padding(horizontal = 16.dp, vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -740,8 +762,7 @@ private fun SettingsScreen(station: Station, s: EngineState) {
         RadioCard(station, s, cfg)
         WCard("Modem (Mercury)", HelpTopic.modem) {
             Field(str("mercury_host"), { set("mercury_host", it) }, "Host", Modifier.fillMaxWidth(), caps = false)
-            Field(str("mercury_port"), { v -> v.toIntOrNull()?.let { n -> station.edit { it["mercury_port"] = JsonPrimitive(n) } } },
-                "Port", Modifier.fillMaxWidth(), caps = false, number = true)
+            NumberField(station, "mercury_port", "Port", 1.0..65534.0, decimal = false)
         }
         WCard("While away", HelpTopic.autoAccept) {
             val on = (cfg["auto_accept_away"] as? JsonPrimitive)?.content == "true"
@@ -755,8 +776,7 @@ private fun SettingsScreen(station: Station, s: EngineState) {
                 )
             }
             if (on) {
-                Field(str("auto_accept_max_mb"), { v -> v.toDoubleOrNull()?.let { n -> station.edit { it["auto_accept_max_mb"] = JsonPrimitive(n) } } },
-                    "Each up to (MB)", Modifier.fillMaxWidth(), caps = false, number = true)
+                NumberField(station, "auto_accept_max_mb", "Each up to (MB)", 0.1..200.0, decimal = true)
             }
             Text("Off by default. A bigger file waits for you. Takes effect when you tap Save.", color = C.dim, fontSize = 12.sp)
         }
@@ -916,6 +936,39 @@ private fun RadioCard(station: Station, s: EngineState, cfg: JsonObject) {
                 "The modem started before this radio setting. Close Whistlestop (swipe it away) and open it again so Mercury keys the radio this way.",
                 color = C.brass, fontSize = 12.sp,
             )
+        }
+    }
+}
+
+/**
+ * A number setting typed as text. What you type stays as typed ("2." on the
+ * way to "2.5", or empty while you retype); every keystroke that makes a
+ * number in `range` goes into the settings at once. Out of range or not a
+ * number: shown in red and not taken.
+ */
+@Composable
+private fun NumberField(station: Station, key: String, label: String, range: ClosedFloatingPointRange<Double>, decimal: Boolean) {
+    val cfg by station.config.collectAsState()
+    val saved = (cfg[key] as? JsonPrimitive)?.content?.toDoubleOrNull()
+    fun show(v: Double?) = when {
+        v == null -> ""
+        decimal && v != Math.rint(v) -> v.toString()
+        else -> v.toLong().toString()
+    }
+    var text by remember { mutableStateOf(show(saved)) }
+    // Reloaded (after Save, or a revert): show the saved value, unless it's
+    // what's typed already.
+    LaunchedEffect(saved) { if (kHz(text) != saved) text = show(saved) }
+    val ok = kHz(text)?.let { it in range } == true
+    Column {
+        Field(text, { t ->
+            text = t
+            kHz(t)?.takeIf { it in range }?.let { v ->
+                station.edit { it[key] = if (decimal) JsonPrimitive(v) else JsonPrimitive(v.toLong()) }
+            }
+        }, label, Modifier.fillMaxWidth(), caps = false, number = true)
+        if (!ok && text.isNotEmpty()) {
+            Text("Not taken: enter ${show(range.start)} to ${show(range.endInclusive)}", color = C.red, fontSize = 12.sp)
         }
     }
 }
