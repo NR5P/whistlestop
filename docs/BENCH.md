@@ -186,6 +186,15 @@ DATAC15 (27-byte broadcast frames). Found and fixed:
 - **A station's messages could show out of order** (the second of a long
   message complete before a repeated part of the first): later ones now wait
   up to 2 minutes for an earlier one from the same station.
+- **Back-to-back requests to repeat hid the answers.** Missing parts of two
+  messages, ALPHA sent two requests in a row every round; BRAVO answered the
+  first at once, on top of the second, and ALPHA (transmitting) never heard
+  it. One request at a time now.
+
+Rebased onto upstream `4a3e03c` (its speed changes wait for Mercury's PTT
+OFFs, honest reports, members' bandwidth): cargo test all pass (165 lib);
+standard 35/35, `table3` 10/10; with the one-request fix, `table
+table_slow` 6/6 and `table3` 10/10 again.
 
 Also: Mercury closing while it had the radio keyed left TX shown for ever;
 a grid setting over ~100 characters hung the station at its next Station ID.

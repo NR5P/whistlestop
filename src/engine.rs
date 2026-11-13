@@ -302,7 +302,10 @@ pub const TABLE_HOLD: Duration = Duration::from_secs(120);
 /// by itself (it would never copy the one sent at the faster speed).
 const SLOWDOWN_WAIT: Duration = Duration::from_secs(40);
 /// Roundtable: at most this many AGAIN requests every 20 s.
-const AGAIN_PER_ROUND: usize = 3;
+// One: the sender answers a request at once, so a second request sent
+// straight after would go out on top of the answer to the first (the
+// requester, transmitting, misses it; seen at DATAC15 every round).
+const AGAIN_PER_ROUND: usize = 1;
 
 /// An automatic call (auto-answer, deliver, collect) that hasn't linked by
 /// then is abandoned.
