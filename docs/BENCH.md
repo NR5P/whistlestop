@@ -168,7 +168,6 @@ UI logic of all three apps), each finding checked against the code:
   were left as the bench's stations (`0aee326`).
 
 Not changed:
-- The iPhone app drops the whole state if one number is NaN (none is sent today).
 - Roundtable speed changes timed by a clock rather than by the two
   announcements going out; members' SNR reports that may not be about the
   host, and the host ignoring members' bandwidth (left for the Roundtable

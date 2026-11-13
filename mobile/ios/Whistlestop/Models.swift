@@ -44,7 +44,7 @@ struct MailAlert: Decodable {
     var ours: Bool
     var count: Int
     /// Seconds ago.
-    var at: Double
+    @Num var at: Double
 }
 
 struct Rig: Decodable {
@@ -112,7 +112,7 @@ struct TableState: Decodable {
     var floor: String? = nil
     var lines: [TableLine] = []
     /// Air time still to go for frames being sent.
-    var sendingEtaS: Double = 0
+    @Num var sendingEtaS: Double = 0
 }
 
 struct Member: Decodable {
@@ -148,7 +148,7 @@ struct ChatLine: Decodable {
 struct Heard: Decodable, Identifiable {
     var at: UInt64
     var call: String
-    var dialHz: Double
+    @Num var dialHz: Double
     var what: String
     var table: String? = nil
     var id: String { "\(call)-\(at)" }
@@ -156,10 +156,10 @@ struct Heard: Decodable, Identifiable {
 
 struct Whistle: Decodable {
     /// Seconds ago.
-    var at: Double
-    var dialHz: Double
-    var offsetHz: Double
-    var score: Double
+    @Num var at: Double
+    @Num var dialHz: Double
+    @Num var offsetHz: Double
+    @Num var score: Double
 }
 
 struct Search: Decodable {
@@ -167,7 +167,7 @@ struct Search: Decodable {
     var scope: String
     var index: Int
     var total: Int
-    var channelHz: Double
+    @Num var channelHz: Double
     var note: String
 }
 
@@ -235,5 +235,25 @@ enum Fmt {
         if s < 60 { return "\(s) s" }
         if s < 3600 { return "\(s / 60) min" }
         return "\(s / 3600) h \(s % 3600 / 60) min"
+    }
+}
+
+/// A number from the engine that may arrive as `null`: serde writes a NaN or
+/// an infinity that way, and one such value in a plain `Double` field would
+/// fail the whole state, freezing the app on the last good one. Read as 0.
+@propertyWrapper
+struct Num: Decodable {
+    var wrappedValue: Double
+    init(wrappedValue: Double) { self.wrappedValue = wrappedValue }
+    init(from decoder: Decoder) throws {
+        let c = try decoder.singleValueContainer()
+        wrappedValue = c.decodeNil() ? 0 : ((try? c.decode(Double.self)) ?? 0)
+    }
+}
+
+extension KeyedDecodingContainer {
+    /// A `@Num` field that's missing altogether is 0 too.
+    func decode(_ type: Num.Type, forKey key: Key) throws -> Num {
+        try decodeIfPresent(type, forKey: key) ?? Num(wrappedValue: 0)
     }
 }
