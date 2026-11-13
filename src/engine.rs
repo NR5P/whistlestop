@@ -1927,6 +1927,9 @@ impl Station {
                 if self.peer.is_none() {
                     anyhow::bail!("not linked to anyone: connect first (or use a Roundtable)");
                 }
+                if let Some(why) = crate::protocol::text_too_long(&text) {
+                    anyhow::bail!("not sent: {why}");
+                }
                 let id = self.next_chat_id;
                 self.next_chat_id += 1;
                 self.hi_queue.push_back(Link::Chat {

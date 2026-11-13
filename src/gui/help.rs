@@ -216,7 +216,7 @@ pub const L_CONNECT: Topic =
 pub const L_DISCONNECT: Topic = ("Disconnect (73)", "Says goodbye, lets Mercury deliver anything still queued, then hangs up.", "Chat");
 pub const C_INPUT: Topic = (
     "Message",
-    "Type and press Enter. The line below shows how many bytes go on the air and about how long that takes at the current speed. Messages show '… sending' until the other station confirms, then '✓ delivered'.",
+    "Type and press Enter. The line below shows how many bytes go on the air and about how long that takes at the current speed. Messages show '… sending' until the other station confirms, then '✓ delivered'. One message can be at most 64 KB: send anything longer as a file.",
     "Chat",
 );
 
@@ -470,7 +470,7 @@ pub const D_VIA: Topic = (
     "Optional: hand this mail to another station, which carries it the rest of the way (if they've turned on carrying mail). Leave empty to wait for the station itself.",
     "The Depot",
 );
-pub const D_TEXT: Topic = ("Message", "Plain text. Short is kind on HF: every byte is airtime.", "The Depot");
+pub const D_TEXT: Topic = ("Message", "Plain text, at most 64 KB (send anything longer as a file). Short is kind on HF: every byte is airtime.", "The Depot");
 pub const D_POST: Topic = ("Post", "Puts the message in Departures. If you're linked with its station (or the relay) right now, it goes at once.", "The Depot");
 pub const D_ARRIVALS: Topic =
     ("Arrivals", "Mail for you: left while you were away, handed over by a station that held it, or relayed. NEW marks unread mail.", "The Depot");

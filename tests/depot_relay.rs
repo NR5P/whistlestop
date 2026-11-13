@@ -153,6 +153,26 @@ fn damaged_depot_file_is_not_overwritten() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// A damaged depot.json that can't be moved aside (locked by a sync or
+/// virus checker; here its new name would be too long) is left alone too:
+/// the session's mail is kept in memory only.
+#[test]
+fn damaged_depot_that_cannot_be_set_aside_is_not_overwritten() {
+    let dir = tmp("stuck");
+    let p = dir.join(format!("{}.json", "d".repeat(250)));
+    std::fs::write(&p, b"{\"arrivals\": [{\"id\": 1, \"from\": \"K7BOT\", \"text\": \"cut sho").unwrap();
+    let mut d = Depot::load(p.clone());
+    let why = d.load_problem.clone().unwrap_or_default();
+    assert!(why.contains("memory only"), "{why}");
+    d.post("N0CALL", "W1AW", "new").unwrap();
+    assert_eq!(d.departures.len(), 1, "still works in memory");
+    assert_eq!(
+        std::fs::read(&p).unwrap(),
+        b"{\"arrivals\": [{\"id\": 1, \"from\": \"K7BOT\", \"text\": \"cut sho"
+    );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 #[test]
 fn damaged_or_odd_files_never_panic() {
     let dir = tmp("odd");
@@ -342,4 +362,23 @@ fn posted_mail_always_makes_a_decodable_packet() {
             }
         }
     }
+}
+
+/// Mail over the longest message is refused when written (a packet over
+/// 1 MB makes the other station hang up, and unconfirmed mail goes again
+/// on every link); the longest allowed makes a packet that decodes.
+#[test]
+fn overlong_mail_is_refused_when_posted() {
+    use whistlestop::protocol::{LinkDecoder, MAX_TEXT_BYTES};
+    let mut d = Depot::default();
+    let e = d.post("N0CALL", "K7BOT", &"x".repeat(MAX_TEXT_BYTES + 1)).unwrap_err();
+    assert!(e.to_string().contains("as a file"), "{e}");
+    let e = d.post("N0CALL", "K7BOT", &"x".repeat(2 << 20)).unwrap_err();
+    assert!(e.to_string().contains("2048 KB"), "{e}");
+    assert!(d.departures.is_empty());
+    let longest = "é".repeat(MAX_TEXT_BYTES / 2);
+    d.post("N0CALL", "K7BOT", &longest).unwrap();
+    let wire = packet(&d.departures[0]).encode();
+    let got = LinkDecoder::default().feed(&wire).unwrap();
+    assert!(matches!(&got[..], [Link::Mail { text, .. }] if *text == longest));
 }

@@ -15,6 +15,22 @@ pub const CAP_E2E: u8 = 4;
 pub const CHUNK: usize = 1024;
 pub const TABLE_MAGIC: u8 = 0x57;
 const MAX_PACKET: usize = 1 << 20;
+/// Longest chat line or Depot message, in bytes. A packet over
+/// `MAX_PACKET` makes the other station hang up (its stream looks
+/// corrupt), and unconfirmed mail goes again on every link, so longer text
+/// is refused when written: send it as a file.
+pub const MAX_TEXT_BYTES: usize = 64 << 10;
+
+/// Why `text` can't go as one chat line or Depot message, if it can't.
+pub fn text_too_long(text: &str) -> Option<String> {
+    (text.len() > MAX_TEXT_BYTES).then(|| {
+        format!(
+            "the message is {} KB; one can be at most {} KB: send it as a file instead",
+            text.len().div_ceil(1024),
+            MAX_TEXT_BYTES >> 10
+        )
+    })
+}
 
 // ------------------------------------------------------------- primitives
 

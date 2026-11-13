@@ -79,7 +79,8 @@ impl Depot {
     /// Load the Depot. A file that can't be read as one (cut short by a
     /// crash, edited by hand) is never overwritten: it's moved aside to
     /// `depot.json.bad` (or `.bad-2`, …) so its mail can be recovered, and
-    /// `load_problem` says so.
+    /// `load_problem` says so. If it can't be moved, it isn't saved over:
+    /// this session's mail is kept in memory only.
     pub fn load(path: PathBuf) -> Depot {
         let mut problem = None;
         let mut keep_path = true;
@@ -106,14 +107,20 @@ impl Depot {
                         bad = path.with_extension(format!("json.bad-{n}"));
                         n += 1;
                     }
-                    let moved = std::fs::rename(&path, &bad).is_ok();
-                    problem = Some(if moved {
-                        format!(
+                    problem = Some(match std::fs::rename(&path, &bad) {
+                        Ok(()) => format!(
                             "The Depot file couldn't be read ({e}); it was kept as {} and a new Depot started",
                             bad.display()
-                        )
-                    } else {
-                        format!("The Depot file couldn't be read ({e}) or set aside; a new Depot started")
+                        ),
+                        // Still there under its own name (locked by a sync
+                        // or virus checker, say): saving would overwrite it.
+                        Err(why) => {
+                            keep_path = false;
+                            format!(
+                                "The Depot file {} couldn't be read ({e}) or set aside ({why}). It is left as it is;                                  mail this session is kept in memory only (move the file away, or fix it, then restart)",
+                                path.display()
+                            )
+                        }
                     });
                     Depot::default()
                 }
@@ -144,7 +151,8 @@ impl Depot {
 
     /// Refused unless `to` (and `via`) are callsigns the protocol carries
     /// intact (`protocol::valid_call`): anything else would be cut short or
-    /// refused by every station on the air.
+    /// refused by every station on the air. Refused too if the text is over
+    /// `protocol::MAX_TEXT_BYTES`.
     pub fn post_via(&mut self, from: &str, to: &str, via: Option<&str>, text: &str) -> anyhow::Result<&Mail> {
         let to = to.trim().to_uppercase();
         let via = via
@@ -154,6 +162,9 @@ impl Depot {
             if !crate::protocol::valid_call(c) {
                 anyhow::bail!("{c:?} isn't a callsign (1–12 letters, digits, / or -)");
             }
+        }
+        if let Some(why) = crate::protocol::text_too_long(text) {
+            anyhow::bail!("{why}");
         }
         self.departures.push(Mail {
             id: new_id(),

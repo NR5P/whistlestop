@@ -266,11 +266,10 @@ impl Config {
                 )],
             ),
             Ok(bytes) => match String::from_utf8(bytes) {
-                Err(_) => (Config::default(), vec![keep_bad_copy(&p, "isn't a text (UTF-8) file")]),
+                Err(_) => keep_bad_copy(&p, "isn't a text (UTF-8) file"),
                 Ok(s) => match s.parse::<toml::Table>() {
                     Err(e) => {
-                        let why = format!("isn't valid TOML ({})", e.message());
-                        (Config::default(), vec![keep_bad_copy(&p, &why)])
+                        keep_bad_copy(&p, &format!("isn't valid TOML ({})", e.message()))
                     }
                     Ok(t) => salvage(t),
                 },
@@ -436,7 +435,7 @@ impl Config {
                 sl.khz = 0.0;
             } else if !sl.valid() {
                 n.push(format!(
-                    "schedule entry {} ({}–{} UTC, {} kHz) isn't valid (times HH:MM, 1800–30000 kHz); it is ignored",
+                    "schedule entry {} ({}–{} UTC, {} kHz) isn't valid (times HH:MM, 1800 to under 30000 kHz); it is ignored",
                     i + 1,
                     sl.from,
                     sl.to,
@@ -534,19 +533,36 @@ fn port(notes: &mut Vec<String>, name: &str, v: &mut u16, def: u16) {
 
 /// Copy an unreadable settings file to "<name>.bad" (so a later save can't
 /// lose it) and say so.
-fn keep_bad_copy(p: &std::path::Path, why: &str) -> String {
-    let mut bad = p.as_os_str().to_owned();
-    bad.push(".bad");
-    let bad = PathBuf::from(bad);
+/// Defaults for an unreadable settings file, after copying it to
+/// `<name>.bad` (`.bad-2`, … if that's taken, so an earlier copy isn't
+/// replaced). If no copy could be made, saving over it is blocked.
+fn keep_bad_copy(p: &std::path::Path, why: &str) -> (Config, Vec<String>) {
+    let named = |suffix: &str| {
+        let mut b = p.as_os_str().to_owned();
+        b.push(suffix);
+        PathBuf::from(b)
+    };
+    let mut bad = named(".bad");
+    let mut n = 2;
+    while bad.exists() && std::fs::read(&bad).ok() != std::fs::read(p).ok() {
+        bad = named(&format!(".bad-{n}"));
+        n += 1;
+    }
     match std::fs::copy(p, &bad) {
-        Ok(_) => format!(
-            "{} {why}; kept a copy as {}, using the default settings",
-            p.display(),
-            bad.display()
+        Ok(_) => (
+            Config::default(),
+            vec![format!(
+                "{} {why}; kept a copy as {}, using the default settings",
+                p.display(),
+                bad.display()
+            )],
         ),
-        Err(e) => format!(
-            "{} {why}; using the default settings (couldn't keep a copy: {e})",
-            p.display()
+        Err(e) => (
+            Config { save_blocked: true, ..Config::default() },
+            vec![format!(
+                "{} {why}; using the default settings, and not saving over it (couldn't keep a copy: {e}; move it away or fix it, then restart)",
+                p.display()
+            )],
         ),
     }
 }

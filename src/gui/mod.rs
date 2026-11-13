@@ -1294,29 +1294,33 @@ impl App {
             // Only while linked: the engine refuses it otherwise, and what
             // you typed would be gone.
             let linked = s.link.is_some();
+            let too_long = protocol::text_too_long(self.chat_input.trim());
             let send = ui
-                .add_enabled_ui(linked, |ui| {
+                .add_enabled_ui(linked && too_long.is_none(), |ui| {
                     ui.add_sized([80.0, 34.0], egui::Button::new(RichText::new("Send").strong()).fill(BRASS.linear_multiply(0.5)))
                 })
                 .inner
                 .help(&help::C_INPUT)
                 .clicked()
                 || (r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)));
-            if send && linked && !self.chat_input.trim().is_empty() {
+            if send && linked && too_long.is_none() && !self.chat_input.trim().is_empty() {
                 self.send(Cmd::Chat(self.chat_input.trim().to_string()));
                 self.chat_input.clear();
                 r.request_focus();
             }
         });
-        ui.label(
-            RichText::new(if self.chat_input.is_empty() {
-                format!("Link speed ≈ {:.0} bps", s.est_bps)
-            } else {
-                format!("{bytes} bytes on air · ≈ {} at {:.0} bps", modes::human_duration(eta), s.est_bps)
-            })
-            .small()
-            .color(DIM),
-        );
+        match protocol::text_too_long(self.chat_input.trim()) {
+            Some(why) => ui.label(RichText::new(format!("⚠ Too long: {why}")).small().color(RED)),
+            None => ui.label(
+                RichText::new(if self.chat_input.is_empty() {
+                    format!("Link speed ≈ {:.0} bps", s.est_bps)
+                } else {
+                    format!("{bytes} bytes on air · ≈ {} at {:.0} bps", modes::human_duration(eta), s.est_bps)
+                })
+                .small()
+                .color(DIM),
+            ),
+        };
     }
 
     fn table_tab(&mut self, ui: &mut Ui, s: &State) {
@@ -2331,8 +2335,10 @@ impl App {
                                 .help(&help::ST_SCHED_SLOT);
                                 ui.add(egui::DragValue::new(&mut sl.khz).range(1800.0..=29_700.0).speed(0.5).max_decimals(3).suffix(" kHz")).help(&help::ST_SCHED_SLOT);
                                 ui.checkbox(&mut sl.beacon, "Station ID").help(&help::ST_SCHED_SLOT);
-                                if !sl.valid() {
+                                if !sl.times_ok() {
                                     ui.label(RichText::new("⚠ HH:MM").color(RED));
+                                } else if !sl.khz_ok() {
+                                    ui.label(RichText::new("⚠ kHz").color(RED));
                                 }
                                 if ui.small_button("✕").help(&help::ST_SCHED_SLOT).clicked() {
                                     remove = Some(i);

@@ -55,18 +55,40 @@ fn load_and_save_through_the_settings_file() {
     assert_eq!(e.callsign, "N0CALL");
     assert_eq!(e.whistle_version, 2);
 
-    // Corrupt file: falls back to defaults rather than failing to start.
-    for junk in ["callsign = ", "[[[", "\u{0}\u{1}\u{2}", "callsign = \"A\"\ncallsign = \"B\""] {
-        std::fs::write(&p, junk).unwrap();
-        assert_eq!(Config::load().callsign, "N0CALL", "{junk:?}");
-    }
-    // ...and the unreadable file is kept as whistlestop.toml.bad.
+    // Corrupt file: falls back to defaults rather than failing to start,
+    // and the unreadable file is kept as whistlestop.toml.bad.
     let bad = dir.join("sub/whistlestop.toml.bad");
-    assert_eq!(std::fs::read_to_string(&bad).unwrap(), "callsign = \"A\"\ncallsign = \"B\"");
+    let bad2 = dir.join("sub/whistlestop.toml.bad-2");
+    for junk in ["callsign = ", "[[[", "\u{0}\u{1}\u{2}", "callsign = \"A\"\ncallsign = \"B\""] {
+        let _ = std::fs::remove_file(&bad);
+        std::fs::write(&p, junk).unwrap();
+        let (c, problems) = Config::load_with_report();
+        assert_eq!(c.callsign, "N0CALL", "{junk:?}");
+        assert!(!c.save_blocked, "{junk:?}");
+        assert!(problems.len() == 1 && problems[0].contains(".bad"), "{problems:?}");
+        assert_eq!(std::fs::read_to_string(&bad).unwrap(), junk);
+    }
+    // Starting again with the same bad file makes no second copy; a
+    // different bad file doesn't replace the first copy.
+    Config::load();
+    assert!(!bad2.exists());
     std::fs::write(&p, "[[[").unwrap();
+    let (_, problems) = Config::load_with_report();
+    assert!(problems[0].contains(".bad-2"), "{problems:?}");
+    assert_eq!(std::fs::read_to_string(&bad).unwrap(), "callsign = \"A\"\ncallsign = \"B\"");
+    assert_eq!(std::fs::read_to_string(&bad2).unwrap(), "[[[");
+    let _ = std::fs::remove_file(&bad2);
+    // No copy can be made (here: the copy's name would be too long): the
+    // file isn't saved over either.
+    let long = dir.join(format!("sub/{}.toml", "w".repeat(250)));
+    unsafe { std::env::set_var("WHISTLESTOP_CONFIG", &long) };
+    std::fs::write(&long, "[[[ my only copy").unwrap();
     let (c, problems) = Config::load_with_report();
-    assert_eq!(c.callsign, "N0CALL");
-    assert!(problems.len() == 1 && problems[0].contains(".bad"), "{problems:?}");
+    assert!(c.save_blocked && problems[0].contains("not saving over it"), "{problems:?}");
+    assert!(c.save().is_err());
+    assert_eq!(std::fs::read_to_string(&long).unwrap(), "[[[ my only copy");
+    std::fs::remove_file(&long).unwrap();
+    unsafe { std::env::set_var("WHISTLESTOP_CONFIG", &p) };
     // One bad value: the rest is kept, the bad one reported, nothing copied.
     let _ = std::fs::remove_file(&bad);
     std::fs::write(&p, "callsign = \"N0KEEP\"\ndemo = false\ne2e = \"Prefer\"\n").unwrap();
@@ -75,6 +97,7 @@ fn load_and_save_through_the_settings_file() {
     assert!(problems.len() == 1 && problems[0].starts_with("e2e"), "{problems:?}");
     assert!(!bad.exists());
     // Not UTF-8 at all.
+    let _ = std::fs::remove_file(&bad);
     std::fs::write(&p, [0xFFu8, 0xFE, 0x00, 0x41]).unwrap();
     assert_eq!(Config::load().callsign, "N0CALL");
     assert_eq!(std::fs::read(&bad).unwrap(), [0xFFu8, 0xFE, 0x00, 0x41]);

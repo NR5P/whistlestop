@@ -108,6 +108,8 @@ impl DepotTab {
                             "{:?} isn't a callsign (1–12 letters, digits, / or -): nothing posted",
                             if whistlestop::protocol::valid_call(&to) { &via } else { &to }
                         ));
+                    } else if let Some(why) = whistlestop::protocol::text_too_long(self.text.trim()) {
+                        self.post_error = Some(format!("Nothing posted: {why}"));
                     } else {
                         self.post_error = None;
                         send.push(Cmd::DepotPost { to, via: Some(via), text: self.text.trim().to_string() });

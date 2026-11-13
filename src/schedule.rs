@@ -65,10 +65,18 @@ pub fn minutes(hhmm: &str) -> Option<u32> {
 
 impl Slot {
     pub fn valid(&self) -> bool {
-        minutes(&self.from).is_some()
-            && minutes(&self.to).is_some()
-            && self.khz > 1_800.0
-            && self.khz < 30_000.0
+        self.times_ok() && self.khz_ok()
+    }
+
+    /// Both times are HH:MM.
+    pub fn times_ok(&self) -> bool {
+        minutes(&self.from).is_some() && minutes(&self.to).is_some()
+    }
+
+    /// The dial is on HF: 1800 kHz (the bottom of 160 m, and of the
+    /// editor's range) up to 30 MHz.
+    pub fn khz_ok(&self) -> bool {
+        (1_800.0..30_000.0).contains(&self.khz)
     }
 
     /// Is the slot on at unix time `t` (seconds, UTC)?
@@ -138,5 +146,12 @@ mod tests {
         assert_eq!(active(&both, at(WED, 14, 0)).map(|a| a.0), Some(1));
         assert_eq!(active(&both, at(WED, 8, 0)).map(|a| a.0), None);
         assert!(minutes("24:00").is_none() && minutes("7:05") == Some(425));
+        // The editor's whole range is valid, its bottom included.
+        for khz in [1_800.0, 29_700.0] {
+            assert!(Slot { khz, ..Default::default() }.valid(), "{khz}");
+        }
+        for khz in [1_799.9, 30_000.0, f64::NAN] {
+            assert!(!Slot { khz, ..Default::default() }.valid(), "{khz}");
+        }
     }
 }
