@@ -210,9 +210,16 @@ was kept.
 Not changed: the remote login proof (HMAC of a challenge) can be cracked
 offline by someone who records a login on the same network; the guide
 already says the stream isn't encrypted and the port must stay on the LAN.
-A `Tnc::command` that times out can have its late reply taken by the next
-command. Mercury could still start after `ws_stop` on a phone (only the UI
-tests stop the station).
+
+
+Fixed right after: a `Tnc::command` that timed out could have its late
+reply taken by the next command (a CONNECT's late OK made the next MODE look
+accepted, and MODE's own BUSY then answered the command after). Replies a
+timed-out command still owes are now skipped, for up to 30 s
+(`a_late_reply_is_not_the_next_commands`, fails without the fix). And on a
+phone, a Mercury start still waiting for the radio when the station was
+stopped started Mercury anyway, and blocked the next start: a stop now
+cancels it.
 
 **Results after the fixes** (before the merge): the standard bench on
 two real Mercurys 33/34 (the miss, "scan speed, weak signal" 3/4 while this

@@ -225,6 +225,12 @@ pub fn adopt_usb_radio(cfg: &mut Config) -> bool {
 #[cfg(feature = "mercury")]
 static MERCURY_WAITING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+/// Bumped by every `stop`: a Mercury start still waiting for the radio
+/// from before it gives up, instead of starting Mercury (audio, keying)
+/// for a station that's no longer there.
+#[cfg(feature = "mercury")]
+static MERCURY_GEN: AtomicU64 = AtomicU64::new(0);
+
 /// Mercury runs, but keys the radio differently from what the settings now
 /// say. Its engine can't be restarted inside the app, so the app asks the
 /// operator to close and reopen it.
@@ -255,11 +261,16 @@ fn ensure_mercury(dir: &std::path::Path, cfg: &Config) {
             return;
         }
         let (dir, port, bcast) = (dir.to_path_buf(), cfg.mercury_port, cfg.mercury_bcast_port);
+        let generation = MERCURY_GEN.load(Ordering::SeqCst);
+        let stopped = move || MERCURY_GEN.load(Ordering::SeqCst) != generation;
         let _ = std::thread::Builder::new().name("mercury-start".into()).spawn(move || {
             let mut ptt = ptt;
             if let Some(addr) = ptt.clone() {
                 let t = std::time::Instant::now();
                 while std::net::TcpStream::connect(&addr).is_err() {
+                    if stopped() {
+                        return; // stopped meanwhile (stop() cleared the flag)
+                    }
                     if t.elapsed().as_secs() >= 30 {
                         eprintln!("whistlestop: no radio shared at {addr}; Mercury starts without keying it");
                         MERCURY_STALE.store(true, Ordering::Relaxed);
@@ -269,8 +280,16 @@ fn ensure_mercury(dir: &std::path::Path, cfg: &Config) {
                     std::thread::sleep(std::time::Duration::from_millis(250));
                 }
             }
+            if stopped() {
+                return;
+            }
             let (input, output) = RADIO_AUDIO.lock().unwrap().clone();
             match mercury::start(&dir, port, bcast, &input, &output, ptt.as_deref()) {
+                // Stopped while it was starting: stop it again.
+                Ok(()) if stopped() => {
+                    mercury::stop();
+                    return;
+                }
                 Ok(()) => connect_when_ready(),
                 Err(e) => eprintln!("whistlestop: {e:#}"),
             }
@@ -393,7 +412,13 @@ pub fn stop() {
         a.h.send(Cmd::Stop);
     }
     #[cfg(feature = "mercury")]
-    mercury::stop();
+    {
+        // A start still waiting for the radio gives up; the next start
+        // begins afresh.
+        MERCURY_GEN.fetch_add(1, Ordering::SeqCst);
+        MERCURY_WAITING.store(false, Ordering::SeqCst);
+        mercury::stop();
+    }
 }
 
 // ------------------------------------------------------------ C ABI

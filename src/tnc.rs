@@ -28,7 +28,18 @@ pub struct Tnc {
     data: OwnedWriteHalf,
     bcast: Option<OwnedWriteHalf>,
     replies: mpsc::UnboundedReceiver<String>,
+    /// Replies still owed to commands that gave up waiting (timed out),
+    /// and when the last one gave up. Mercury answers every command, in
+    /// order: a late answer must not be taken as the next command's.
+    owed: u32,
+    owed_since: Option<std::time::Instant>,
+    /// How long a command waits for its answer.
+    reply_timeout: Duration,
 }
+
+/// A late answer still owed after this long is taken as lost: it would
+/// have come by now (Mercury normally answers in milliseconds).
+const OWED_FOR: Duration = Duration::from_secs(30);
 
 const REPLIES: [&str; 3] = ["OK", "WRONG", "BUSY"];
 
@@ -150,6 +161,9 @@ impl Tnc {
             data,
             bcast,
             replies,
+            owed: 0,
+            owed_since: None,
+            reply_timeout: Duration::from_secs(5),
         })
     }
 
@@ -160,12 +174,39 @@ impl Tnc {
         if cmd.chars().any(|c| c.is_control()) {
             bail!("refused a Mercury command with control characters: {cmd:?}");
         }
-        while self.replies.try_recv().is_ok() {} // drop stale replies
+        if self.owed_since.is_some_and(|t| t.elapsed() > OWED_FOR) {
+            self.owed = 0;
+            self.owed_since = None;
+        }
+        // Answers already here belong to commands that gave up: each pays
+        // off one owed reply (anything beyond that is stray, dropped too).
+        while self.replies.try_recv().is_ok() {
+            self.owed = self.owed.saturating_sub(1);
+        }
         self.ctl.write_all(format!("{cmd}\r").as_bytes()).await?;
-        let r = tokio::time::timeout(Duration::from_secs(5), self.replies.recv())
-            .await
-            .map_err(|_| anyhow!("Mercury did not reply to {cmd:?}"))?
-            .ok_or_else(|| anyhow!("Mercury connection closed"))?;
+        let until = tokio::time::Instant::now() + self.reply_timeout;
+        let r = loop {
+            let r = match tokio::time::timeout_at(until, self.replies.recv()).await {
+                Err(_) => {
+                    // Its answer may still come: owed, so the next
+                    // command skips it.
+                    self.owed += 1;
+                    self.owed_since = Some(std::time::Instant::now());
+                    bail!("Mercury did not reply to {cmd:?}");
+                }
+                Ok(None) => bail!("Mercury connection closed"),
+                Ok(Some(r)) => r,
+            };
+            if self.owed > 0 {
+                // An earlier command's late answer, not this one's.
+                self.owed -= 1;
+                continue;
+            }
+            break r;
+        };
+        if self.owed == 0 {
+            self.owed_since = None;
+        }
         if r == "BUSY" {
             return Err(Busy(cmd.to_string()).into());
         }
@@ -240,6 +281,45 @@ mod tests {
             parse_connected("CONNECTED K7BOT N0CALL 500", "n0call"),
             Some(("K7BOT".into(), 500))
         );
+    }
+
+    /// A command that timed out gets its answer late, after the next
+    /// command was sent: that late answer is skipped, and the next command
+    /// gets its own (here BUSY, not the late OK).
+    #[tokio::test]
+    async fn a_late_reply_is_not_the_next_commands() {
+        use tokio::io::AsyncBufReadExt;
+        // Control and data ports are consecutive.
+        let (ctl, data, port) = loop {
+            let ctl = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let port = ctl.local_addr().unwrap().port();
+            if let Ok(data) = tokio::net::TcpListener::bind(("127.0.0.1", port + 1)).await {
+                break (ctl, data, port);
+            }
+        };
+        tokio::spawn(async move {
+            let (s, _) = ctl.accept().await.unwrap();
+            let _d = data.accept().await.unwrap();
+            let (r, mut w) = s.into_split();
+            let mut lines = tokio::io::BufReader::new(r).split(b'\r');
+            // SLOW: answered only after the next command arrives.
+            let first = lines.next_segment().await.unwrap().unwrap();
+            assert_eq!(first, b"SLOW");
+            let second = lines.next_segment().await.unwrap().unwrap();
+            assert_eq!(second, b"MODE 3");
+            w.write_all(b"OK\rBUSY\r").await.unwrap();
+            let third = lines.next_segment().await.unwrap().unwrap();
+            assert_eq!(third, b"LISTEN ON");
+            w.write_all(b"OK\r").await.unwrap();
+            tokio::time::sleep(Duration::from_secs(2)).await;
+        });
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut t = Tnc::connect("127.0.0.1", port, None, tx).await.unwrap();
+        t.reply_timeout = Duration::from_millis(300);
+        assert!(t.command("SLOW").await.is_err(), "times out");
+        let e = t.command("MODE 3").await.unwrap_err();
+        assert!(is_busy(&e), "MODE 3 got the late OK instead of its BUSY: {e}");
+        t.command("LISTEN ON").await.unwrap();
     }
 
     #[tokio::test]
