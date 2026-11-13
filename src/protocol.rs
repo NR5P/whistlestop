@@ -1292,6 +1292,14 @@ pub struct TableAssembler {
 const TABLE_GAP_MAX: u64 = 16;
 
 impl TableAssembler {
+    /// A sender gone (it left the table): what's missing of its messages
+    /// can't be had any more, and mustn't be asked for for ten minutes.
+    pub fn forget_sender(&mut self, from: &str) {
+        self.parts.retain(|(f, _), _| f != from);
+        self.wanted.retain(|(f, _), _| f != from);
+        self.latest.remove(from);
+    }
+
     pub fn add(&mut self, from: &str, id: u64, part: u8, total: u8, data: &[u8]) -> Option<String> {
         self.add_at(Instant::now(), from, id, part, total, data)
     }

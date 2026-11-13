@@ -758,6 +758,10 @@ struct Station {
     last_upgrade: Option<Instant>,
     upgrade_wait: Duration,
     last_again: Instant,
+    /// When each missing message (sender, id) was last asked for: each round
+    /// asks the one asked longest ago, so one that can't be answered
+    /// doesn't hold up the others.
+    again_asked: HashMap<(String, u64), Instant>,
     // activities
     search: Option<Search>,
     cq: Option<Cq>,
@@ -850,6 +854,9 @@ struct Station {
     /// When anything of our table was last heard (`last_table_heard` is
     /// also reset by each change of speed while looking for it).
     table_heard_any: Instant,
+    /// When a frame of the table was last actually heard (not counting
+    /// our own talking, which `last_table_heard` makes allowance for).
+    table_heard_frames: Instant,
     last_table_sent: Instant,
     /// When our last message frame (TEXT) went out: while we talk we can't
     /// hear the table, so that silence doesn't count as the table's.
@@ -1044,6 +1051,7 @@ impl Station {
             last_upgrade: None,
             upgrade_wait: UPGRADE_WAIT,
             last_again: Instant::now(),
+            again_asked: HashMap::new(),
             search: None,
             cq: None,
             last_watch: Instant::now(),
@@ -1114,6 +1122,7 @@ impl Station {
             last_join_window: Instant::now(),
             last_table_heard: Instant::now(),
             table_heard_any: Instant::now(),
+            table_heard_frames: Instant::now(),
             last_table_sent: Instant::now(),
             table_talked: Instant::now(),
             table_announced: None,
@@ -4116,6 +4125,12 @@ impl Station {
         let Some(id) = self.table_id() else {
             return;
         };
+        // Nothing of this table is sent after our goodbye, and a speed
+        // change it was about to make isn't made at the next one.
+        self.pending_speed = None;
+        self.table_queue.clear();
+        self.upgrade_wait = UPGRADE_WAIT;
+        self.last_upgrade = None;
         let me = self.mycall();
         self.table_tx(
             TableFrame {
@@ -4279,6 +4294,14 @@ impl Station {
         self.table_asm = TableAssembler::default();
         self.table_held.clear();
         self.table_sent.clear();
+        self.again_asked.clear();
+        // Nor the last table's speed change, its speed-up backoff, or its
+        // frames still queued (its LEAVE, if any, still goes).
+        self.pending_speed = None;
+        self.upgrade_wait = UPGRADE_WAIT;
+        self.last_upgrade = None;
+        self.table_queue
+            .retain(|f| matches!(TableFrame::decode(f), Some(TableFrame { body: TableBody::Leave, .. })));
         let mode = modes::mode_by_name("DATAC3").unwrap();
         self.tnc()?.command(&format!("MODE {}", mode.index)).await?;
         // Who hosts it: as a member, the station whose CALL for it we heard
@@ -4313,6 +4336,7 @@ impl Station {
         self.last_table_report = Instant::now();
         self.last_table_heard = Instant::now();
         self.table_heard_any = Instant::now();
+        self.table_heard_frames = Instant::now();
         self.last_table_sent = Instant::now();
         self.table_announced = Some(mode);
         self.table_unsynced = !host;
@@ -4415,6 +4439,26 @@ impl Station {
             && from == me
             && let Some((text, _)) = self.table_sent.get(&id).cloned()
         {
+            // More parts than a message may have here (64, or fewer at the
+            // slowest speeds, where a request to repeat part n must fit a
+            // frame): the rest goes on as messages of its own, new ids.
+            let limit = crate::protocol::again_parts_limit(max, &self.table_calls());
+            let pieces = crate::protocol::split_for_parts(&me, &text, max, limit).unwrap_or_else(|_| vec![text.clone()]);
+            let (text, more) = match pieces.split_first() {
+                Some((first, rest)) if !rest.is_empty() => (first.clone(), rest.to_vec()),
+                _ => (text, vec![]),
+            };
+            let mut extra: Vec<Vec<u8>> = vec![];
+            for t in &more {
+                self.table_msg_id += 1;
+                match table_text_frames(table, &me, self.table_msg_id, t, max) {
+                    Ok(f) => {
+                        self.table_sent.insert(self.table_msg_id, (t.clone(), f.clone()));
+                        extra.extend(f);
+                    }
+                    Err(e) => self.log(format!("Roundtable: part of your message {id} can't go out in {} ({e}); dropped", mode.name)),
+                }
+            }
             // A smaller split always has a different total, so a station
             // holding parts of the old one knows to start over.
             let mut room = max;
@@ -4442,12 +4486,13 @@ impl Station {
                 }) if i == id)
             });
             self.log(format!(
-                "Roundtable: message {id} split again into {} parts for {}",
+                "Roundtable: message {id} split again into {} parts for {}{}",
                 frames.len(),
-                mode.name
+                mode.name,
+                if more.is_empty() { String::new() } else { format!(" (and {} more message(s) for the rest)", more.len()) }
             ));
             self.table_sent.insert(id, (text, frames.clone()));
-            let mut it = frames.into_iter();
+            let mut it = frames.into_iter().chain(extra);
             let first = it.next();
             for (i, fr) in it.enumerate() {
                 self.table_queue.insert(i, fr);
@@ -4522,7 +4567,9 @@ impl Station {
             // OFFs counted), or the latest time if it doesn't say; and never
             // while Mercury is still sending: frames left in Mercury at a
             // MODE change come out cut to the new size.
-            if (owed > 0 && Instant::now() < at) || self.mercury_on_air() {
+            // Nor in the middle of a 1:1 link that came in meanwhile: its
+            // MODE would change under it. (The change waits for the link.)
+            if (owed > 0 && Instant::now() < at) || self.mercury_on_air() || self.peer.is_some() {
                 return Ok(()); // hold table traffic until the switch
             }
             self.pending_speed = None;
@@ -4668,6 +4715,7 @@ impl Station {
                     }
                     self.last_table_heard = Instant::now();
                     self.table_heard_any = Instant::now();
+        self.table_heard_frames = Instant::now();
                     // A join window: a member the host may not know yet
                     // (its JOIN went out while the table ran faster, or it
                     // lost the table) says so now, while the host listens
@@ -4726,6 +4774,7 @@ impl Station {
         }
         self.last_table_heard = Instant::now();
         self.table_heard_any = Instant::now();
+        self.table_heard_frames = Instant::now();
         let from = fr.from.clone();
         // Only the host sends SPEED. A member reports how well it hears the
         // host, so it keeps the SN Mercury gave for the host's own frames.
@@ -4862,13 +4911,17 @@ impl Station {
                 ));
                 self.leave_table();
             }
-            TableBody::Leave => self.set(|g| {
-                if let Some(t) = g.table.as_mut() {
-                    t.members.remove(&from);
-                    t.lines
-                        .push((Clock::now(), String::new(), format!("{from} left")));
-                }
-            }),
+            TableBody::Leave => {
+                // Nothing more will come from it: stop asking for its gaps.
+                self.table_asm.forget_sender(&from);
+                self.set(|g| {
+                    if let Some(t) = g.table.as_mut() {
+                        t.members.remove(&from);
+                        t.lines
+                            .push((Clock::now(), String::new(), format!("{from} left")));
+                    }
+                });
+            }
             TableBody::Call { .. } | TableBody::Beacon { .. } | TableBody::Notice { .. } => {}
         }
         Ok(())
@@ -4902,6 +4955,7 @@ impl Station {
             let now = Instant::now();
             self.last_table_heard = now;
             self.table_heard_any = now;
+            self.table_heard_frames = now;
             self.last_table_report = now;
             self.last_table_sent = now;
             if self.expect_slowdown.is_some() {
@@ -4915,11 +4969,16 @@ impl Station {
             // Sending a long message (minutes, at the slowest speeds) we hear
             // nothing of the table: that's not the table gone quiet. The
             // clocks below count from the end of our talking.
-            if self.table_talked > self.last_table_heard {
-                self.last_table_heard = self.table_talked;
+            // But only so far: an operator who keeps typing into a table
+            // that answers nothing mustn't keep the lost-table recovery
+            // (and the give-up) off for ever. Talking counts for at most
+            // `TABLE_LOST_AFTER` past the last frame actually heard.
+            let talked = self.table_talked.min(self.table_heard_frames + TABLE_LOST_AFTER);
+            if talked > self.last_table_heard {
+                self.last_table_heard = talked;
             }
-            if self.table_talked > self.table_heard_any {
-                self.table_heard_any = self.table_talked;
+            if talked > self.table_heard_any {
+                self.table_heard_any = talked;
             }
             if self.table_heard_any.elapsed() >= TABLE_GIVE_UP {
                 let m = TABLE_GIVE_UP.as_secs() / 60;
@@ -5161,7 +5220,9 @@ impl Station {
         }
         // A frame handed to Mercury a moment ago may not be off the air
         // yet: it goes first, and is counted too.
-        let ahead = u8::from(Instant::now() < self.table_busy_until);
+        // (Mercury still sending one counts too: its frames run a little
+        // over their nominal length.)
+        let ahead = u8::from(Instant::now() < self.table_busy_until || self.mercury_on_air());
         let start = self.table_busy_until.max(Instant::now());
         self.tnc()?.send_broadcast(&f).await?;
         self.tnc()?.send_broadcast(&f).await?;
@@ -5234,9 +5295,10 @@ impl Station {
         let target = modes::best_mode_where(narrow, snr, self.cfg.ramp_margin_db, |m| {
             crate::protocol::table_frames_fit(m.broadcast_bytes(), &calls)
         });
-        self.last_ramp = Instant::now();
-        // A speed that has held for 10 minutes: speed-ups are trusted again.
-        if self.last_downgrade.elapsed() > Duration::from_secs(600) {
+        // A speed-up that has held for 10 minutes: speed-ups are trusted
+        // again. (Not "10 minutes since the last slow-down": that undid a
+        // doubled wait of 16 or 32 minutes after 10.)
+        if self.last_upgrade.is_some_and(|t| t.elapsed() > Duration::from_secs(600)) {
             self.upgrade_wait = UPGRADE_WAIT;
         }
         if target.payload_bps < current.payload_bps {
@@ -5417,8 +5479,13 @@ impl Station {
                 // Not a message still coming in (its next part due within a
                 // frame or two): the request would go out on top of it.
                 let mut wanted = self.table_asm.missing_quiet(quiet);
-                wanted.sort_by(|a, b| (&a.0, a.1).cmp(&(&b.0, b.1)));
+                // The one asked longest ago (never asked: first), so one
+                // that can't be answered (its sender gone, a gap it can't
+                // fill) doesn't stop the others being asked for.
+                self.again_asked.retain(|k, _| wanted.iter().any(|(f, i, _)| (f, i) == (&k.0, &k.1)));
+                again_order(&mut wanted, &self.again_asked);
                 for (of, mid, missing) in wanted.into_iter().take(AGAIN_PER_ROUND) {
+                    self.again_asked.insert((of.clone(), mid), Instant::now());
                     self.table_tx(
                         TableFrame {
                             table: id,
@@ -5433,7 +5500,11 @@ impl Station {
                     );
                 }
             }
+            // Every 30 s, whatever JOINs come in between (a ramp a JOIN set
+            // off can't speed up while that member is still on the air, and
+            // the periodic one is what catches it after).
             if self.last_ramp.elapsed() > Duration::from_secs(30) {
+                self.last_ramp = Instant::now();
                 self.ramp().await?;
             }
         }
@@ -6327,6 +6398,12 @@ impl Station {
     }
 }
 
+/// Missing messages in the order to ask for them again: never asked first,
+/// then the one asked longest ago (ties by sender and id).
+pub fn again_order(wanted: &mut [(String, u64, u64)], asked: &HashMap<(String, u64), Instant>) {
+    wanted.sort_by_key(|(f, i, _)| (asked.get(&(f.clone(), *i)).copied(), f.clone(), *i));
+}
+
 /// Of the offsets a matched-filter measurement could mean (itself, and a
 /// whole ambiguity `period` either way), the one nearest `coarse`.
 pub fn nearest_alias(coarse: f64, measured: f64, period: f64) -> f64 {
@@ -6933,6 +7010,29 @@ mod tests {
             let m = modes::mode_by_name(to).unwrap_or_else(|| panic!("{line}"));
             assert!(m.bandwidth_hz <= 500, "moved to {} ({} Hz) with a 500 Hz member: {line}", m.name, m.bandwidth_hz);
         }
+    }
+
+    /// One request that can't be answered (sender gone, an unfillable gap)
+    /// doesn't block the others: each round asks the one asked longest ago.
+    #[test]
+    fn resend_requests_take_turns() {
+        let mut asked: HashMap<(String, u64), Instant> = HashMap::new();
+        let mut wanted = vec![("AA1A".to_string(), 6, u64::MAX), ("W1AW".to_string(), 3, 0b10)];
+        let mut sent = vec![];
+        for _ in 0..4 {
+            again_order(&mut wanted, &asked);
+            let (f, i, _) = wanted[0].clone();
+            asked.insert((f.clone(), i), Instant::now());
+            sent.push(f);
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        assert_eq!(sent, ["AA1A", "W1AW", "AA1A", "W1AW"]);
+        // A sender that left: its gaps are forgotten.
+        let mut a = TableAssembler::default();
+        a.add("AA1A", 6, 1, 2, b"half");
+        assert!(!a.missing_quiet(Duration::ZERO).is_empty());
+        a.forget_sender("AA1A");
+        assert!(a.missing_quiet(Duration::ZERO).is_empty());
     }
 
     /// A caller further off than one ambiguity period (the scan reaches

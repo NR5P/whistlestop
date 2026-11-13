@@ -203,7 +203,10 @@ so every table frame must fit the mode it goes out in. A sender whose TEXT
 frames were made for a faster mode (queued, or kept for AGAIN, before the
 table slowed down) splits that message again, same `id`, into a different
 number of parts, and sends all of them; a receiver holding parts with
-another `total` starts the message over. Where AGAIN can't name every part
+another `total` starts the message over (receivers before 2026-11-13
+kept the parts they had and dropped the new ones). If the new split needs
+more parts than AGAIN can name at the new speed, the rest is sent as
+further messages with new ids. Where AGAIN can't name every part
 of a message in one frame (its bitmap grows with the part number), a long
 message is sent as several, each of at most as many parts as AGAIN can
 name. The host leaves out of the ramp any mode in which some station at
