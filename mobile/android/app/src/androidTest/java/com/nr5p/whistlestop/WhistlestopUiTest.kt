@@ -11,6 +11,7 @@ import androidx.compose.ui.test.onFirst
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performTextInput
 import androidx.compose.ui.test.performScrollTo
+import androidx.compose.ui.test.performScrollToNode
 import androidx.test.core.app.ActivityScenario
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
@@ -57,9 +58,13 @@ class WhistlestopUiTest {
         field("Type a message").performTextInput("hello from Android")
         rule.onNode(hasContentDescription("Send")).performClick()
         // The demo station answers, quoting us.
-        rule.waitUntil(90_000) {
-            rule.onAllNodes(hasText("hello from Android", substring = true)).fetchSemanticsNodes().size >= 2
-        }
+        rule.waitUntilAtLeastOneExists(hasText("Copy: \"hello from Android\"", substring = true), 90_000)
+        // And our own line is in the chat. (Above the demo station's
+        // greeting, which comes after its encryption handshake: with the
+        // keyboard up it can be scrolled out of view, so scroll to it.)
+        rule.onNode(androidx.compose.ui.test.hasScrollToIndexAction())
+            .performScrollToNode(hasText("hello from Android"))
+        rule.onNode(hasText("hello from Android")).assertExists()
         rule.onNode(hasText("Disconnect")).performClick()
         rule.waitUntilAtLeastOneExists(hasText("Not linked"), 60_000)
     }
