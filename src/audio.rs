@@ -210,8 +210,21 @@ pub type Failure = Arc<Mutex<Option<String>>>;
 fn note_failure(f: &Failure, what: &str, e: impl std::fmt::Display) {
     let mut g = f.lock().unwrap();
     if g.is_none() {
-        *g = Some(format!("{what}: {e}"));
+        // cpal's own texts end in a full stop, and the Log adds one.
+        *g = Some(format!("{what}: {}", e.to_string().trim_end_matches('.')));
     }
+}
+
+/// A sound stream's error callback. A glitch leaves the stream running and
+/// isn't a failure: an underrun or overrun (on Windows, say, as Mercury
+/// opens the same sound card), real-time scheduling refused, or a reroute
+/// cpal has already made. Anything else stops it.
+fn note_stream_error(f: &Failure, what: &str, e: cpal::Error) {
+    use cpal::ErrorKind::{DeviceChanged, RealtimeDenied, Xrun};
+    if matches!(e.kind(), Xrun | RealtimeDenied | DeviceChanged) {
+        return;
+    }
+    note_failure(f, what, e);
 }
 
 impl LiveInput {
@@ -238,7 +251,7 @@ impl LiveInput {
                         ds.process(&mono, &mut out);
                         rx.lock().unwrap().push(&out);
                     },
-                    move |e| note_failure(&fl, "the radio's audio input", e),
+                    move |e| note_stream_error(&fl, "the radio's audio input", e),
                     None,
                 )?;
                 stream.play()?;
@@ -344,7 +357,7 @@ impl LiveOutput {
                             frame.iter_mut().for_each(|s| *s = v);
                         }
                     },
-                    move |e| note_failure(&fl, "the radio's audio output", e),
+                    move |e| note_stream_error(&fl, "the radio's audio output", e),
                     None,
                 )?;
                 stream.play()?;
@@ -869,6 +882,28 @@ mod tests {
                 && hit.z > crate::whistle::TrackDetector::found(0.5),
             "{hit:?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod failure_tests {
+    use super::*;
+
+    /// A buffer underrun or overrun (seen on Windows as Mercury opened the
+    /// radio's sound card) left the Audio pill red and "check the cable"
+    /// in the Log, with the stream still running: glitches aren't failures.
+    #[test]
+    fn glitches_are_not_failures_and_the_text_has_one_full_stop() {
+        for k in [cpal::ErrorKind::Xrun, cpal::ErrorKind::RealtimeDenied, cpal::ErrorKind::DeviceChanged] {
+            let f: Failure = Default::default();
+            note_stream_error(&f, "the radio's audio input", k.into());
+            assert_eq!(*f.lock().unwrap(), None, "{k:?}");
+        }
+        let f: Failure = Default::default();
+        note_stream_error(&f, "the radio's audio input", cpal::ErrorKind::DeviceNotAvailable.into());
+        let why = f.lock().unwrap().clone().expect("a lost device is a failure");
+        assert!(why.starts_with("the radio's audio input: The requested audio device is not available"), "{why}");
+        assert!(!why.ends_with('.'), "{why}");
     }
 }
 

@@ -433,10 +433,23 @@ fn run_dongle_usb(
         // RX OUT: retune when the VFO drifts out of the middle of the capture.
         if cfg.feed == Feed::RxOut && (vf - center).abs() > 0.25 * SAMPLE_RATE as f64 {
             center = vf;
-            rx.stop().wait().ok();
-            dev.set_frequency_hz(tune_hz(center))
-                .wait()
-                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            // On Windows a stream that was stopped delivers nothing once
+            // started again (RigHelm found it: its RX OUT retunes froze the
+            // scope); a fresh stream does. The first retune comes at once
+            // (the dongle opens before the radio's dial is read), so on
+            // Windows the wide receiver never got a sample.
+            if cfg!(windows) {
+                rx.close().wait().map_err(|e| anyhow::anyhow!("{e}"))?;
+                dev.set_frequency_hz(tune_hz(center))
+                    .wait()
+                    .map_err(|e| anyhow::anyhow!("{e}"))?;
+                rx = dev.rx_stream().map_err(|e| anyhow::anyhow!("{e}"))?;
+            } else {
+                rx.stop().wait().ok();
+                dev.set_frequency_hz(tune_hz(center))
+                    .wait()
+                    .map_err(|e| anyhow::anyhow!("{e}"))?;
+            }
             rx.start().wait().map_err(|e| anyhow::anyhow!("{e}"))?;
             continue;
         }

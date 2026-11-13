@@ -70,7 +70,7 @@ pub const SNR_METER: Topic = (
 );
 pub const PILLS: Topic = (
     "Connections",
-    "Green means connected. Radio: the rigctld server (Hamlib or RigHelm). Mercury: the modem's TNC port. Audio: the radio's sound card input. SDR: the optional wide receiver. Red: open Settings, or see Troubleshooting.",
+    "Green means connected. Radio: the rigctld server (Hamlib or RigHelm). Mercury: the modem's TNC port (tried when Whistlestop starts; if Mercury started later, click the red pill to connect). Audio: the radio's sound card input. SDR: the optional wide receiver. Red: open Settings, or see Troubleshooting.",
     "Troubleshooting",
 );
 pub const SETTINGS: Topic = (

@@ -74,7 +74,7 @@ Install Mercury (macOS: drag `Mercury.app` to Applications). Then set it up so i
 - **Sound card**: the radio's USB audio codec, both directions.
 - **Ports**: leave the TNC port at **8300** (data on 8301) and the broadcast port at **8100**, or set the same numbers in Whistlestop **Settings → Mercury modem**.
 
-The **Mercury** pill turns green when Whistlestop is connected. Mercury accepts one program at a time on its TNC port, so close VarAC or any other program that uses it.
+The **Mercury** pill turns green when Whistlestop is connected. Mercury accepts one program at a time on its TNC port, so close VarAC or any other program that uses it. Whistlestop tries Mercury when it starts and doesn't keep retrying (each attempt would take Mercury from a program using it). If you start Mercury afterwards (with direct CAT it has to come second, since it keys the radio through Whistlestop's sharing port), **click the red Mercury pill** to connect; the radio connection stays up.
 
 ### 3. Audio
 
@@ -740,8 +740,8 @@ The **Whistle** length and **Answer automatically** are set on the main screen a
 **A pill in the top bar is red.**
 
 - **Radio**: rigctld (or RigHelm's server) isn't running or the address is wrong. Check **Settings → rigctld**.
-- **Mercury**: Mercury isn't running, the ports differ, or another program (VarAC, vARIM) already holds Mercury's TNC port. Only one program at a time.
-- **Audio**: the audio device in Settings isn't available. Pick it again; on macOS allow microphone access for Whistlestop in System Settings → Privacy. It also turns red if the device stops working while running (unplugged, a driver error): the Log says "⚠ Sound: …". Plug it back in, then **Save & connect** to open it again.
+- **Mercury**: Mercury isn't running, the ports differ, or another program (VarAC, vARIM) already holds Mercury's TNC port. Only one program at a time. Mercury started after Whistlestop: click the red pill to connect.
+- **Audio**: the audio device in Settings isn't available. Pick it again; on macOS allow microphone access for Whistlestop in System Settings → Privacy. It also turns red if the device stops working while running (unplugged, a driver error): the Log says "⚠ Sound: …". A momentary glitch that leaves the sound running (a buffer underrun or overrun, as can happen on Windows when Mercury opens the same sound card) doesn't count. Plug it back in, then **Save & connect** to open it again.
 
 **"⚠ Search stopped: …" in the Log.** A search step needed the radio (a retune) and the radio didn't answer: the search ends and says why, instead of looking as if it were still running. Check the Radio pill, then search again.
 - **SDR**: no dongle found, or the wide receiver is off in Settings.

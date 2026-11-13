@@ -670,8 +670,24 @@ impl App {
                 pill(ui, "SDR", sdr_on).help(&help::PILLS);
                 pill(ui, "Audio", s.audio_ok).help(&help::PILLS);
                 let mp = pill(ui, "Mercury", s.mercury_ok).help(&help::PILLS);
-                if let Some(v) = &s.modem_version {
-                    mp.on_hover_text(v.as_str());
+                if s.mercury_ok {
+                    if let Some(v) = &s.modem_version {
+                        mp.on_hover_text(v.as_str());
+                    }
+                } else if !s.demo {
+                    // Tried only at start (a connection takes Mercury from
+                    // any program using it, so it's never retried by
+                    // itself): a Mercury started afterwards is reached here,
+                    // without restarting the radio connection Mercury keys
+                    // through.
+                    let mp = ui
+                        .interact(mp.rect, ui.scope_id().with("mercury-pill"), Sense::click())
+                        .on_hover_cursor(egui::CursorIcon::PointingHand)
+                        .on_hover_text("Not connected to Mercury. Click to connect
+(it takes Mercury from any other program using it).");
+                    if mp.clicked() {
+                        self.send(Cmd::ReconnectModem);
+                    }
                 }
                 pill(ui, "Radio", s.rig_ok).help(&help::PILLS);
             });

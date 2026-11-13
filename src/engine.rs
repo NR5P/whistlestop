@@ -712,6 +712,8 @@ struct Station {
     audio_failed: bool,
     sim_stop: Arc<AtomicBool>,
     sdr_stop: Arc<AtomicBool>,
+    /// The wide receiver's last failure, once it's in the Log.
+    sdr_said: Option<String>,
     vfo: Arc<Mutex<f64>>,
     sdr_span: Arc<Mutex<f64>>,
     detector: Detector,
@@ -1030,6 +1032,7 @@ impl Station {
             audio_failed: false,
             sim_stop: sim_stop.clone(),
             sdr_stop: Arc::new(AtomicBool::new(false)),
+            sdr_said: None,
             vfo: vfo.clone(),
             sdr_span: Arc::new(Mutex::new(cfg.sdr.span_hz)),
             peer: None,
@@ -1503,6 +1506,8 @@ impl Station {
     fn start_sdr(&mut self) {
         self.sdr_stop.store(true, Ordering::Relaxed);
         self.sdr_stop = Arc::new(AtomicBool::new(false));
+        self.sdr.lock().unwrap().status.clear();
+        self.sdr_said = None;
         sdr::start(
             self.cfg.sdr.clone(),
             self.vfo.clone(),
@@ -3951,6 +3956,10 @@ impl Station {
         {
             f(t);
         }
+        // A transfer finishing here is one more finished row: kept to the
+        // limit at once, as `set` does (the list held 201 until the next
+        // state change).
+        g.trim_history();
     }
 
     // ------------------------------------------------------------- files
@@ -5465,6 +5474,19 @@ impl Station {
     // ---------------------------------------------------------------- tick
 
     async fn tick(&mut self) -> anyhow::Result<()> {
+        // The wide receiver stopping (no dongle, its driver, unplugged) was
+        // said only in its own panel, which isn't drawn once it has
+        // stopped: the SDR pill went red with no reason anywhere.
+        let sdr_why = {
+            let o = self.sdr.lock().unwrap();
+            (!o.running && o.status.starts_with("Wide receiver stopped")).then(|| o.status.clone())
+        };
+        if let Some(why) = sdr_why
+            && self.sdr_said.as_ref() != Some(&why)
+        {
+            self.log(format!("⚠ {why}"));
+            self.sdr_said = Some(why);
+        }
         // A sound stream that stopped (unplugged, a driver error) shows as
         // audio down, with why, instead of a frozen waterfall and silence.
         if !self.audio_failed {
