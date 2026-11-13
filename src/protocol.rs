@@ -864,7 +864,13 @@ pub enum TableBody {
     },
     Join {
         table_name: String,
+        /// How well this member hears the host, dB; `SNR_UNKNOWN` until it
+        /// has measured the host's signal.
         snr_of_host: i8,
+        /// The member's bandwidth setting (an index into `Bandwidth::ALL`,
+        /// like CALL's), so the host never picks a mode wider than it. A
+        /// trailing byte: older versions leave it off, and skip it.
+        bw_code: Option<u8>,
     },
     Speed {
         mode_index: u8,
@@ -896,6 +902,11 @@ pub enum TableBody {
 
 pub const CALL_CHAT: u8 = 0;
 pub const CALL_TABLE: u8 = 1;
+
+/// A JOIN/report's `snr_of_host` when the member hasn't measured the host
+/// yet: the host leaves it out of its speed choice. (An older host reads it
+/// as a very weak member and slows down: the safe side.)
+pub const SNR_UNKNOWN: i8 = i8::MIN;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct TableFrame {
@@ -942,8 +953,12 @@ impl TableFrame {
             TableBody::Join {
                 table_name,
                 snr_of_host,
+                bw_code,
             } => {
                 w.str(table_name).i8(*snr_of_host);
+                if let Some(b) = bw_code {
+                    w.u8(*b);
+                }
             }
             TableBody::Speed { mode_index, last_id } => {
                 w.u8(*mode_index);
@@ -1008,6 +1023,7 @@ impl TableFrame {
                 0x12 => TableBody::Join {
                     table_name: r.str()?,
                     snr_of_host: r.i8()?,
+                    bw_code: r.u8().ok(),
                 },
                 0x13 => TableBody::Speed {
                     mode_index: r.u8()?,
@@ -1609,6 +1625,12 @@ mod tests {
             TableBody::Join {
                 table_name: "EVENING".into(),
                 snr_of_host: -4,
+                bw_code: Some(2),
+            },
+            TableBody::Join {
+                table_name: "EVENING".into(),
+                snr_of_host: SNR_UNKNOWN,
+                bw_code: None,
             },
             TableBody::Speed { mode_index: 0, last_id: 0 },
             TableBody::Speed { mode_index: 1, last_id: 300 },

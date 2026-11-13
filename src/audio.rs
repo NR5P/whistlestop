@@ -705,7 +705,7 @@ impl SimBand {
                         }
                     }
                     if any {
-                        let sh = ssb_channel(&seg, off, FS, (0.0, 4000.0));
+                        let sh = crate::whistle::ssb_channel_at(&seg, off, FS, (0.0, 4000.0), self.t);
                         y.iter_mut().zip(sh).for_each(|(a, b)| *a += b);
                     }
                 }

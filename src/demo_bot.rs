@@ -224,7 +224,7 @@ pub async fn run(p: BotPorts, stop: std::sync::Arc<std::sync::atomic::AtomicBool
                         let Some(fr) = TableFrame::decode(&f) else { continue };
                         let text = match fr.body {
                             TableBody::Call { kind: CALL_TABLE, table_name, .. } | TableBody::Join { table_name, .. } => {
-                                let j = TableFrame { table: fr.table, from: CALL.into(), body: TableBody::Join { table_name, snr_of_host: 9 } };
+                                let j = TableFrame { table: fr.table, from: CALL.into(), body: TableBody::Join { table_name, snr_of_host: 9, bw_code: None } };
                                 later_bc.push((Instant::now() + Duration::from_secs(4), j.encode()));
                                 Some("K7BOT joining the table. Good evening all!")
                             }

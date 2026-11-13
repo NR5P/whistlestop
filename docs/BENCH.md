@@ -137,6 +137,49 @@ building any audio stream now reports its message instead of "did not
 start". Checked with `airtest whistle`: 4/4, no false alarm in 15 s of
 quiet, then the computer heard the phone's CQ whistle 3 s in (score 0.9).
 
+## The rest of the third hunt's list (2026-11-13)
+
+- **Roundtable speed changes** now switch when Mercury reports both
+  announcements off the air (its PTT OFF lines, counting a table frame still
+  on the air from before), with a later fallback when it doesn't say; before,
+  a fixed timer could switch while the second announcement was still waiting.
+- **Members' reports**: only the host's SNR actually measured (on its frames,
+  or on the CALL a member joined on), else "unknown" (−128), which the host
+  leaves out; before, a member reported the last 1:1 link's SNR or a made-up
+  0 dB. The JOIN/report carries the member's bandwidth (a trailing byte older
+  versions skip): the host never picks a mode wider than the narrowest
+  member's (test `the_narrowest_member_caps_the_table`: without the cap the
+  host went to QAM16C2, 2100 Hz, with a 500 Hz member). A member whose older
+  host moves the table wider is warned.
+- **Whistle offsets**: `fine_offset` picks among all the offsets a
+  measurement could mean, so a caller at +1050 Hz isn't put at −950 (test
+  `far_callers_alias_the_right_way`).
+- **Simulated band**: the frequency shift's phase carries on across 50 ms
+  blocks (a +333 Hz whistle measured 340 before; test
+  `a_blockwise_shift_keeps_its_offset`).
+- **Test band**: stopping it closes its connections and listeners (test
+  `stop_closes_its_connections`).
+- **Desktop Remote button**: one label in every state, the state in its
+  colour (`084446b`). **iPhone**: a number sent as null reads as 0 instead of
+  freezing the app (`456d91d`).
+- **Flaky tests**: the six engine tests that time a search across a band
+  simulated in real time now take turns (several at once starved each other:
+  `sdr_hit_interrupts_stepping_search` heard "whistles" in the noise or timed
+  out, `real_mercury_demo_search_link_chat` waited too long for Mercury). The
+  library suite takes about 4.5 min instead of 1.5, and passed twice running;
+  `sdr_hit_interrupts_stepping_search` also allows 150 s to link.
+
+**Results**: `cargo test` all pass (156 in the library); standard bench on
+real Mercury **35/35**, `table3` **10/10**, and `link table table3` 15/15 with
+the PTT-timed speed changes; phone UI tests 7/7 on the iPhone Simulator and
+the Android emulator.
+
+Not reproduced: "scan speed, weak signal" missing 1 of 4. Three `scan`
+runs after these changes found all 36 trials (normal, weak and very weak);
+the earlier misses were at +14 dB, not at the weakest level, so it isn't
+simply sensitivity. If it shows again, `bench-run/whistlestop-BRAVO.log` of
+that run is the place to look.
+
 ## Third bug hunt: transmit safety, phones, search and audio (2026-11-12, night)
 
 Four more read-throughs (rig/CAT/PTT, search and SDR, audio and modes, the
@@ -168,13 +211,10 @@ UI logic of all three apps), each finding checked against the code:
   were left as the bench's stations (`0aee326`).
 
 Not changed:
-- Roundtable speed changes timed by a clock rather than by the two
-  announcements going out; members' SNR reports that may not be about the
-  host, and the host ignoring members' bandwidth (left for the Roundtable
-  work going on in parallel).
-- The ether (test band) doesn't stop its threads when stopped; the
-  simulated band's phase jumps every 50 ms distort offsets by a few Hz.
-- `fine_offset` checks one alias only (latent: not seen past ~900 Hz).
+- (Fixed afterwards, below: the Roundtable speed-change timing, members'
+  reports and bandwidth; the test band's threads; the simulated band's
+  phase; `fine_offset`'s aliases; the Remote button; the iPhone's null
+  numbers.)
 - "scan speed, weak signal" misses 1 of 4 now and then (twice in five runs
   today, before and after these changes; 4/4 on the reruns).
 

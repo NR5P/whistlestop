@@ -92,6 +92,9 @@ pub struct Ether {
     pub ports: Vec<(u16, u16)>,
     stations: Arc<Vec<Mutex<Station>>>,
     stop: Arc<AtomicBool>,
+    /// Every rig and app-audio connection open: shut down on `stop`, so
+    /// their threads end and the apps see the connection close.
+    conns: Conns,
 }
 
 impl Ether {
@@ -120,12 +123,21 @@ impl Ether {
             .collect()
     }
 
+    /// Stop the band: its threads end, its ports close, and every app or
+    /// rig client connected to it sees its connection close.
     pub fn stop(&self) {
         self.stop.store(true, Ordering::Relaxed);
+        for c in self.conns.lock().unwrap().drain(..) {
+            let _ = c.shutdown(std::net::Shutdown::Both);
+        }
+        for s in self.stations.iter() {
+            s.lock().unwrap().app_out = None;
+        }
     }
 
     pub fn start(cfgs: Vec<StationCfg>, channel: Channel) -> std::io::Result<Ether> {
         let stop = Arc::new(AtomicBool::new(false));
+        let conns: Conns = Default::default();
         let stations: Arc<Vec<Mutex<Station>>> = Arc::new(
             cfgs.iter()
                 .map(|c| {
@@ -153,8 +165,8 @@ impl Ether {
             let rl = TcpListener::bind(("127.0.0.1", c.rig_port))?;
             let al = TcpListener::bind(("127.0.0.1", c.audio_port))?;
             ports.push((rl.local_addr()?.port(), al.local_addr()?.port()));
-            spawn_rig(rl, stations.clone(), i, stop.clone());
-            spawn_app_audio(al, stations.clone(), i, stop.clone());
+            spawn_rig(rl, stations.clone(), i, stop.clone(), conns.clone());
+            spawn_app_audio(al, stations.clone(), i, stop.clone(), conns.clone());
         }
         {
             let (stations, channel, pair_loss, stop) = (
@@ -168,6 +180,7 @@ impl Ether {
                 .spawn(move || run(stations, channel, pair_loss, mercury_listeners, stop))?;
         }
         Ok(Ether {
+            conns,
             channel,
             pair_loss_db,
             ports,
@@ -177,15 +190,40 @@ impl Ether {
     }
 }
 
+impl Drop for Ether {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
+
+type Conns = Arc<Mutex<Vec<TcpStream>>>;
+
+/// Accept connections until `stop`, checking it every 50 ms (a blocking
+/// accept would only see it when someone next connected). Each one is kept
+/// in `conns`, for `stop` to close.
+fn accept_until_stopped(l: TcpListener, stop: Arc<AtomicBool>, conns: Conns, mut on: impl FnMut(TcpStream)) {
+    if l.set_nonblocking(true).is_err() {
+        return;
+    }
+    while !stop.load(Ordering::Relaxed) {
+        match l.accept() {
+            Ok((s, _)) => {
+                let _ = s.set_nonblocking(false);
+                if let Ok(c) = s.try_clone() {
+                    conns.lock().unwrap().push(c);
+                }
+                on(s);
+            }
+            Err(_) => std::thread::sleep(std::time::Duration::from_millis(50)),
+        }
+    }
+}
+
 // ----------------------------------------------------------- virtual rigs
 
-fn spawn_rig(l: TcpListener, st: Arc<Vec<Mutex<Station>>>, i: usize, stop: Arc<AtomicBool>) {
+fn spawn_rig(l: TcpListener, st: Arc<Vec<Mutex<Station>>>, i: usize, stop: Arc<AtomicBool>, conns: Conns) {
     std::thread::spawn(move || {
-        for conn in l.incoming() {
-            if stop.load(Ordering::Relaxed) {
-                return;
-            }
-            let Ok(s) = conn else { continue };
+        accept_until_stopped(l, stop, conns, |s| {
             let st = st.clone();
             std::thread::spawn(move || {
                 let mut w = s.try_clone().unwrap();
@@ -226,17 +264,13 @@ fn spawn_rig(l: TcpListener, st: Arc<Vec<Mutex<Station>>>, i: usize, stop: Arc<A
                     }
                 }
             });
-        }
+        });
     });
 }
 
-fn spawn_app_audio(l: TcpListener, st: Arc<Vec<Mutex<Station>>>, i: usize, stop: Arc<AtomicBool>) {
+fn spawn_app_audio(l: TcpListener, st: Arc<Vec<Mutex<Station>>>, i: usize, stop: Arc<AtomicBool>, conns: Conns) {
     std::thread::spawn(move || {
-        for conn in l.incoming() {
-            if stop.load(Ordering::Relaxed) {
-                return;
-            }
-            let Ok(mut s) = conn else { continue };
+        accept_until_stopped(l, stop, conns, |mut s| {
             s.set_nodelay(true).ok();
             {
                 let mut g = st[i].lock().unwrap();
@@ -263,7 +297,7 @@ fn spawn_app_audio(l: TcpListener, st: Arc<Vec<Mutex<Station>>>, i: usize, stop:
                 }
                 st[i].lock().unwrap().stats.app_connected = false;
             });
-        }
+        });
     });
 }
 
@@ -627,6 +661,40 @@ fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Stopping the band closes what's connected to it and stops taking
+    /// connections: its threads end and its ports are freed.
+    #[test]
+    fn stop_closes_its_connections() {
+        use std::io::{Read, Write};
+        let dir = std::env::temp_dir().join(format!("ws-ether-stop-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let e = Ether::start(
+            vec![StationCfg {
+                name: "A".into(),
+                sock_path: dir.join("a.sock"),
+                rig_port: 0,
+                audio_port: 0,
+                dial_hz: 14_100_000.0,
+                hear_own_tx: false,
+            }],
+            Channel::default(),
+        )
+        .unwrap();
+        let (rig, _) = e.ports[0];
+        let mut c = TcpStream::connect(("127.0.0.1", rig)).unwrap();
+        c.set_read_timeout(Some(std::time::Duration::from_secs(3))).unwrap();
+        c.write_all(b"f\n").unwrap();
+        let mut buf = [0u8; 64];
+        assert!(c.read(&mut buf).unwrap() > 0, "the rig answers");
+        e.stop();
+        let t = std::time::Instant::now();
+        assert_eq!(c.read(&mut buf).unwrap_or(0), 0, "closed by stop");
+        assert!(t.elapsed() < std::time::Duration::from_secs(2));
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        assert!(TcpStream::connect(("127.0.0.1", rig)).is_err(), "port freed");
+        std::fs::remove_dir_all(&dir).ok();
+    }
 
     #[test]
     fn path_shifts_frequency() {

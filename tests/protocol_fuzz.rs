@@ -153,7 +153,8 @@ fn all_table_frames() -> Vec<TableFrame> {
         TableBody::Call { kind: 255, table_name: "Evening Net ✓".into(), bw_code: 255, grid: "EM12".into() },
         TableBody::Text { id: u64::MAX, part: 64, total: 64, data: vec![0xC0; 1024] },
         TableBody::Text { id: 0, part: 1, total: 1, data: vec![] },
-        TableBody::Join { table_name: "X".into(), snr_of_host: i8::MIN },
+        TableBody::Join { table_name: "X".into(), snr_of_host: i8::MIN, bw_code: None },
+        TableBody::Join { table_name: "X".into(), snr_of_host: 7, bw_code: Some(5) },
         TableBody::Speed { mode_index: 255, last_id: 0 },
         TableBody::Speed { mode_index: 255, last_id: u64::MAX },
         TableBody::Again { of: call(12), id: u64::MAX, missing: u64::MAX },
@@ -243,8 +244,25 @@ fn truncated_table_frames_are_dropped() {
             }
             _ => None,
         };
+        // Likewise JOIN's bandwidth byte: without it, a JOIN from an older
+        // station.
+        let join_base = match &f.body {
+            TableBody::Join { table_name, snr_of_host, bw_code: Some(_) } => Some(
+                TableFrame {
+                    body: TableBody::Join { table_name: table_name.clone(), snr_of_host: *snr_of_host, bw_code: None },
+                    ..f.clone()
+                }
+                .encode()
+                .len(),
+            ),
+            _ => None,
+        };
         for cut in 0..b.len() {
             let r = TableFrame::decode(&b[..cut]);
+            if join_base.is_some_and(|n| cut >= n) {
+                assert!(matches!(r, Some(TableFrame { body: TableBody::Join { bw_code: None, .. }, .. })), "{f:?} cut at {cut} decoded as {r:?}");
+                continue;
+            }
             if speed_base.is_some_and(|n| cut >= n) {
                 assert!(matches!(r, Some(TableFrame { body: TableBody::Speed { last_id: 0, .. }, .. })), "{f:?} cut at {cut} decoded as {r:?}");
                 continue;

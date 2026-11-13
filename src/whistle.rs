@@ -77,8 +77,9 @@ impl WhistleParams {
         self.k() * self.period_s() / 4.0
     }
     /// The other offset this measurement could mean: a caller beyond the
-    /// unambiguous range shows up one ambiguity period (2 x max offset,
-    /// 2000 Hz with the defaults) away, on the other side.
+    /// unambiguous range shows up one ambiguity period (2 × max offset)
+    /// away, on the other side. (Callers further out alias by more periods:
+    /// the engine's `fine_offset` checks those too.)
     pub fn alias_of(&self, offset_hz: f64) -> f64 {
         offset_hz - offset_hz.signum() * 2.0 * self.max_offset_hz()
     }
@@ -609,6 +610,15 @@ impl TrackDetector {
 /// Shift audio by `offset_hz` (a mistuned SSB receiver) and apply the
 /// receiver's audio passband. Used by the simulator and tests.
 pub fn ssb_channel(x: &[f64], offset_hz: f64, fs: u32, passband: (f64, f64)) -> Vec<f64> {
+    ssb_channel_at(x, offset_hz, fs, passband, 0.0)
+}
+
+/// `ssb_channel` for one block of a longer stream that starts `t0` seconds
+/// in: the shift's phase carries on from the block before, instead of
+/// restarting at zero (which jolts every offset that isn't a whole number
+/// of cycles per block: the simulated band's 50 ms blocks moved a +333 Hz
+/// whistle to 339 Hz).
+pub fn ssb_channel_at(x: &[f64], offset_hz: f64, fs: u32, passband: (f64, f64), t0: f64) -> Vec<f64> {
     let n = x.len();
     if n == 0 {
         return vec![];
@@ -626,7 +636,8 @@ pub fn ssb_channel(x: &[f64], offset_hz: f64, fs: u32, passband: (f64, f64)) -> 
         .enumerate()
         .map(|(i, c)| {
             let v = if i < n {
-                c / nfft as f64 * Complex64::from_polar(1.0, 2.0 * PI * offset_hz * i as f64 / fsf)
+                c / nfft as f64
+                    * Complex64::from_polar(1.0, 2.0 * PI * offset_hz * (t0 + i as f64 / fsf))
             } else {
                 Complex64::new(0.0, 0.0)
             };
@@ -656,6 +667,24 @@ mod tests {
     use super::*;
     use rand::{SeedableRng, rngs::StdRng};
     use rand_distr::{Distribution, Normal};
+
+    /// A whistle shifted block by block (as the simulated band does, 50 ms
+    /// at a time) is measured where it is: the shift's phase carries on
+    /// across blocks. (Restarted each block, +333 Hz measured 339.)
+    #[test]
+    fn a_blockwise_shift_keeps_its_offset() {
+        let p = WhistleParams::default();
+        let x = whistle(3.0, &p);
+        let x: Vec<f64> = x.iter().map(|v| *v as f64).collect();
+        let block = 400;
+        let mut y = vec![];
+        for (k, b) in x.chunks(block).enumerate() {
+            let t0 = (k * block) as f64 / FS as f64;
+            y.extend(ssb_channel_at(b, 333.0, FS, (0.0, 4000.0), t0));
+        }
+        let d = Detector::new(p).detect(&y).expect("detected");
+        assert!((d.offset_hz - 333.0).abs() < 3.0, "measured {:.1}", d.offset_hz);
+    }
 
     /// One sample that isn't a number (off a socket, say) doesn't panic the
     /// detectors: the whole minute of audio held would otherwise panic them

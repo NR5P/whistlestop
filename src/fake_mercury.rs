@@ -768,12 +768,15 @@ impl Session {
                     self.after(2.0 + after, Act::BotBcast(leave.encode()));
                     return;
                 }
+                // Tests may give the bot its own report (SNR, bandwidth).
+                let (snr_of_host, bw_code) = test_bot_join(&self.mycall).unwrap_or((9, None));
                 let j = TableFrame {
                     table: fr.table,
                     from: bot.clone(),
                     body: TableBody::Join {
                         table_name,
-                        snr_of_host: 9,
+                        snr_of_host,
+                        bw_code,
                     },
                 };
                 let b = j.encode();
@@ -960,6 +963,25 @@ pub fn test_bot_table(_mycall: &str) -> Option<String> {
             .iter()
             .find(|(c, _)| c.eq_ignore_ascii_case(_mycall))
             .map(|(_, t)| t.clone());
+    }
+    #[cfg(not(test))]
+    None
+}
+
+/// Tests: demo stations started with this callsign get a K7BOT whose JOIN
+/// reports this SNR and bandwidth code.
+#[cfg(test)]
+pub static TEST_BOT_JOIN: std::sync::Mutex<Vec<(String, i8, Option<u8>)>> = std::sync::Mutex::new(Vec::new());
+
+fn test_bot_join(_mycall: &str) -> Option<(i8, Option<u8>)> {
+    #[cfg(test)]
+    {
+        return TEST_BOT_JOIN
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|(c, ..)| c.eq_ignore_ascii_case(_mycall))
+            .map(|(_, s, b)| (*s, *b));
     }
     #[cfg(not(test))]
     None

@@ -212,6 +212,10 @@ pub enum E2eView {
 #[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct Member {
     pub snr_of_host: Option<i8>,
+    /// Its bandwidth setting, from its JOIN/report (older versions don't
+    /// send it): the host never moves the table wider than this.
+    #[serde(default)]
+    pub bw: Option<Bandwidth>,
     #[serde(with = "ser::opt_instant")]
     pub last: Option<Instant>,
 }
@@ -803,6 +807,14 @@ struct Station {
     auto_pending: Option<(String, bool, Instant)>,
     /// How well we hear the host of the table we're at (from its frames).
     host_snr: Option<f64>,
+    /// The SN of the last Roundtable CALL heard, and whose: what a member
+    /// first reports about its host, before any table traffic.
+    call_snr: Option<(String, f64, Instant)>,
+    /// A Roundtable CALL whose SN hadn't come yet: Mercury's SN line and
+    /// the frame come on different ports, in either order.
+    call_snr_wait: Option<(String, Instant)>,
+    /// A table speed wider than our bandwidth setting already warned about.
+    warned_wide: Option<&'static Mode>,
     /// When we last reported to the table's host (members re-report).
     last_table_report: Instant,
     /// Host: a join window is open (when it ends, the speed to go back to).
@@ -862,7 +874,11 @@ struct Station {
     last_sched: Option<Instant>,
     sched_slot: Option<usize>,
     /// Roundtable host: the speed to switch to once the announcement is out.
-    pending_speed: Option<(&'static Mode, Instant)>,
+    /// Host: a speed change announced and not yet made: the new mode, the
+    /// latest it's made, and how many of Mercury's PTT OFFs are still to
+    /// come before both announcements (and any frame ahead of them) are
+    /// off the air.
+    pending_speed: Option<(&'static Mode, Instant, u8)>,
     last_query: Instant,
 }
 
@@ -1054,6 +1070,9 @@ impl Station {
             busy_wait: None,
             auto_pending: None,
             host_snr: None,
+            call_snr: None,
+            call_snr_wait: None,
+            warned_wide: None,
             last_table_report: Instant::now(),
             join_window: None,
             last_join_window: Instant::now(),
@@ -2178,15 +2197,13 @@ impl Station {
         if s.is_finite() { s.clamp(100.0, reach) } else { reach }
     }
 
-    /// The fine offset from a matched-filter measurement, choosing between
-    /// it and its alias the one that agrees with the scan's coarse offset.
+    /// The fine offset from a matched-filter measurement: of the offsets it
+    /// could mean (itself, and a whole ambiguity period either way), the one
+    /// nearest the scan's coarse offset. The scan reaches ±1100 Hz, past one
+    /// period (1000 Hz with the defaults): a caller at +1050 Hz measures
+    /// +50, and only checking +50 against −950 kept +50, 1000 Hz wrong.
     fn fine_offset(&self, coarse: f64, measured: f64) -> f64 {
-        let alias = self.whistle_params().alias_of(measured);
-        if (alias - coarse).abs() < (measured - coarse).abs() {
-            alias
-        } else {
-            measured
-        }
+        nearest_alias(coarse, measured, 2.0 * self.whistle_params().max_offset_hz())
     }
 
     async fn start_search(&mut self, scope: SearchScope) -> anyhow::Result<()> {
@@ -3167,6 +3184,10 @@ impl Station {
             "PTT" => {
                 let on = l.ends_with("ON");
                 self.mercury_ptt = on;
+                // One more frame off the air for a waiting speed change.
+                if !on && let Some((_, _, owed)) = self.pending_speed.as_mut() {
+                    *owed = owed.saturating_sub(1);
+                }
                 let keyed = self.engine_keyed;
                 self.set(|g| g.tx = on || keyed);
                 if let Some(r) = self.rig.as_mut().filter(|r| r.is_sim()) {
@@ -3219,6 +3240,12 @@ impl Station {
                 self.est.on_snr_line(&l);
                 let v = self.est.snr_db;
                 self.last_sn = v.map(|s| (Instant::now(), s));
+                // The SN of a Roundtable CALL that came just before it.
+                if let (Some((call, at)), Some(snr)) = (self.call_snr_wait.take(), v)
+                    && at.elapsed() < Duration::from_secs(2)
+                {
+                    self.call_snr = Some((call, snr, Instant::now()));
+                }
                 self.set(|g| g.snr_db = v);
             }
             // Mercury answers VERSION as VARA does ("VARA version 4.9.0
@@ -4203,9 +4230,16 @@ impl Station {
         self.table_unsynced = !host;
         self.expect_slowdown = None;
         if !host {
-            self.host_snr = None;
+            // What we heard of the host's CALL, if that's who this is; never
+            // the last 1:1 link's SNR, nor a made-up 0 dB.
+            let host = self.st.lock().unwrap().table.as_ref().and_then(|t| t.host_call.clone());
+            self.host_snr = self
+                .call_snr
+                .as_ref()
+                .filter(|(c, _, at)| Some(c) == host.as_ref() && at.elapsed() < Duration::from_secs(600))
+                .map(|(_, snr, _)| *snr);
             let me = self.mycall();
-            let snr = self.est.snr_db.unwrap_or(0.0).round() as i8;
+            let snr = self.host_snr.map(|s| s.round() as i8).unwrap_or(SNR_UNKNOWN);
             self.table_tx(
                 TableFrame {
                     table: id,
@@ -4213,6 +4247,7 @@ impl Station {
                     body: TableBody::Join {
                         table_name: name.clone(),
                         snr_of_host: snr,
+                        bw_code: Some(self.bw_code()),
                     },
                 }
                 .encode(),
@@ -4228,6 +4263,11 @@ impl Station {
             ));
         }
         Ok(())
+    }
+
+    /// Our bandwidth setting as CALL and JOIN carry it.
+    fn bw_code(&self) -> u8 {
+        Bandwidth::ALL.iter().position(|b| *b == self.bw).unwrap_or(4) as u8
     }
 
     fn table_tx(&mut self, frame: Vec<u8>) {
@@ -4263,8 +4303,10 @@ impl Station {
 
     /// Transmit queued table frames one modem frame at a time.
     async fn step_table_tx(&mut self) -> anyhow::Result<()> {
-        if let Some((m, at)) = self.pending_speed {
-            if Instant::now() < at {
+        if let Some((m, at, owed)) = self.pending_speed {
+            // Held until the announcements are off the air (Mercury's PTT
+            // OFFs counted), or the latest time if it doesn't say.
+            if owed > 0 && Instant::now() < at {
                 return Ok(()); // hold table traffic until the switch
             }
             self.pending_speed = None;
@@ -4346,6 +4388,12 @@ impl Station {
                 if *kind == CALL_TABLE {
                     self.last_table_call =
                         Some((fr.from.clone(), table_name.clone(), Instant::now()));
+                    match self.last_sn {
+                        Some((at, snr)) if at.elapsed() < Duration::from_secs(2) => {
+                            self.call_snr = Some((fr.from.clone(), snr, Instant::now()));
+                        }
+                        _ => self.call_snr_wait = Some((fr.from.clone(), Instant::now())),
+                    }
                 }
                 let answering = self.answer_at.as_ref().is_some_and(|(c, _)| *c == fr.from);
                 if answering && *kind == CALL_TABLE {
@@ -4488,19 +4536,27 @@ impl Station {
                 }
             }
             // A JOIN, or a member's periodic report (the same frame).
-            TableBody::Join { snr_of_host, .. } => {
+            TableBody::Join { snr_of_host, bw_code, .. } => {
+                let known = snr_of_host != SNR_UNKNOWN;
+                let bw = bw_code.and_then(|c| Bandwidth::ALL.get(c as usize).copied());
                 self.set(|g| {
                     if let Some(t) = g.table.as_mut() {
                         let new = !t.members.contains_key(&from);
                         let m = t.members.entry(from.clone()).or_default();
-                        m.snr_of_host = Some(snr_of_host);
+                        if known {
+                            m.snr_of_host = Some(snr_of_host);
+                        }
+                        if bw.is_some() {
+                            m.bw = bw;
+                        }
                         m.last = Some(Instant::now());
                         if new {
-                            t.lines.push((
-                                Clock::now(),
-                                String::new(),
-                                format!("{from} joined (hears the host at {snr_of_host:+} dB)"),
-                            ));
+                            let how = if known {
+                                format!("hears the host at {snr_of_host:+} dB")
+                            } else {
+                                "hasn't measured the host yet".to_string()
+                            };
+                            t.lines.push((Clock::now(), String::new(), format!("{from} joined ({how})")));
                         }
                     }
                 });
@@ -4514,6 +4570,20 @@ impl Station {
                     self.table_unsynced = false;
                     self.expect_slowdown = None;
                     self.table_announced = Some(m);
+                    // A host on an older version doesn't know our bandwidth.
+                    if !self.bw.modes().iter().any(|x| x.index == m.index)
+                        && self.warned_wide.map(|w| w.index) != Some(m.index)
+                    {
+                        self.warned_wide = Some(m);
+                        let msg = format!(
+                            "The table moved to {} ({} Hz), wider than your bandwidth setting ({} Hz): you may not copy it",
+                            m.name,
+                            m.bandwidth_hz,
+                            self.bw.hz()
+                        );
+                        self.log(format!("⚠ Roundtable: {msg}"));
+                        self.system_line(msg);
+                    }
                     let now = self.st.lock().unwrap().table.as_ref().map(|t| t.mode.index);
                     if now != Some(m.index) {
                         self.apply_table_mode(m).await?;
@@ -4714,7 +4784,7 @@ impl Station {
             && self.table_queue.is_empty()
         {
             self.table_set_speed(calling).await?;
-            let switched = self.pending_speed.map(|(_, at)| at).unwrap_or_else(Instant::now);
+            let switched = self.pending_speed.map(|(_, at, _)| at).unwrap_or_else(Instant::now);
             self.join_window = Some((switched + JOIN_WINDOW_FOR, mode));
             // Its CALL, in DATAC3 once the table has switched (table traffic
             // waits for the switch), for stations looking for it.
@@ -4750,7 +4820,9 @@ impl Station {
             return;
         };
         self.last_table_report = Instant::now();
-        let snr = self.host_snr.or(self.est.snr_db).unwrap_or(0.0).round() as i8;
+        // Only what we measured of the host (never the last 1:1 link's
+        // SNR, nor a made-up 0 dB): unknown until then.
+        let snr = self.host_snr.map(|s| s.round() as i8).unwrap_or(SNR_UNKNOWN);
         if self.host_snr.is_some()
             && (snr as f64) < mode.min_snr_db + self.cfg.ramp_margin_db
             && self.expect_slowdown.is_none()
@@ -4765,6 +4837,7 @@ impl Station {
                 body: TableBody::Join {
                     table_name: name,
                     snr_of_host: snr,
+                    bw_code: Some(self.bw_code()),
                 },
             }
             .encode(),
@@ -4825,6 +4898,10 @@ impl Station {
             ))
             .await;
         }
+        // A frame handed to Mercury a moment ago may not be off the air
+        // yet: it goes first, and is counted too.
+        let ahead = u8::from(Instant::now() < self.table_busy_until);
+        let start = self.table_busy_until.max(Instant::now());
         self.tnc()?.send_broadcast(&f).await?;
         self.tnc()?.send_broadcast(&f).await?;
         self.last_table_sent = Instant::now();
@@ -4832,8 +4909,10 @@ impl Station {
             // The first join window a full period after leaving DATAC3.
             self.last_join_window = Instant::now();
         }
-        let at = Instant::now() + Duration::from_secs_f64(2.0 * old.frame_s + 3.0);
-        self.pending_speed = Some((m, at));
+        // At the latest (Mercury not reporting PTT, or holding the frames
+        // for a busy channel): three frames' time after the channel clears.
+        let at = start + Duration::from_secs_f64(3.0 * old.frame_s + 3.0);
+        self.pending_speed = Some((m, at, 2 + ahead));
         self.log(format!(
             "Roundtable: announcing speed change {} → {} ({} bps)",
             old.name, m.name, m.payload_bps
@@ -4851,7 +4930,7 @@ impl Station {
         {
             return Ok(());
         }
-        let (host, worst, current) = {
+        let (host, worst, current, narrow) = {
             let g = self.st.lock().unwrap();
             let Some(t) = g.table.as_ref() else {
                 return Ok(());
@@ -4868,13 +4947,29 @@ impl Station {
                 .filter(|m| recent(m))
                 .filter_map(|m| m.snr_of_host)
                 .min();
-            (t.host, worst, t.mode)
+            // The narrowest bandwidth at the table, ours included.
+            let narrow = t
+                .members
+                .values()
+                .filter(|m| recent(m))
+                .filter_map(|m| m.bw)
+                .chain([self.bw])
+                .min()
+                .unwrap_or(self.bw);
+            (t.host, worst, t.mode, narrow)
         };
-        let Some(worst) = worst else { return Ok(()) };
         if !host {
             return Ok(());
         }
-        let target = modes::best_mode(self.bw, worst as f64, self.cfg.ramp_margin_db);
+        // No SNR from anyone yet: still never wider than a member can take.
+        let snr = match worst {
+            Some(w) => w as f64,
+            None if !narrow.modes().iter().any(|m| m.index == current.index) => {
+                current.min_snr_db + self.cfg.ramp_margin_db
+            }
+            None => return Ok(()),
+        };
+        let target = modes::best_mode(narrow, snr, self.cfg.ramp_margin_db);
         self.last_ramp = Instant::now();
         if target.payload_bps < current.payload_bps {
             self.last_downgrade = Instant::now();
@@ -5915,6 +6010,15 @@ impl Station {
     }
 }
 
+/// Of the offsets a matched-filter measurement could mean (itself, and a
+/// whole ambiguity `period` either way), the one nearest `coarse`.
+pub fn nearest_alias(coarse: f64, measured: f64, period: f64) -> f64 {
+    (-2..=2)
+        .map(|k| measured + k as f64 * period)
+        .min_by(|a, b| (a - coarse).abs().total_cmp(&(b - coarse).abs()))
+        .unwrap_or(measured)
+}
+
 /// Whistle watch stays off this long after a link (or connect attempt)
 /// ends, while the other station's Mercury finishes its disconnect.
 pub const WATCH_AFTER_LINK_S: f64 = 10.0;
@@ -6034,6 +6138,11 @@ fn mercury_version_reply() {
 mod tests {
     use super::*;
 
+    /// The search tests run a simulated band in real time and time a
+    /// search across it: several at once starve each other of CPU (whistles
+    /// heard late, or something heard in the noise). One at a time.
+    static REALTIME: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     /// A Mercury that opens its ports after the station started (the phone
     /// apps start the engine first): `ReconnectModem` connects to it
     /// without restarting the station, so the radio and its shared rigctld
@@ -6139,6 +6248,7 @@ mod tests {
     /// real CQFRAME, and the stations link and chat over real ARQ.
     #[test]
     fn real_mercury_demo_search_link_chat() {
+        let _one = REALTIME.lock().unwrap_or_else(|e| e.into_inner());
         if crate::realdemo::find_mercury("").is_none() {
             return;
         }
@@ -6256,6 +6366,7 @@ mod tests {
     /// stepping (on 20 m a slow runner let stepping lock on first).
     #[test]
     fn sdr_hit_interrupts_stepping_search() {
+        let _one = REALTIME.lock().unwrap_or_else(|e| e.into_inner());
         let h = spawn(|| {});
         let mut cfg = Config {
             demo: true,
@@ -6298,7 +6409,9 @@ mod tests {
                     break;
                 }
             }
-            if t.elapsed() > Duration::from_secs(60) {
+            // Alone it links in about 37 s; with the whole suite running at
+            // once (the CPU shared many ways) it can take twice that.
+            if t.elapsed() > Duration::from_secs(150) {
                 let g = h.state.lock().unwrap();
                 let log: Vec<_> = g.log.iter().map(|l| l.1.clone()).collect();
                 panic!("no link\n{}", log.join("\n"));
@@ -6314,6 +6427,7 @@ mod tests {
     /// hears the CQ and connects — without stepping through channels.
     #[test]
     fn demo_wide_search_finds_and_links() {
+        let _one = REALTIME.lock().unwrap_or_else(|e| e.into_inner());
         let h = spawn(|| {});
         let mut cfg = Config {
             demo: true,
@@ -6396,6 +6510,7 @@ mod tests {
     /// hear its CQFRAME, connect, chat, and send a zipped file.
     #[test]
     fn demo_search_connect_chat_file() {
+        let _one = REALTIME.lock().unwrap_or_else(|e| e.into_inner());
         let h = spawn(|| {});
         let mut cfg = Config {
             demo: true,
@@ -6449,6 +6564,63 @@ mod tests {
         });
         h.send(Cmd::Stop);
         std::fs::remove_dir_all(&cfg.download_dir).ok();
+    }
+
+    /// A member on 500 Hz holds the table to modes that fit 500 Hz, however
+    /// well it hears the host; and one that hasn't measured the host isn't
+    /// counted as weak.
+    #[test]
+    fn the_narrowest_member_caps_the_table() {
+        let bw500 = Bandwidth::ALL.iter().position(|b| *b == Bandwidth::Hz500).unwrap() as u8;
+        crate::fake_mercury::TEST_BOT_JOIN.lock().unwrap().push(("N0NARROW".into(), 30, Some(bw500)));
+        let h = spawn(|| {});
+        let mut cfg = Config {
+            demo: true,
+            demo_real_mercury: false,
+            callsign: "N0NARROW".into(),
+            auto_ramp: true,
+            ..Default::default()
+        };
+        cfg.sdr.enabled = false;
+        h.send(Cmd::Start(cfg));
+        let t = Instant::now();
+        while !h.state.lock().unwrap().mercury_ok {
+            assert!(t.elapsed() < Duration::from_secs(10), "no Mercury");
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        h.send(Cmd::CallCq { table: Some("Narrow Table".into()) });
+        let log = |h: &Handle| h.state.lock().unwrap().log.iter().map(|l| l.1.clone()).collect::<Vec<_>>();
+        // K7BOT joins (30 dB, 500 Hz); the host then picks its speed.
+        loop {
+            let g = h.state.lock().unwrap();
+            if g.table.as_ref().is_some_and(|t| t.members.get("K7BOT").is_some_and(|m| m.bw == Some(Bandwidth::Hz500))) {
+                break;
+            }
+            drop(g);
+            assert!(t.elapsed() < Duration::from_secs(150), "K7BOT never joined: {:#?}", log(&h));
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        std::thread::sleep(Duration::from_secs(3));
+        let l = log(&h);
+        h.send(Cmd::Stop);
+        for line in l.iter().filter(|x| x.contains("announcing speed change")) {
+            let to = line.split('→').nth(1).unwrap_or("").split_whitespace().next().unwrap_or("");
+            let m = modes::mode_by_name(to).unwrap_or_else(|| panic!("{line}"));
+            assert!(m.bandwidth_hz <= 500, "moved to {} ({} Hz) with a 500 Hz member: {line}", m.name, m.bandwidth_hz);
+        }
+    }
+
+    /// A caller further off than one ambiguity period (the scan reaches
+    /// ±1100 Hz; the period is 1000 Hz by default) is put where the scan
+    /// saw it, not 1000 Hz the other way.
+    #[test]
+    fn far_callers_alias_the_right_way() {
+        let p = 2.0 * WhistleParams::default().max_offset_hz();
+        let measured = 1050.0 - p; // a caller at +1050 measures +50 (p = 1000)
+        assert!((nearest_alias(1045.0, measured, p) - 1050.0).abs() < 1e-6);
+        assert!((nearest_alias(-1040.0, -1050.0 + p, p) + 1050.0).abs() < 1e-6);
+        assert!((nearest_alias(12.0, 10.0, p) - 10.0).abs() < 1e-6, "near ones stay");
+        assert!((nearest_alias(-480.0, 520.0 - p, p) - (520.0 - p)).abs() < 1e-6);
     }
 
     /// At a Roundtable, an SDR "Lock on" would retune the radio off the
@@ -6672,6 +6844,7 @@ mod tests {
     /// alone while Mercury links up.
     #[test]
     fn demo_auto_answer_marks_calling() {
+        let _one = REALTIME.lock().unwrap_or_else(|e| e.into_inner());
         let h = spawn(|| {});
         let mut cfg = Config {
             demo: true,
@@ -6718,6 +6891,7 @@ mod tests {
     /// joins the table: no 1:1 link that would pull its host away.
     #[test]
     fn auto_answer_joins_a_roundtable_cq() {
+        let _one = REALTIME.lock().unwrap_or_else(|e| e.into_inner());
         crate::fake_mercury::TEST_BOT_TABLE
             .lock()
             .unwrap()
