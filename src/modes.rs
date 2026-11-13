@@ -272,7 +272,21 @@ impl fmt::Display for Bandwidth {
 /// Speed ramp-up: the fastest mode within `bw` that `snr_db` supports, with
 /// `margin_db` of headroom for fading. Falls back to the most robust mode.
 pub fn best_mode(bw: Bandwidth, snr_db: f64, margin_db: f64) -> &'static Mode {
-    let allowed = bw.modes();
+    best_mode_where(bw, snr_db, margin_db, |_| true)
+}
+
+/// `best_mode` among the modes `ok` allows (a Roundtable: those whose
+/// frames its stations' calls fit). With none allowed, as `best_mode`.
+pub fn best_mode_where(
+    bw: Bandwidth,
+    snr_db: f64,
+    margin_db: f64,
+    ok: impl Fn(&Mode) -> bool,
+) -> &'static Mode {
+    let mut allowed = bw.modes();
+    if allowed.iter().any(|m| ok(m)) {
+        allowed.retain(|m| ok(m));
+    }
     allowed
         .iter()
         .filter(|m| snr_db >= m.min_snr_db + margin_db)
@@ -470,6 +484,11 @@ mod tests {
     #[test]
     fn ramps_up_with_snr() {
         let bw = Bandwidth::Hz2750;
+        // DATAC15 left out (a table with a long callsign): the next best.
+        let no15 = |m: &Mode| m.name != "DATAC15";
+        assert_eq!(best_mode(bw, -2.0, 3.0).name, "DATAC15");
+        assert_eq!(best_mode_where(bw, -2.0, 3.0, no15).name, "MFSK");
+        assert_eq!(best_mode_where(bw, -2.0, 3.0, |_| false).name, "DATAC15", "none allowed: as best_mode");
         assert_eq!(best_mode(bw, -12.0, 0.0).name, "MFSK500");
         assert_eq!(best_mode(bw, -10.0, 0.0).name, "MFSK");
         assert_eq!(best_mode(bw, 2.0, 1.0).name, "DATAC3");

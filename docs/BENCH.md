@@ -70,6 +70,7 @@ Slower scenarios run only when named (not part of a run with no names):
 | `e2e_require` | ALPHA on encryption Require, BRAVO Off. ALPHA queues a chat and a file as soon as the link is up; ALPHA must end the link with a reason, and neither may reach BRAVO. |
 | `away_long` | BRAVO away, `away_idle_s` 60 (Settings' minimum), 500 Hz: a 4 KB file takes several minutes. No hang-up mid-transfer; hang-up about 60 s after it ends (the 30 s signal reports don't count). |
 | `away_weak` | The same with 20 dB more noise and a 3 KB file. |
+| `table_slow` | ALPHA hosts "Sunday Morning Net"; once BRAVO has joined, 12 dB of noise is added and ALPHA's ramp margin set from BRAVO's report, so the table drops from DATAC1 to DATAC15 (27-byte frames). A message ALPHA queues while the change is announced (cut for DATAC1) is split again and reaches BRAVO; BRAVO's reports (31 bytes with the name) still reach the host; a ~560-character message from BRAVO goes as several and all of it arrives. About 15 min. |
 
 For example `... bench-run cancel chat_during resume e2e_require away_long away_weak`
 (about 30 min).
@@ -137,6 +138,57 @@ building any audio stream now reports its message instead of "did not
 start". Checked with `airtest whistle`: 4/4, no false alarm in 15 s of
 quiet, then the computer heard the phone's CQ whistle 3 s in (score 0.9).
 
+## Roundtables at the slowest speed (2026-11-13)
+
+Mercury 1.9.23 on the ether, Ubuntu on WSL 2, on top of `3bc4b05`:
+
+| Set | Result |
+|---|---|
+| Standard two-station | **35/35** |
+| Slower (`cancel chat_during resume e2e_require away_long away_weak`) | **18/18** |
+| `table_slow` (new) | **4/4** after the fixes below (its setup now adds noise until BRAVO's report lets a margin of 20 dB or less set DATAC15) |
+| Three-station (`table3 relay3 cq_pileup busy3`) | **31/32**: `cq_pileup` "no false whistles once linked" failed in both of today's runs (CHARLIE, having lost the pileup, reported whistles at −4/+194 and −49/−87 Hz from the ALPHA–BRAVO traffic). Not touched by these changes; it passed on 11-12 before `341a375` made shown TX follow the radio, which may have been holding the whistle watch off after the losing call |
+
+`table_slow` hosts "Sunday Morning Net" and pushes the table down to
+DATAC15 (27-byte broadcast frames). Found and fixed:
+
+- **Frames too big for the mode were cut by Mercury and lost.** A member's
+  report with the table name (31 bytes), a request to repeat a whole
+  message (30+), and a message made for a faster speed (queued, or kept to
+  repeat, before the table slowed down: 120–500 bytes). Reports leave the
+  name out, requests ask for fewer parts, and such a message is split again
+  (same id, a different total; a receiver starts it over). At DATAC15 a
+  long message goes as several, each with no more parts than a request can
+  name; the host skips DATAC15 while a call of 8+ characters is at the table.
+- **Frames piled up in Mercury and came out garbled after a speed change.**
+  Mercury's frames take 0.2–0.6 s longer than `frame_s` (DATAC3 3.81 s,
+  DATAC15 4.35 s, DATAC1 4.79 s, measured from its PTT), so a long message
+  left frames queued in Mercury; it keeps them as one byte stream and after
+  a `MODE` reads them at the new frame size. ALPHA's Mercury decoded every
+  one of BRAVO's later frames (+10 dB) as `type=0` and dropped them. Table
+  frames now go to Mercury one at a time, after its PTT OFF.
+- **A member sending a long message left the table.** Four minutes of its
+  own transmitting counted as "nothing heard"; it moved to DATAC3 and the
+  rest went where the host wasn't listening.
+- **Requests to repeat went out on top of what they asked for**, every 20 s
+  while the message was still coming in, three at a time (13 s of air in
+  20 at DATAC15), and each request queued the parts again (BRAVO sent 13
+  frames a minute, mostly repeats). Now: only once the message has stopped
+  coming and the table is quiet for two frames; a part already queued isn't
+  queued again; heartbeats and reports also wait for a gap (a minute at
+  most). The normal Roundtable message went from 40–65 s to 16 s.
+- **The speed see-sawed.** On the same channel Mercury reads DATAC15 frames
+  +16.6 dB and DATAC3 ones +10.1 dB, so the host sped up from DATAC15, the
+  reports dropped, it slowed down (up, down, up within 6 min, catching a
+  member mid-message). A speed-up undone within 5 minutes now doubles the
+  wait before the next (2 → 32 min), and none is made while a member is
+  sending.
+- **A station's messages could show out of order** (the second of a long
+  message complete before a repeated part of the first): later ones now wait
+  up to 2 minutes for an earlier one from the same station.
+
+Also: Mercury closing while it had the radio keyed left TX shown for ever;
+a grid setting over ~100 characters hung the station at its next Station ID.
 ## The rest of the third hunt's list (2026-11-13)
 
 - **Roundtable speed changes** now switch when Mercury reports both

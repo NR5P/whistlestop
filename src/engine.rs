@@ -290,6 +290,13 @@ const TABLE_LOST_AFTER: Duration = Duration::from_secs(240);
 /// its speeds tried meanwhile) takes it as closed and leaves, so the
 /// station's schedule, Station ID and Depot automation carry on.
 pub const TABLE_GIVE_UP: Duration = Duration::from_secs(15 * 60);
+/// The host's wait after a downgrade before speeding up again (doubled each
+/// time a speed-up doesn't hold, up to `UPGRADE_WAIT_MAX`).
+pub const UPGRADE_WAIT: Duration = Duration::from_secs(120);
+pub const UPGRADE_WAIT_MAX: Duration = Duration::from_secs(32 * 60);
+/// How long a finished table message waits for an earlier one from the same
+/// station before it's shown anyway.
+pub const TABLE_HOLD: Duration = Duration::from_secs(120);
 /// A member whose report says it can't copy the table's speed expects the
 /// host to slow down; if no announcement comes in this time, it slows down
 /// by itself (it would never copy the one sent at the faster speed).
@@ -724,7 +731,12 @@ struct Station {
     last_report: Instant,
     // roundtable
     table_asm: TableAssembler,
-    table_sent: HashMap<u64, Vec<Vec<u8>>>,
+    /// Messages complete but shown only once an earlier one from the same
+    /// station is (or for at most `TABLE_HOLD`): (from, id, text, since).
+    table_held: Vec<(String, u64, String, Instant)>,
+    /// Our recent table messages by id: the text, and the frames it went
+    /// out in (resent on AGAIN; split again if the table slowed down).
+    table_sent: HashMap<u64, (String, Vec<Vec<u8>>)>,
     table_msg_id: u64,
     table_queue: VecDeque<Vec<u8>>,
     table_busy_until: Instant,
@@ -733,6 +745,11 @@ struct Station {
     restore_calling_mode: bool,
     last_ramp: Instant,
     last_downgrade: Instant,
+    /// The host's last speed-up, and how long it waits after a downgrade
+    /// before the next: doubled (up to 32 min) each time a speed-up is
+    /// undone within 5 minutes, back to 2 min once a speed holds for 10.
+    last_upgrade: Option<Instant>,
+    upgrade_wait: Duration,
     last_again: Instant,
     // activities
     search: Option<Search>,
@@ -760,6 +777,8 @@ struct Station {
     /// (its PTT lines). The shown TX is either, or what the radio reports.
     engine_keyed: bool,
     mercury_ptt: bool,
+    /// When Mercury last keyed up (its PTT ON).
+    mercury_ptt_at: Instant,
     /// An unkey that failed (CAT upset by RF, rigctld not answering): it's
     /// owed to the radio and retried on every poll until it goes through.
     unkey_owed: bool,
@@ -825,6 +844,9 @@ struct Station {
     /// also reset by each change of speed while looking for it).
     table_heard_any: Instant,
     last_table_sent: Instant,
+    /// When our last message frame (TEXT) went out: while we talk we can't
+    /// hear the table, so that silence doesn't count as the table's.
+    table_talked: Instant,
     /// The table's speed as last announced to us (members).
     table_announced: Option<&'static Mode>,
     /// A member not yet known to be in step with the host (just joined, or
@@ -998,6 +1020,7 @@ impl Station {
             est: ThroughputEstimator::default(),
             last_report: Instant::now(),
             table_asm: TableAssembler::default(),
+            table_held: Vec::new(),
             table_sent: HashMap::new(),
             // Random start: other members remember finished messages by
             // (call, id) for 10 minutes, so numbers that restart at 1
@@ -1008,6 +1031,8 @@ impl Station {
             restore_calling_mode: false,
             last_ramp: Instant::now(),
             last_downgrade: Instant::now() - Duration::from_secs(600),
+            last_upgrade: None,
+            upgrade_wait: UPGRADE_WAIT,
             last_again: Instant::now(),
             search: None,
             cq: None,
@@ -1024,6 +1049,7 @@ impl Station {
             rig_watch: false,
             engine_keyed: false,
             mercury_ptt: false,
+            mercury_ptt_at: Instant::now(),
             unkey_owed: false,
             rig_err: None,
             last_ext_poll: Instant::now(),
@@ -1079,6 +1105,7 @@ impl Station {
             last_table_heard: Instant::now(),
             table_heard_any: Instant::now(),
             last_table_sent: Instant::now(),
+            table_talked: Instant::now(),
             table_announced: None,
             table_unsynced: false,
             expect_slowdown: None,
@@ -1668,7 +1695,9 @@ impl Station {
     }
 
     async fn poll_rig(&mut self) {
-        if self.unkey_owed && !self.engine_keyed {
+        // Not while Mercury is keyed: that would cut its frame short. Its own
+        // unkey comes at the frame's end, and the owed one after.
+        if self.unkey_owed && !self.engine_keyed && !self.mercury_ptt {
             let ok = match self.rig.as_mut() {
                 Some(r) => r.ptt(false).await.is_ok(),
                 None => return,
@@ -2767,7 +2796,7 @@ impl Station {
                             .iter()
                             .position(|b| *b == self.bw)
                             .unwrap_or(4) as u8,
-                        grid: self.cfg.grid.clone(),
+                        grid: self.air_grid(),
                     },
                 };
                 self.table_tx(call.encode());
@@ -2876,7 +2905,18 @@ impl Station {
                 self.log(format!("⚠ Mercury closed the {which} connection"));
                 self.tnc = None;
                 self.tnc_rx = None;
-                self.set(|g| g.mercury_ok = false);
+                // Gone in the middle of a transmission: its PTT OFF will never
+                // come. Don't show TX for ever, and unkey the radio in case
+                // Mercury keyed it itself.
+                if std::mem::take(&mut self.mercury_ptt) {
+                    self.unkey_owed = true;
+                    self.log("Mercury went while transmitting: unkeying the radio".into());
+                }
+                let keyed = self.engine_keyed;
+                self.set(|g| {
+                    g.mercury_ok = false;
+                    g.tx = keyed;
+                });
                 // Its link went with it, and no DISCONNECTED will come for
                 // it: end it here, so its keys, queues and peer don't carry
                 // over to the Mercury we reconnect to.
@@ -2959,7 +2999,7 @@ impl Station {
                     version: VERSION,
                     caps: CAP_RESUME | CAP_ZIP,
                     name: self.cfg.name.clone(),
-                    grid: self.cfg.grid.clone(),
+                    grid: self.air_grid(),
                     app: format!("Whistlestop {}", env!("CARGO_PKG_VERSION")),
                 };
                 let policy = self.cfg.e2e;
@@ -3183,6 +3223,9 @@ impl Station {
             }
             "PTT" => {
                 let on = l.ends_with("ON");
+                if on && !self.mercury_ptt {
+                    self.mercury_ptt_at = Instant::now();
+                }
                 self.mercury_ptt = on;
                 // One more frame off the air for a waiting speed change.
                 if !on && let Some((_, _, owed)) = self.pending_speed.as_mut() {
@@ -4190,6 +4233,7 @@ impl Station {
         // A new table: parts still missing from the last one would be
         // asked for (AGAIN) here, where nobody can send them.
         self.table_asm = TableAssembler::default();
+        self.table_held.clear();
         self.table_sent.clear();
         let mode = modes::mode_by_name("DATAC3").unwrap();
         self.tnc()?.command(&format!("MODE {}", mode.index)).await?;
@@ -4283,30 +4327,158 @@ impl Station {
                 .ok_or_else(|| anyhow::anyhow!("not at a Roundtable: join or host one first"))?;
             (t.id, t.mode)
         };
-        self.table_msg_id += 1;
         let me = self.mycall();
-        let frames = table_text_frames(id, &me, self.table_msg_id, &text, mode.broadcast_bytes())?;
-        let eta = frames.len() as f64 * mode.frame_s;
-        self.table_sent.insert(self.table_msg_id, frames.clone());
-        // Repeats are asked for within minutes: keep the last 64 messages.
-        let oldest = self.table_msg_id.saturating_sub(64);
-        self.table_sent.retain(|id, _| *id > oldest);
-        self.table_queue.extend(frames);
-        self.set(|g| {
-            if let Some(t) = g.table.as_mut() {
-                t.lines.push((Clock::now(), me, text));
-                t.sending_eta_s += eta;
-            }
-        });
+        // At the slowest speeds, a request to resend part n of a message
+        // (a bitmap) fits a frame only for the first so many parts: a long
+        // message goes out as several shorter ones.
+        let limit = crate::protocol::again_parts_limit(mode.broadcast_bytes(), &self.table_calls());
+        let pieces = crate::protocol::split_for_parts(&me, &text, mode.broadcast_bytes(), limit)?;
+        for text in pieces {
+            self.table_msg_id += 1;
+            let frames = table_text_frames(id, &me, self.table_msg_id, &text, mode.broadcast_bytes())?;
+            let eta = frames.len() as f64 * mode.frame_s;
+            self.table_sent.insert(self.table_msg_id, (text.clone(), frames.clone()));
+            // Repeats are asked for within minutes: keep the last 64 messages.
+            let oldest = self.table_msg_id.saturating_sub(64);
+            self.table_sent.retain(|id, _| *id > oldest);
+            self.table_queue.extend(frames);
+            let me = me.clone();
+            self.set(|g| {
+                if let Some(t) = g.table.as_mut() {
+                    t.lines.push((Clock::now(), me, text));
+                    t.sending_eta_s += eta;
+                }
+            });
+        }
         Ok(())
+    }
+
+    /// `f` as it can go out in `mode`'s frames: as it is if it fits; a JOIN
+    /// without the table name, an AGAIN for fewer parts; one of our
+    /// messages split again into smaller parts, all of them sent again
+    /// (the parts are numbered anew). None: dropped, and logged.
+    fn fit_table_frame(&mut self, f: Vec<u8>, mode: &'static Mode) -> Option<Vec<u8>> {
+        let max = mode.broadcast_bytes();
+        if f.len() <= max {
+            return Some(f);
+        }
+        let me = self.mycall();
+        if let Some(TableFrame {
+            table,
+            from,
+            body: TableBody::Text { id, total, .. },
+        }) = TableFrame::decode(&f)
+            && from == me
+            && let Some((text, _)) = self.table_sent.get(&id).cloned()
+        {
+            // A smaller split always has a different total, so a station
+            // holding parts of the old one knows to start over.
+            let mut room = max;
+            let frames = loop {
+                match table_text_frames(table, &me, id, &text, room) {
+                    Ok(v) if v.len() != total as usize => break Ok(v),
+                    Ok(_) => room -= 1,
+                    Err(e) => break Err(e),
+                }
+            };
+            let frames = match frames {
+                Ok(f) => f,
+                Err(e) => {
+                    self.log(format!(
+                        "Roundtable: your message {id} can't go out again in {} ({e}); dropped",
+                        mode.name
+                    ));
+                    return None;
+                }
+            };
+            // The old parts still queued go; the new ones take their place.
+            self.table_queue.retain(|q| {
+                !matches!(TableFrame::decode(q), Some(TableFrame {
+                    body: TableBody::Text { id: i, .. }, ..
+                }) if i == id)
+            });
+            self.log(format!(
+                "Roundtable: message {id} split again into {} parts for {}",
+                frames.len(),
+                mode.name
+            ));
+            self.table_sent.insert(id, (text, frames.clone()));
+            let mut it = frames.into_iter();
+            let first = it.next();
+            for (i, fr) in it.enumerate() {
+                self.table_queue.insert(i, fr);
+            }
+            return first;
+        }
+        let small = crate::protocol::shrink_table_frame(&f, max);
+        // An AGAIN that can't be made to fit (a high part of a message re-
+        // split for this speed) is asked again every 20 s: not logged.
+        let again = matches!(TableFrame::decode(&f), Some(TableFrame { body: TableBody::Again { .. }, .. }));
+        if small.is_none() && !again {
+            self.log(format!(
+                "Roundtable: a {}-byte frame doesn't fit {} ({max} bytes); dropped",
+                f.len(),
+                mode.name
+            ));
+        }
+        small
+    }
+
+    /// Mercury is transmitting (its PTT ON), for at most a minute: a PTT OFF
+    /// that never came doesn't hold table traffic for ever.
+    fn mercury_on_air(&self) -> bool {
+        self.mercury_ptt && self.mercury_ptt_at.elapsed() < Duration::from_secs(60)
+    }
+
+    /// Shows the finished messages in `table_held` that can be: each
+    /// station's in the order it sent them. One whose earlier message is
+    /// still being filled in waits, for at most `TABLE_HOLD` (a long
+    /// message sent as several at the slowest speed, with a part of the
+    /// first repeated, would otherwise show its end first).
+    fn show_table_lines(&mut self) {
+        let mut held = std::mem::take(&mut self.table_held);
+        held.sort_by(|a, b| (&a.0, a.1).cmp(&(&b.0, b.1)));
+        let mut show = vec![];
+        let mut keep = vec![];
+        for h in held {
+            let waiting = keep.iter().any(|k: &(String, u64, String, Instant)| k.0 == h.0);
+            if !waiting && (h.3.elapsed() >= TABLE_HOLD || !self.table_asm.pending_before(&h.0, h.1)) {
+                show.push((h.0, h.2));
+            } else {
+                keep.push(h);
+            }
+        }
+        self.table_held = keep;
+        if !show.is_empty() {
+            self.set(|g| {
+                if let Some(t) = g.table.as_mut() {
+                    for (from, text) in show {
+                        t.lines.push((Clock::now(), from, text));
+                    }
+                }
+            });
+        }
+    }
+
+    /// The callsigns at our table, ours included: the modes whose frames
+    /// they don't fit are left out of the speed ramp.
+    fn table_calls(&self) -> Vec<String> {
+        let mut v = vec![self.mycall()];
+        if let Some(t) = self.st.lock().unwrap().table.as_ref() {
+            v.extend(t.members.keys().cloned());
+            v.extend(t.host_call.clone());
+        }
+        v
     }
 
     /// Transmit queued table frames one modem frame at a time.
     async fn step_table_tx(&mut self) -> anyhow::Result<()> {
         if let Some((m, at, owed)) = self.pending_speed {
             // Held until the announcements are off the air (Mercury's PTT
-            // OFFs counted), or the latest time if it doesn't say.
-            if owed > 0 && Instant::now() < at {
+            // OFFs counted), or the latest time if it doesn't say; and never
+            // while Mercury is still sending: frames left in Mercury at a
+            // MODE change come out cut to the new size.
+            if (owed > 0 && Instant::now() < at) || self.mercury_on_air() {
                 return Ok(()); // hold table traffic until the switch
             }
             self.pending_speed = None;
@@ -4318,6 +4490,14 @@ impl Station {
         }
         // A 1:1 link (one that came in while at the table): broadcasts
         // now would go out on top of it. Table traffic waits for it to end.
+        // Mercury still sending the last frame (it takes 0.2-0.6 s longer
+        // than `frame_s`): the next waits, so none ever queue up in Mercury.
+        // Mercury keeps its broadcast frames as one run of bytes and, after a
+        // speed change, reads the ones left at the new frame size: they and
+        // all that follow came out as garbage.
+        if self.mercury_on_air() {
+            return Ok(());
+        }
         if Instant::now() < self.table_busy_until || self.tnc.is_none() || self.peer.is_some() {
             return Ok(());
         }
@@ -4363,8 +4543,17 @@ impl Station {
             .unwrap()
             .listen_mode
             .unwrap_or(&modes::MODES[4]);
+        // Made for a faster speed (queued, or kept for AGAIN, before the
+        // table slowed down): Mercury would cut it short, and nobody could
+        // read it.
+        let Some(f) = self.fit_table_frame(f, mode) else {
+            return Ok(());
+        };
         self.tnc()?.send_broadcast(&f).await?;
         self.last_table_sent = Instant::now();
+        if matches!(TableFrame::decode(&f), Some(TableFrame { body: TableBody::Text { .. }, .. })) {
+            self.table_talked = Instant::now();
+        }
         self.table_busy_until = Instant::now() + Duration::from_secs_f64(mode.frame_s + 0.4);
         let left = self.table_queue.len() as f64 * mode.frame_s;
         self.set(|g| {
@@ -4526,13 +4715,14 @@ impl Station {
                 total,
                 data,
             } => {
+                self.set(|g| {
+                    if let Some(t) = g.table.as_mut() {
+                        t.members.entry(from.clone()).or_default().last = Some(Instant::now());
+                    }
+                });
                 if let Some(text) = self.table_asm.add(&from, id, part, total, &data) {
-                    self.set(|g| {
-                        if let Some(t) = g.table.as_mut() {
-                            t.lines.push((Clock::now(), from.clone(), text));
-                            t.members.entry(from).or_default().last = Some(Instant::now());
-                        }
-                    });
+                    self.table_held.push((from, id, text, Instant::now()));
+                    self.show_table_lines();
                 }
             }
             // A JOIN, or a member's periodic report (the same frame).
@@ -4596,10 +4786,12 @@ impl Station {
             }
             TableBody::Again { of, id, missing } => {
                 if of == self.mycall()
-                    && let Some(frames) = self.table_sent.get(&id).cloned()
+                    && let Some((_, frames)) = self.table_sent.get(&id).cloned()
                 {
                     for (i, fr) in frames.into_iter().enumerate() {
-                        if missing & (1 << i) != 0 {
+                        // Asked for again (by another member, or a request
+                        // repeated) while it's still waiting to go: once.
+                        if missing & (1 << i) != 0 && !self.table_queue.contains(&fr) {
                             self.table_queue.push_back(fr);
                         }
                     }
@@ -4676,6 +4868,15 @@ impl Station {
         let me = self.mycall();
         let calling = modes::mode_by_name("DATAC3").expect("DATAC3");
         if !host {
+            // Sending a long message (minutes, at the slowest speeds) we hear
+            // nothing of the table: that's not the table gone quiet. The
+            // clocks below count from the end of our talking.
+            if self.table_talked > self.last_table_heard {
+                self.last_table_heard = self.table_talked;
+            }
+            if self.table_talked > self.table_heard_any {
+                self.table_heard_any = self.table_talked;
+            }
             if self.table_heard_any.elapsed() >= TABLE_GIVE_UP {
                 let m = TABLE_GIVE_UP.as_secs() / 60;
                 self.log(format!(
@@ -4687,7 +4888,13 @@ impl Station {
                 self.leave_table();
                 return Ok(());
             }
-            if self.last_table_report.elapsed() >= TABLE_REPORT_EVERY {
+            // Into a quiet table (not over someone's message), but not held
+            // back more than a minute by a busy one: the host counts on it.
+            let quiet = Duration::from_secs_f64(2.0 * mode.frame_s + 2.0);
+            let due = self.last_table_report.elapsed();
+            if due >= TABLE_REPORT_EVERY
+                && (self.last_table_heard.elapsed() >= quiet || due >= TABLE_REPORT_EVERY + Duration::from_secs(60))
+            {
                 self.send_table_report();
             }
             // Our report said we can't copy this speed and no slow-down
@@ -4728,10 +4935,15 @@ impl Station {
             }
             return Ok(());
         }
-        // A host with nothing to say: a heartbeat at the table's speed.
+        // A host with nothing to say: a heartbeat at the table's speed. Not
+        // over a member's message (a table that's talking needs none),
+        // though at most a minute late.
+        let quiet = Duration::from_secs_f64(2.0 * mode.frame_s + 2.0);
+        let due = self.last_table_sent.elapsed();
         if self.join_window.is_none()
             && self.table_queue.is_empty()
-            && self.last_table_sent.elapsed() >= TABLE_HEARTBEAT
+            && due >= TABLE_HEARTBEAT
+            && (self.last_table_heard.elapsed() >= quiet || due >= TABLE_HEARTBEAT + Duration::from_secs(60))
         {
             self.last_table_sent = Instant::now();
             self.table_tx(
@@ -4767,8 +4979,13 @@ impl Station {
                         .filter_map(|m| m.snr_of_host)
                         .min()
                 });
+            let calls = self.table_calls();
             let target = worst
-                .map(|w| modes::best_mode(self.bw, w as f64, self.cfg.ramp_margin_db))
+                .map(|w| {
+                    modes::best_mode_where(self.bw, w as f64, self.cfg.ramp_margin_db, |m| {
+                        crate::protocol::table_frames_fit(m.broadcast_bytes(), &calls)
+                    })
+                })
                 .filter(|m| m.payload_bps < back.payload_bps)
                 .unwrap_or(back);
             if target.payload_bps > calling.payload_bps {
@@ -4798,7 +5015,7 @@ impl Station {
                         .iter()
                         .position(|b| *b == self.bw)
                         .unwrap_or(4) as u8,
-                    grid: self.cfg.grid.clone(),
+                    grid: self.air_grid(),
                 },
             };
             self.table_tx(call.encode());
@@ -4969,14 +5186,37 @@ impl Station {
             }
             None => return Ok(()),
         };
-        let target = modes::best_mode(narrow, snr, self.cfg.ramp_margin_db);
+        let calls = self.table_calls();
+        let target = modes::best_mode_where(narrow, snr, self.cfg.ramp_margin_db, |m| {
+            crate::protocol::table_frames_fit(m.broadcast_bytes(), &calls)
+        });
         self.last_ramp = Instant::now();
+        // A speed that has held for 10 minutes: speed-ups are trusted again.
+        if self.last_downgrade.elapsed() > Duration::from_secs(600) {
+            self.upgrade_wait = UPGRADE_WAIT;
+        }
         if target.payload_bps < current.payload_bps {
             self.last_downgrade = Instant::now();
+            // Undoing a speed-up made minutes ago: the reports swing with the
+            // speed (Mercury reads the same signal some dB better in the
+            // slow modes), and each change can catch a member mid-message.
+            // Wait longer before the next.
+            if self.last_upgrade.take().is_some_and(|t| t.elapsed() < Duration::from_secs(300)) {
+                self.upgrade_wait = (self.upgrade_wait * 2).min(UPGRADE_WAIT_MAX);
+                self.log(format!(
+                    "Roundtable: the last speed-up didn't hold; the next waits {} min",
+                    self.upgrade_wait.as_secs() / 60
+                ));
+            }
             self.table_set_speed(target).await?;
         } else if target.payload_bps > current.payload_bps
-            && self.last_downgrade.elapsed() > Duration::from_secs(120)
+            && self.last_downgrade.elapsed() > self.upgrade_wait
+            // Not while a member is sending (a long message): it can't hear
+            // the announcement, and would be left at the old speed for
+            // minutes. A slow-down can't wait; a speed-up can.
+            && self.last_table_heard.elapsed() > Duration::from_secs_f64(2.0 * current.frame_s + 2.0)
         {
+            self.last_upgrade = Some(Instant::now());
             self.table_set_speed(target).await?;
         }
         Ok(())
@@ -5111,14 +5351,28 @@ impl Station {
 
         // Roundtable housekeeping: ask again for missing parts; host ramps.
         if self.table_id().is_some() {
-            if self.last_again.elapsed() > Duration::from_secs(20) {
+            if !self.table_held.is_empty() {
+                self.show_table_lines();
+            }
+            // And only into a quiet table, not on the air ourselves: a
+            // request sent over someone's frames costs one of them, and the
+            // repeats it asks for need the channel too.
+            let frame_s = self.st.lock().unwrap().table.as_ref().map(|t| t.mode.frame_s).unwrap_or(4.0);
+            let quiet = Duration::from_secs_f64(2.0 * frame_s + 2.0);
+            if self.last_again.elapsed() > Duration::from_secs(20)
+                && self.last_table_heard.elapsed() >= quiet
+                && !self.mercury_on_air()
+                && self.table_queue.is_empty()
+            {
                 self.last_again = Instant::now();
                 let id = self.table_id().unwrap();
                 let me = self.mycall();
                 // A few per round, oldest first: each is a frame on the air,
                 // and a long gap (or a sender gone for good) mustn't keep
                 // this station transmitting.
-                let mut wanted = self.table_asm.missing();
+                // Not a message still coming in (its next part due within a
+                // frame or two): the request would go out on top of it.
+                let mut wanted = self.table_asm.missing_quiet(quiet);
                 wanted.sort_by(|a, b| (&a.0, a.1).cmp(&(&b.0, b.1)));
                 for (of, mid, missing) in wanted.into_iter().take(AGAIN_PER_ROUND) {
                     self.table_tx(
@@ -5587,6 +5841,14 @@ impl Station {
         Ok(())
     }
 
+    /// The grid as it goes on the air: a Maidenhead locator is at most 8
+    /// letters and digits, and the setting is free text. (A long one made
+    /// the Station ID frame too big for any list of mail, and the loop
+    /// trimming that list never ended.)
+    fn air_grid(&self) -> String {
+        air_grid(&self.cfg.grid)
+    }
+
     fn send_beacon(&mut self, why: &str) -> anyhow::Result<()> {
         if self.tnc.is_none() || !crate::protocol::valid_call(&self.mycall()) {
             // Counts as an attempt: otherwise the automation step would retry
@@ -5601,7 +5863,7 @@ impl Station {
             table: 0,
             from: me.clone(),
             body: TableBody::Beacon {
-                grid: self.cfg.grid.clone(),
+                grid: self.air_grid(),
                 away: self.away,
                 mail_for: mail_for.clone(),
             },
@@ -5609,14 +5871,13 @@ impl Station {
         .encode()
         .len()
             > 120
-        {
-            mail_for.pop();
-        }
+            && mail_for.pop().is_some()
+        {}
         let f = TableFrame {
             table: 0,
             from: me,
             body: TableBody::Beacon {
-                grid: self.cfg.grid.clone(),
+                grid: self.air_grid(),
                 away: self.away,
                 mail_for: mail_for.clone(),
             },
@@ -6132,6 +6393,11 @@ fn mercury_version_reply() {
         "Mercury (VARA-compatible 4.9.0)"
     );
     assert_eq!(version_text("VERSION Mercury 1.9.23"), "Mercury 1.9.23");
+}
+
+/// See `Station::air_grid`.
+fn air_grid(grid: &str) -> String {
+    grid.chars().filter(|c| c.is_ascii_alphanumeric()).take(8).collect()
 }
 
 #[cfg(test)]
@@ -6933,6 +7199,80 @@ mod tests {
         assert!(g.link.is_none() && g.calling.is_none(), "{:?}", g.calling);
         drop(g);
         h.send(Cmd::Stop);
+    }
+
+    /// Mercury going away in the middle of a transmission (its PTT ON was
+    /// the last word) doesn't leave TX shown for ever: that holds off the
+    /// whistle watch and all automation.
+    #[test]
+    fn mercury_gone_mid_transmission_clears_tx() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let f = rt
+            .block_on(crate::fake_mercury::FakeMercury::start(FakeOptions {
+                fast: true,
+                ..Default::default()
+            }))
+            .unwrap();
+        let h = spawn(|| {});
+        let mut cfg = Config {
+            callsign: "N0TX".into(),
+            demo: false,
+            rigctld: "none".into(),
+            mercury_port: f.port,
+            mercury_bcast_port: f.bcast_port,
+            ..Default::default()
+        };
+        cfg.sdr.enabled = false;
+        cfg.sdr.wide_search = false;
+        h.send(Cmd::Start(cfg));
+        let wait = |what: &str, secs: u64, f: &dyn Fn(&State) -> bool| {
+            let t = Instant::now();
+            while t.elapsed() < Duration::from_secs(secs) {
+                if f(&h.state.lock().unwrap()) {
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            let g = h.state.lock().unwrap();
+            let log: Vec<_> = g.log.iter().map(|l| l.1.clone()).collect();
+            panic!("timed out waiting for {what}; log:\n{}", log.join("\n"));
+        };
+        wait("Mercury", 10, &|s| s.mercury_ok);
+        h.send(Cmd::Tune(true)); // Mercury: PTT ON
+        wait("TX", 10, &|s| s.tx);
+        f.stop();
+        wait("Mercury gone", 10, &|s| !s.mercury_ok);
+        wait("TX cleared", 5, &|s| !s.tx);
+        assert!(h.state.lock().unwrap().log.iter().any(|l| l.1.contains("went while transmitting")));
+        h.send(Cmd::Stop);
+        drop(rt);
+    }
+
+    /// The grid on the air is a locator's worth (8 letters and digits) of
+    /// whatever was typed; a Station ID with a long one still fits a frame.
+    #[test]
+    fn grid_on_the_air() {
+        assert_eq!(air_grid(" em12ab "), "em12ab");
+        assert_eq!(air_grid("EM12 ab, near Dallas"), "EM12abne");
+        assert_eq!(air_grid(""), "");
+        let mut mail_for: Vec<String> = (0..40).map(|i| format!("W{i}ABC")).collect();
+        let long = "X".repeat(300);
+        let enc = |m: &Vec<String>, g: &str| {
+            TableFrame {
+                table: 0,
+                from: "N0CALL".into(),
+                body: TableBody::Beacon {
+                    grid: air_grid(g),
+                    away: false,
+                    mail_for: m.clone(),
+                },
+            }
+            .encode()
+            .len()
+        };
+        while enc(&mail_for, &long) > 120 && mail_for.pop().is_some() {}
+        assert!(enc(&mail_for, &long) <= 120);
+        assert!(!mail_for.is_empty());
     }
 
     /// The host closing its table (LEAVE) takes its members with it: they

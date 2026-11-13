@@ -1124,6 +1124,135 @@ pub fn table_text_frames(
         .collect())
 }
 
+/// A table frame (not TEXT) made to fit a broadcast frame of `max` bytes:
+/// a JOIN leaves its table name out (the host knows its table by number),
+/// an AGAIN asks only for the lowest of its missing parts (the rest are
+/// asked for in later rounds). None if it can't be made to fit. A TEXT
+/// frame isn't shrunk: its whole message is split again instead.
+pub fn shrink_table_frame(f: &[u8], max: usize) -> Option<Vec<u8>> {
+    if f.len() <= max {
+        return Some(f.to_vec());
+    }
+    let mut fr = TableFrame::decode(f)?;
+    match &mut fr.body {
+        TableBody::Join { table_name, .. } => table_name.clear(),
+        TableBody::Again { .. } => loop {
+            let e = fr.encode();
+            if e.len() <= max {
+                return Some(e);
+            }
+            let TableBody::Again { missing, .. } = &mut fr.body else {
+                unreachable!()
+            };
+            if missing.count_ones() <= 1 {
+                return None;
+            }
+            *missing &= !(1u64 << (63 - missing.leading_zeros()));
+        },
+        _ => return None,
+    }
+    let e = fr.encode();
+    (e.len() <= max).then_some(e)
+}
+
+/// The largest table number, and a message id beyond any session's (ids
+/// start below 2^20): the worst case when sizing frames.
+const WORST_TABLE: u16 = u16::MAX;
+const WORST_ID: u64 = 1 << 20;
+
+/// The two longest of `calls` (the second may be the first again).
+fn two_longest(calls: &[String]) -> Option<(&str, &str)> {
+    let mut v: Vec<&str> = calls.iter().map(String::as_str).collect();
+    v.sort_by_key(|c| std::cmp::Reverse(c.len()));
+    let a = *v.first()?;
+    Some((a, v.get(1).copied().unwrap_or(a)))
+}
+
+/// How many parts a message may have so that an AGAIN for any one of them,
+/// between any two of these `calls`, fits a broadcast frame of `max` bytes
+/// (the bitmap grows with the part's number). 64 in all but the smallest
+/// frames; 0 if not even part 1 fits.
+pub fn again_parts_limit(max: usize, calls: &[String]) -> usize {
+    let Some((a, b)) = two_longest(calls) else { return 64 };
+    (1..=64)
+        .rev()
+        .find(|n| {
+            TableFrame {
+                table: WORST_TABLE,
+                from: a.into(),
+                body: TableBody::Again {
+                    of: b.into(),
+                    id: WORST_ID,
+                    missing: 1 << (n - 1),
+                },
+            }
+            .encode()
+            .len()
+                <= max
+        })
+        .unwrap_or(0)
+}
+
+/// Whether a table whose stations have these `calls` can work in broadcast
+/// frames of `max` bytes: each can send TEXT (`table_text_frames` takes
+/// the frame), in messages of 8 parts or more that can all be asked for again
+/// (JOIN, SPEED, FLOOR and LEAVE are smaller). Long callsigns don't fit the
+/// smallest modes.
+pub fn table_frames_fit(max: usize, calls: &[String]) -> bool {
+    let Some((a, _)) = two_longest(calls) else { return true };
+    let text = table_text_frames(WORST_TABLE, a, WORST_ID, "x", max).is_ok();
+    text && again_parts_limit(max, calls) >= 8
+}
+
+/// `text` as Roundtable messages of at most `limit` parts each in frames
+/// of `frame_bytes` (see `again_parts_limit`): as it is when it fits,
+/// otherwise cut into several, between words where it can be.
+pub fn split_for_parts(from: &str, text: &str, frame_bytes: usize, limit: usize) -> Result<Vec<String>> {
+    let parts = |s: &str| table_text_frames(WORST_TABLE, from, WORST_ID, s, frame_bytes).map(|v| v.len());
+    if limit >= 64 || parts(text).is_ok_and(|n| n <= limit) {
+        return Ok(vec![text.to_string()]);
+    }
+    let first = text.chars().next().map(char::len_utf8).unwrap_or(0);
+    parts(&text[..first])?; // the frames can carry text at all
+    let mut out = vec![];
+    let mut rest = text;
+    while !rest.is_empty() {
+        if parts(rest).is_ok_and(|n| n <= limit) {
+            out.push(rest.to_string());
+            break;
+        }
+        // The longest start that fits (binary search on char boundaries).
+        let (mut lo, mut hi) = (0, rest.len());
+        while lo < hi {
+            let mut mid = (lo + hi).div_ceil(2);
+            while !rest.is_char_boundary(mid) {
+                mid -= 1;
+            }
+            if mid > lo && parts(&rest[..mid]).is_ok_and(|n| n <= limit) {
+                lo = mid;
+            } else {
+                hi = mid.max(lo + 1) - 1;
+                while !rest.is_char_boundary(hi) {
+                    hi -= 1;
+                }
+            }
+        }
+        if lo == 0 {
+            bail!("the frames at this speed are too small for Roundtable text");
+        }
+        let cut = match rest[..lo].rfind(' ') {
+            Some(i) if i > lo / 2 => i + 1,
+            _ => lo,
+        };
+        let piece = rest[..cut].trim_end();
+        if !piece.is_empty() {
+            out.push(piece.to_string());
+        }
+        rest = rest[cut..].trim_start();
+    }
+    Ok(out)
+}
+
 /// How long an unfinished message waits for its missing parts.
 pub const TABLE_PARTIAL_TTL: Duration = Duration::from_secs(10 * 60);
 /// How long (and how many) finished messages are remembered, so parts
@@ -1192,10 +1321,15 @@ impl TableAssembler {
             got: HashMap::new(),
             last: now,
         });
-        if total != e.total || part > e.total {
-            // Disagrees with the parts already here (corrupt or forged):
-            // keep what we have.
-            return None;
+        if total != e.total {
+            // Its sender split it again, into smaller parts: the table slowed
+            // down since, and the old parts didn't fit the new speed. (A
+            // re-split always has a different total.) Start it over.
+            *e = Partial {
+                total,
+                got: HashMap::new(),
+                last: now,
+            };
         }
         e.got.insert(part, data.to_vec());
         e.last = now;
@@ -1279,6 +1413,17 @@ impl TableAssembler {
         }
     }
 
+    /// Whether an earlier message from `from` than `id` is still coming
+    /// in: some of its parts here, or known missed, and not given up.
+    pub fn pending_before(&self, from: &str, id: u64) -> bool {
+        let now = Instant::now();
+        self.parts.iter().any(|((f, i), p)| {
+            f == from && *i < id && now.saturating_duration_since(p.last) < TABLE_PARTIAL_TTL
+        }) || self.wanted.iter().any(|((f, i), t)| {
+            f == from && *i < id && now.saturating_duration_since(*t) < TABLE_PARTIAL_TTL
+        })
+    }
+
     /// Messages with gaps: (from, id, bitmap of missing parts).
     pub fn missing(&self) -> Vec<(String, u64, u64)> {
         self.missing_at(Instant::now())
@@ -1287,9 +1432,21 @@ impl TableAssembler {
     /// `missing` with an explicit clock (for tests): messages that have
     /// waited longer than `TABLE_PARTIAL_TTL` are not asked for.
     pub fn missing_at(&self, now: Instant) -> Vec<(String, u64, u64)> {
+        self.missing_quiet_at(now, Duration::ZERO)
+    }
+
+    /// `missing`, leaving out messages whose last part came less than
+    /// `quiet` ago: their sender is likely still sending the rest, and an
+    /// AGAIN now would go out on top of it.
+    pub fn missing_quiet(&self, quiet: Duration) -> Vec<(String, u64, u64)> {
+        self.missing_quiet_at(Instant::now(), quiet)
+    }
+
+    pub fn missing_quiet_at(&self, now: Instant, quiet: Duration) -> Vec<(String, u64, u64)> {
         self.parts
             .iter()
             .filter(|(_, p)| now.saturating_duration_since(p.last) < TABLE_PARTIAL_TTL)
+            .filter(|(_, p)| now.saturating_duration_since(p.last) >= quiet)
             .map(|((from, id), p)| {
                 let mut m = 0u64;
                 for n in 1..=p.total.min(64) {
@@ -1377,6 +1534,172 @@ impl KissDecoder {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A later message from a station is known to wait for an earlier one
+    /// still being filled in; another station's doesn't.
+    #[test]
+    fn an_earlier_message_still_coming_in_is_known() {
+        let mut a = TableAssembler::default();
+        assert!(a.add("W1ABC", 5, 1, 2, b"first ").is_none());
+        assert!(a.add("W1ABC", 6, 1, 1, b"second").is_some());
+        assert!(a.pending_before("W1ABC", 6));
+        assert!(!a.pending_before("W1ABC", 5));
+        assert!(!a.pending_before("K7XYZ", 9));
+        assert!(a.add("W1ABC", 5, 2, 2, b"half").is_some());
+        assert!(!a.pending_before("W1ABC", 6));
+    }
+
+    /// Parts of a message still coming in aren't asked for again yet: the
+    /// request would go out on top of them.
+    #[test]
+    fn a_message_still_coming_in_isnt_asked_for_yet() {
+        let mut a = TableAssembler::default();
+        let t0 = Instant::now();
+        a.add_at(t0, "W1ABC", 9, 1, 4, b"one ");
+        a.add_at(t0 + Duration::from_secs(4), "W1ABC", 9, 2, 4, b"two ");
+        let quiet = Duration::from_secs(9);
+        assert!(a.missing_quiet_at(t0 + Duration::from_secs(6), quiet).is_empty(), "still sending");
+        let m = a.missing_quiet_at(t0 + Duration::from_secs(14), quiet);
+        assert_eq!(m, vec![("W1ABC".to_string(), 9, 0b1100)]);
+        assert_eq!(a.missing_at(t0 + Duration::from_secs(6)).len(), 1, "missing() still lists it");
+    }
+
+    /// DATAC15's broadcast frames carry 27 bytes.
+    const SMALL: usize = 27;
+
+    /// A member's report at a slow speed: without the table name it fits,
+    /// and the host still reads how it hears the host.
+    #[test]
+    fn a_report_that_doesnt_fit_leaves_the_name_out() {
+        let f = TableFrame {
+            table: table_id("Sunday Morning Net"),
+            from: "KD2ABC/P".into(),
+            body: TableBody::Join {
+                table_name: "Sunday Morning Net".into(),
+                snr_of_host: -3,
+                bw_code: Some(1),
+            },
+        };
+        let big = f.encode();
+        assert!(big.len() > SMALL);
+        assert_eq!(shrink_table_frame(&big, 200).unwrap(), big, "one that fits is left alone");
+        let small = shrink_table_frame(&big, SMALL).unwrap();
+        assert!(small.len() <= SMALL);
+        let back = TableFrame::decode(&small).unwrap();
+        assert_eq!((back.table, back.from.as_str()), (f.table, "KD2ABC/P"));
+        assert!(matches!(back.body, TableBody::Join { ref table_name, snr_of_host: -3, bw_code: Some(1) } if table_name.is_empty()));
+    }
+
+    /// "Send the whole message again" (all ones) doesn't fit DATAC15: it asks
+    /// for the lowest parts instead; the rest are asked for later.
+    #[test]
+    fn a_resend_request_that_doesnt_fit_asks_for_fewer_parts() {
+        let f = TableFrame {
+            table: table_id("Evening Table"),
+            from: "W1ABC".into(),
+            body: TableBody::Again {
+                of: "K7XYZ".into(),
+                id: 40000,
+                missing: u64::MAX,
+            },
+        }
+        .encode();
+        assert!(f.len() > SMALL);
+        let small = shrink_table_frame(&f, SMALL).unwrap();
+        assert!(small.len() <= SMALL);
+        let Some(TableFrame {
+            body: TableBody::Again { of, id, missing },
+            ..
+        }) = TableFrame::decode(&small)
+        else {
+            panic!("not an AGAIN")
+        };
+        assert_eq!((of.as_str(), id), ("K7XYZ", 40000));
+        assert!(missing & 1 == 1 && missing.count_ones() >= 4, "asks for parts 1..: {missing:#b}");
+        assert_eq!(missing & (missing + 1), 0, "the lowest parts, in a row");
+        // Nothing else is shrunk.
+        let text = table_text_frames(1, "W1ABC", 1, &"x".repeat(100), 120).unwrap();
+        assert!(shrink_table_frame(&text[0], SMALL).is_none());
+    }
+
+    /// Which speeds a table's callsigns fit: DATAC15 takes calls of up to 7
+    /// characters (W1ABC/P); 8 leave no room for text (KD2ABC/P); DATAC4
+    /// (51 bytes) takes any.
+    #[test]
+    fn long_callsigns_dont_fit_the_smallest_frames() {
+        let calls = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert!(table_frames_fit(SMALL, &calls(&["W1ABC", "K7XYZ", "KD2ABC"])));
+        assert!(table_frames_fit(SMALL, &calls(&["W1ABC/P", "KD2ABC/"])));
+        assert!(!table_frames_fit(SMALL, &calls(&["KD2ABC/P", "W1ABC"])));
+        assert!(!table_frames_fit(SMALL, &calls(&["VE3/KD2ABC/P", "W1ABC"])));
+        assert!(table_frames_fit(51, &calls(&["VE3/KD2ABC/P", "VE3/KD2ABD/M"])));
+        assert!(table_frames_fit(SMALL, &[]));
+        // Everyday calls: the parts of a message can all be asked for again
+        // only up to a point; any number in frames of 51 bytes and more.
+        let us = calls(&["KD2ABC", "W1ABC"]);
+        let n = again_parts_limit(SMALL, &us);
+        assert!((8..64).contains(&n), "{n}");
+        assert_eq!(again_parts_limit(51, &us), 64);
+        assert_eq!(again_parts_limit(SMALL, &calls(&["VE3/KD2ABC/P", "VE3/KD2ABD/M"])), 0);
+    }
+
+    /// At the slowest speed a long message goes out as several, each short
+    /// enough for all its parts to be asked for again; the words survive.
+    #[test]
+    fn a_long_message_at_the_slowest_speed_goes_as_several() {
+        let text = "Seventy two degrees and sunny here today, the wind has dropped, and the new dipole is up at forty feet. ".repeat(4);
+        let text = text.trim();
+        let limit = again_parts_limit(SMALL, &["KD2ABC".to_string(), "W1ABC".to_string()]);
+        let pieces = split_for_parts("KD2ABC", text, SMALL, limit).unwrap();
+        assert!(pieces.len() > 1);
+        for p in &pieces {
+            let n = table_text_frames(WORST_TABLE, "KD2ABC", WORST_ID, p, SMALL).unwrap().len();
+            assert!(n <= limit, "{n} parts > {limit}");
+            assert!(!p.starts_with(' ') && !p.ends_with(' '));
+        }
+        assert_eq!(pieces.join(" "), text, "cut between words, nothing lost");
+        // Short, or a roomy speed: one message, as it was.
+        assert_eq!(split_for_parts("KD2ABC", "73 all", SMALL, limit).unwrap(), vec!["73 all"]);
+        assert_eq!(split_for_parts("KD2ABC", text, 120, 64).unwrap(), vec![text.to_string()]);
+        // A word longer than a whole message is cut inside it.
+        let long_word = "x".repeat(2000);
+        let pieces = split_for_parts("KD2ABC", &long_word, SMALL, limit).unwrap();
+        assert_eq!(pieces.concat(), long_word);
+    }
+
+    /// A message split again into smaller parts (the table slowed down
+    /// before it was all heard): a station holding parts of the old split
+    /// starts over and gets the whole message.
+    #[test]
+    fn a_message_split_again_is_put_together_from_the_new_parts() {
+        let text = "Seventy degrees and sunny here, the antenna is finally back up after the storm.";
+        let old = table_text_frames(7, "W1ABC", 3, text, 60).unwrap();
+        let mut new_room = 27;
+        let new = loop {
+            let v = table_text_frames(7, "W1ABC", 3, text, new_room).unwrap();
+            if v.len() != old.len() {
+                break v;
+            }
+            new_room -= 1;
+        };
+        let parts = |fs: &[Vec<u8>]| -> Vec<(u8, u8, Vec<u8>)> {
+            fs.iter()
+                .map(|f| match TableFrame::decode(f).unwrap().body {
+                    TableBody::Text { part, total, data, .. } => (part, total, data),
+                    _ => unreachable!(),
+                })
+                .collect()
+        };
+        let mut a = TableAssembler::default();
+        let (p, t, d) = &parts(&old)[0];
+        assert!(a.add("W1ABC", 3, *p, *t, d).is_none());
+        let mut got = None;
+        for (p, t, d) in parts(&new) {
+            got = got.or(a.add("W1ABC", 3, p, t, &d));
+        }
+        assert_eq!(got.as_deref(), Some(text));
+        assert!(a.missing().is_empty());
+    }
 
     /// Names from the air are saved as plain, visible files in the
     /// download folder and nowhere else.

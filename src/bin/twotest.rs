@@ -489,6 +489,151 @@ mod bench {
             std::thread::sleep(Duration::from_secs(3));
         }
 
+        /// A table slowed right down to DATAC15 (27-byte frames), with a
+        /// name too long for the member's report to fit with it: the reports
+        /// still reach the host (without the name), a message queued for the
+        /// old speed is split again and arrives, and a long one goes out as
+        /// several messages, all of which arrive.
+        fn s_table_slow(&mut self) {
+            self.disconnect_both();
+            self.b.send(Cmd::SetFreq(A_DIAL));
+            let name = "Sunday Morning Net";
+            let base = |c: &mut Config| {
+                c.whistle_s = 6.0;
+                c.cq_cycles = 1;
+                c.cq_listen_s = 5.0;
+                c.busy_detect = false;
+            };
+            self.update(&self.a, base);
+            self.update(&self.b, |c| c.busy_detect = false);
+            // The bench channel is clean (reports of +20 dB and more), and the
+            // margin goes to 20 dB at most: some noise brings the report
+            // down to where a margin sets DATAC15.
+            let mut noise = 12.0;
+            self.ether.channel.lock().unwrap().noise_dbfs += noise;
+            println!("   slow table channel: {}", self.snr_note());
+            std::thread::sleep(Duration::from_secs(2));
+            self.a.send(Cmd::CallCq { table: Some(name.into()) });
+            self.wait(60.0, |_, b| b.heard.iter().any(|h| h.table.as_deref() == Some(name)));
+            self.b.send(Cmd::JoinTable(name.into()));
+            let report_of_b = |a: &State| a.table.as_ref().and_then(|t| t.members.get(B)).and_then(|m| m.snr_of_host);
+            let joined = self.wait(90.0, |a, _| report_of_b(a).is_some());
+            let mut snr = report_of_b(&self.st(&self.a)).unwrap_or(0) as f64;
+            // Still too strong for a margin of 20 dB at most (the first
+            // report can be the CQFRAME's, and channels differ from set to
+            // set): more noise, and BRAVO's next report (every 2 min).
+            for _ in 0..2 {
+                if joined.is_none() || snr + 5.5 <= 18.0 {
+                    break;
+                }
+                let more = snr + 5.5 - 14.0;
+                noise += more;
+                self.ether.channel.lock().unwrap().noise_dbfs += more;
+                println!("   slow table: report {snr:+} dB, {more:.0} dB more noise");
+                let before = self.st(&self.a).table.as_ref().and_then(|t| t.members.get(B)).and_then(|m| m.last);
+                self.wait(150.0, |a, _| {
+                    a.table.as_ref().and_then(|t| t.members.get(B)).and_then(|m| m.last) != before
+                });
+                snr = report_of_b(&self.st(&self.a)).unwrap_or(0) as f64;
+            }
+            // DATAC15 is the fastest mode the margin allows when the report
+            // less the margin is in [-7, -4) dB: aim for the middle.
+            let margin = snr + 5.5;
+            let cleanup = |s: &mut Self| {
+                s.wait_air_quiet(5.0, 120.0);
+                s.a.send(Cmd::LeaveTable);
+                if s.wait(90.0, |_, b| b.table.is_none()).is_none() {
+                    s.b.send(Cmd::LeaveTable);
+                }
+                s.update(&s.a, |_| {});
+                s.update(&s.b, |_| {});
+                s.ether.channel.lock().unwrap().noise_dbfs -= noise;
+                std::thread::sleep(Duration::from_secs(3));
+            };
+            if joined.is_none() || !(0.0..=20.0).contains(&margin) {
+                self.record(
+                    "slow table: set up at DATAC15",
+                    false,
+                    format!("BRAVO joined {}; its report {snr:+} dB → margin {margin:.1} dB (0-20 allowed)", Self::took(joined)),
+                );
+                cleanup(self);
+                return;
+            }
+            self.wait_air_quiet(5.0, 60.0);
+            self.update(&self.a, |c| {
+                base(c);
+                c.ramp_margin_db = margin;
+            });
+            // From whatever it runs at (DATAC1 on the bench).
+            let announced = self.wait(90.0, |a, _| {
+                a.log.iter().any(|l| l.1.contains("announcing speed change") && l.1.contains("→ DATAC15"))
+            });
+            // Queued while the change is announced: cut for the old frames.
+            let queued = "Queued at the old speed just as the table slowed down: split again for DATAC15, it still arrives whole.";
+            self.a.send(Cmd::TableSay(queued.into()));
+            let slow = self.wait(120.0, |a, b| Self::table_mode(a) == "DATAC15" && Self::table_mode(b) == "DATAC15");
+            let switched = Instant::now();
+            let got = self.wait(420.0, |_, b| Self::has_line(b, A, queued));
+            let resplit = self.st(&self.a).log.iter().any(|l| l.1.contains("split again into"));
+            self.record(
+                "slow table: a message queued for the old speed is split again and arrives",
+                announced.is_some() && slow.is_some() && got.is_some() && resplit,
+                format!(
+                    "BRAVO reports {snr:+} dB, host margin {margin:.1} dB; change announced {}; both at DATAC15 {}; message {}; split again {resplit}",
+                    Self::took(announced),
+                    Self::took(slow),
+                    Self::took(got)
+                ),
+            );
+            // BRAVO's report with the name is 31 bytes, 27 fit: it goes
+            // without the name. (BRAVO says nothing meanwhile, so the host
+            // hearing from it means a report.)
+            let report = self.wait(200.0, |a, _| {
+                a.table.as_ref().and_then(|t| t.members.get(B)).and_then(|m| m.last).is_some_and(|l| l > switched)
+            });
+            let dropped = self.st(&self.b).log.iter().any(|l| l.1.contains("doesn't fit"));
+            self.record(
+                "slow table: the member's reports reach the host at DATAC15",
+                report.is_some() && !dropped,
+                format!(
+                    "a report from BRAVO {}; host at {}; BRAVO dropped a frame as too big: {dropped}",
+                    Self::took(report),
+                    Self::table_mode(&self.st(&self.a))
+                ),
+            );
+            // A long message: more parts than a resend request can name at
+            // this speed, so it goes out as several.
+            let long = "BRAVO at the slow speed: seventy two degrees and sunny here, the wind has dropped, and the new dipole is up at forty feet and working well. ".repeat(4);
+            let long = long.trim().to_string();
+            self.b.send(Cmd::TableSay(long.clone()));
+            let joined_from_b = |s: &State| -> String {
+                s.table
+                    .as_ref()
+                    .map(|t| t.lines.iter().filter(|l| l.1 == B).map(|l| l.2.as_str()).collect::<Vec<_>>().join(" "))
+                    .unwrap_or_default()
+            };
+            let all = self.wait(900.0, |a, _| joined_from_b(a).ends_with(&long));
+            let pieces = self.st(&self.b).table.as_ref().map(|t| t.lines.iter().filter(|l| l.1 == B).count()).unwrap_or(0);
+            let at_a: Vec<usize> = self
+                .st(&self.a)
+                .table
+                .as_ref()
+                .map(|t| t.lines.iter().filter(|l| l.1 == B).map(|l| l.2.len()).collect())
+                .unwrap_or_default();
+            self.record(
+                "slow table: a long message goes as several and all of it arrives, in order",
+                all.is_some() && pieces > 1,
+                format!(
+                    "{} chars as {pieces} messages; all at ALPHA in order {} (ALPHA's lines from BRAVO, chars: {at_a:?}); table speed A {} / B {}",
+                    long.len(),
+                    Self::took(all),
+                    Self::table_mode(&self.st(&self.a)),
+                    Self::table_mode(&self.st(&self.b))
+                ),
+            );
+            cleanup(self);
+        }
+
         fn direct_link(&mut self, label: &str) -> bool {
             self.b.send(Cmd::SetFreq(A_DIAL));
             std::thread::sleep(Duration::from_secs(2));
@@ -2487,6 +2632,9 @@ mod bench {
         }
         if named("away_weak") {
             b.s_away_long("away, long transfer, weak signal", 60.0, 27.0, 3000);
+        }
+        if named("table_slow") {
+            b.s_table_slow();
         }
         // Three stations (CHARLIE is on the band only when one is named).
         if named("table3") {

@@ -276,7 +276,7 @@ pub const ST_CALL: Topic = (
     "Settings reference",
 );
 pub const ST_NAMEGRID: Topic =
-    ("Name and grid", "Sent to the other station when a link comes up (HELLO), and shown in their link header. Optional.", "Settings reference");
+    ("Name and grid", "Sent to the other station when a link comes up (HELLO), and shown in their link header. The grid also goes in your CQ and Station ID, as its first 8 letters and digits (a Maidenhead locator, e.g. EM12ab). Optional.", "Settings reference");
 pub const ST_DEMO: Topic = (
     "Demo mode",
     "Simulated radio, band, Mercury and the K7BOT demo station. Nothing is transmitted. Untick to use your radio, Mercury and rigctld.",
