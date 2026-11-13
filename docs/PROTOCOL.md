@@ -193,7 +193,7 @@ frame := 0x57 type(u8) uv(table) call(from) fields...
 | `0x13` | SPEED | `u8 mode_index`, optional `uv last_id` | Host only: `last_id` is the host's newest message id (absent or 0: none; older stations ignore it). A member that sees a gap in a sender's ids (from TEXT ids or `last_id`) sends AGAIN for each skipped message with `missing` = all ones (at most 16 per sender). Everyone moves to this mode after the frame. Sent twice, in the *old* mode. **Join windows**: newcomers call and listen in DATAC3, so the host of a table running faster drops it to DATAC3 every 3 min (a SPEED to DATAC3, then its CALL), listens 20 s for JOINs, then sends SPEED back up. A host with nothing to send repeats SPEED for the current mode every 90 s as a heartbeat. A member that hears nothing of its table for 4 min tries the last announced mode, DATAC3, then the most robust mode, re-sending its JOIN in each. A member whose own JOIN report is below the current mode's minimum + margin, and which hears no SPEED within 40 s, moves to DATAC3 by itself. No new frame type: any station that follows SPEED takes part. |
 | `0x14` | AGAIN | `call of`, `uv id`, `uv missing` | Please resend the parts of `of`'s message `id` in the bitmap `missing` (bit n = part n+1). |
 | `0x15` | FLOOR | `call to` | Pass the talking stick to `to`. Holding it is a courtesy, not a lock. |
-| `0x16` | LEAVE | — | Leaving the table. |
+| `0x16` | LEAVE | — | Leaving the table. The host's LEAVE closes it: members leave too. |
 | `0x17` | BEACON | `str grid`, `u8 away`, `uv n`, n × `call` | Station ID: grid, whether the station is away, and the calls it holds mail for (as many as fit). No whistle. |
 | `0x18` | NOTICE | `call to`, `u8 count` | "I have `count` messages for `to`: connect to me." |
 

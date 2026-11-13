@@ -85,7 +85,14 @@ fn transfer_list_is_bounded() {
     }
     let n = stn.st().transfers.len();
     eprintln!("transfers {n} rows, state JSON {} B", state_json_len(&stn.h));
-    assert!(n <= 200, "Files list kept {n} rows");
+    let open: Vec<String> = stn
+        .st()
+        .transfers
+        .iter()
+        .filter(|t| !matches!(t.state, XferState::Done(_) | XferState::Failed(_) | XferState::Declined))
+        .map(|t| format!("{} {:?} {:?}", t.name, t.dir, t.state))
+        .collect();
+    assert!(n <= 200, "Files list kept {n} rows; still open: {open:?}");
 }
 
 /// Two files dropped on the window one after the other (two offers before

@@ -36,6 +36,10 @@ pub struct FakeOptions {
     /// Tests: the bot sends a file's pieces right after offering it,
     /// without waiting for the answer (a misbehaving station).
     pub bot_pushy: bool,
+    /// Tests: as host of `bot_cq_table`, the bot answers a JOIN with its
+    /// SPEED (so the member knows who hosts) and closes the table (LEAVE)
+    /// this many seconds later.
+    pub bot_table_leave_after: Option<f64>,
 }
 
 impl Default for FakeOptions {
@@ -50,6 +54,7 @@ impl Default for FakeOptions {
             bot_e2e: Policy::Prefer,
             bot_pushy: false,
             bot_cq_table: None,
+            bot_table_leave_after: None,
         }
     }
 }
@@ -733,6 +738,7 @@ impl Session {
         if matches!(fr.body, TableBody::Call { kind: CALL_TABLE, .. }) {
             self.cq_is_table = true;
         }
+        let is_join = matches!(fr.body, TableBody::Join { .. });
         let reply_text = match fr.body {
             TableBody::Call {
                 kind: CALL_TABLE,
@@ -740,6 +746,28 @@ impl Session {
                 ..
             }
             | TableBody::Join { table_name, .. } => {
+                if let Some(after) = self.o.bot_table_leave_after
+                    && is_join
+                    && self.o.bot_cq_table.as_ref() == Some(&table_name)
+                {
+                    let id = table_id(&table_name);
+                    let speed = TableFrame {
+                        table: id,
+                        from: bot.clone(),
+                        body: TableBody::Speed {
+                            mode_index: crate::modes::mode_by_name("DATAC3").unwrap().index,
+                            last_id: 0,
+                        },
+                    };
+                    self.after(2.0, Act::BotBcast(speed.encode()));
+                    let leave = TableFrame {
+                        table: id,
+                        from: bot.clone(),
+                        body: TableBody::Leave,
+                    };
+                    self.after(2.0 + after, Act::BotBcast(leave.encode()));
+                    return;
+                }
                 let j = TableFrame {
                     table: fr.table,
                     from: bot.clone(),

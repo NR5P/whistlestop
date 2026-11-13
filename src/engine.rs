@@ -282,6 +282,10 @@ const TABLE_HEARTBEAT: Duration = Duration::from_secs(90);
 /// and a join window) has lost it: it listens in another of the table's
 /// likely speeds until it hears it again.
 const TABLE_LOST_AFTER: Duration = Duration::from_secs(240);
+/// A member that has heard nothing at all of its table for this long (all
+/// its speeds tried meanwhile) takes it as closed and leaves, so the
+/// station's schedule, Station ID and Depot automation carry on.
+pub const TABLE_GIVE_UP: Duration = Duration::from_secs(15 * 60);
 /// A member whose report says it can't copy the table's speed expects the
 /// host to slow down; if no announcement comes in this time, it slows down
 /// by itself (it would never copy the one sent at the faster speed).
@@ -785,6 +789,9 @@ struct Station {
     join_window: Option<(Instant, &'static Mode)>,
     /// When we last heard a frame of our table, and last sent one.
     last_table_heard: Instant,
+    /// When anything of our table was last heard (`last_table_heard` is
+    /// also reset by each change of speed while looking for it).
+    table_heard_any: Instant,
     last_table_sent: Instant,
     /// The table's speed as last announced to us (members).
     table_announced: Option<&'static Mode>,
@@ -1026,6 +1033,7 @@ impl Station {
             join_window: None,
             last_join_window: Instant::now(),
             last_table_heard: Instant::now(),
+            table_heard_any: Instant::now(),
             last_table_sent: Instant::now(),
             table_announced: None,
             table_unsynced: false,
@@ -1811,22 +1819,7 @@ impl Station {
                     self.set(|g| g.table_pending = None);
                     self.log("Roundtable join cancelled".into());
                 }
-                if let Some(id) = self.table_id() {
-                    let me = self.mycall();
-                    self.table_tx(
-                        TableFrame {
-                            table: id,
-                            from: me,
-                            body: TableBody::Leave,
-                        }
-                        .encode(),
-                    );
-                }
-                self.set(|g| g.table = None);
-                // A table that ramped up (say to DATAC1) left Mercury
-                // listening there, deaf to the DATAC3 calls everyone else uses.
-                self.restore_calling_mode = true;
-                self.log("Left the Roundtable".into());
+                self.leave_table();
             }
             Cmd::TableSay(text) => self.table_say(text)?,
             Cmd::PassFloor(to) => {
@@ -3902,6 +3895,28 @@ impl Station {
         self.st.lock().unwrap().table.as_ref().map(|t| t.id)
     }
 
+    /// Leave the table we're at (saying so to the others), back to the
+    /// calling mode.
+    fn leave_table(&mut self) {
+        let Some(id) = self.table_id() else {
+            return;
+        };
+        let me = self.mycall();
+        self.table_tx(
+            TableFrame {
+                table: id,
+                from: me,
+                body: TableBody::Leave,
+            }
+            .encode(),
+        );
+        self.set(|g| g.table = None);
+        // A table that ramped up (say to DATAC1) left Mercury
+        // listening there, deaf to the DATAC3 calls everyone else uses.
+        self.restore_calling_mode = true;
+        self.log("Left the Roundtable".into());
+    }
+
     /// Join here, now if Mercury is free. While a link is closing (or
     /// Mercury still says BUSY after it), the join waits and is retried,
     /// for up to `JOIN_WAIT_S`.
@@ -4038,6 +4053,19 @@ impl Station {
         self.table_sent.clear();
         let mode = modes::mode_by_name("DATAC3").unwrap();
         self.tnc()?.command(&format!("MODE {}", mode.index)).await?;
+        // Who hosts it: as a member, the station whose CALL for it we heard
+        // here (newest first), so its goodbye is known as the host's even
+        // before its next CALL or SPEED.
+        let dial = self.dial();
+        let host_call = if host {
+            Some(self.mycall())
+        } else {
+            self.st.lock().unwrap().heard.iter().find_map(|h| {
+                (h.table.as_deref().is_some_and(|t| t.eq_ignore_ascii_case(&name))
+                    && (h.dial_hz - dial).abs() < 500.0)
+                    .then(|| h.call.clone())
+            })
+        };
         self.set(|g| {
             g.listen_mode = Some(mode);
             g.table = Some(TableState {
@@ -4046,7 +4074,7 @@ impl Station {
                 host,
                 mode,
                 members: HashMap::new(),
-                host_call: host.then(|| self.mycall()),
+                host_call,
                 floor: None,
                 lines: vec![],
                 sending_eta_s: 0.0,
@@ -4056,6 +4084,7 @@ impl Station {
         self.last_join_window = Instant::now();
         self.last_table_report = Instant::now();
         self.last_table_heard = Instant::now();
+        self.table_heard_any = Instant::now();
         self.last_table_sent = Instant::now();
         self.table_announced = Some(mode);
         self.table_unsynced = !host;
@@ -4244,6 +4273,7 @@ impl Station {
                         self.host_snr = Some(snr);
                     }
                     self.last_table_heard = Instant::now();
+                    self.table_heard_any = Instant::now();
                     // A join window: a member the host may not know yet
                     // (its JOIN went out while the table ran faster, or it
                     // lost the table) says so now, while the host listens
@@ -4301,6 +4331,7 @@ impl Station {
             return Ok(());
         }
         self.last_table_heard = Instant::now();
+        self.table_heard_any = Instant::now();
         let from = fr.from.clone();
         // Only the host sends SPEED. A member reports how well it hears the
         // host, so it keeps the SN Mercury gave for the host's own frames.
@@ -4401,6 +4432,17 @@ impl Station {
                     ));
                 }
             }),
+            // The host leaving closes the table: nobody is left to set its
+            // speed or let others join.
+            TableBody::Leave if is_host => {
+                let name = self.st.lock().unwrap().table.as_ref().map(|t| t.name.clone());
+                let name = name.unwrap_or_default();
+                self.log(format!("Roundtable: the host {from} closed \"{name}\""));
+                self.system_line(format!(
+                    "The host {from} closed the Roundtable \"{name}\"; you've left it"
+                ));
+                self.leave_table();
+            }
             TableBody::Leave => self.set(|g| {
                 if let Some(t) = g.table.as_mut() {
                     t.members.remove(&from);
@@ -4433,9 +4475,35 @@ impl Station {
         if self.tnc.is_none() || self.pending_speed.is_some() {
             return Ok(());
         }
+        // A 1:1 link (one that came in while at the table): the table is on
+        // hold and isn't heard meanwhile. Its clocks start again when the
+        // link ends, rather than taking the silence for a lost table and
+        // changing Mercury's mode in the middle of the link.
+        if self.peer.is_some() {
+            let now = Instant::now();
+            self.last_table_heard = now;
+            self.table_heard_any = now;
+            self.last_table_report = now;
+            self.last_table_sent = now;
+            if self.expect_slowdown.is_some() {
+                self.expect_slowdown = Some(now);
+            }
+            return Ok(());
+        }
         let me = self.mycall();
         let calling = modes::mode_by_name("DATAC3").expect("DATAC3");
         if !host {
+            if self.table_heard_any.elapsed() >= TABLE_GIVE_UP {
+                let m = TABLE_GIVE_UP.as_secs() / 60;
+                self.log(format!(
+                    "Roundtable: nothing heard of \"{name}\" for {m} minutes; leaving it"
+                ));
+                self.system_line(format!(
+                    "Nothing heard of the Roundtable \"{name}\" for {m} minutes: it seems to have closed, so you've left it"
+                ));
+                self.leave_table();
+                return Ok(());
+            }
             if self.last_table_report.elapsed() >= TABLE_REPORT_EVERY {
                 self.send_table_report();
             }
@@ -6470,6 +6538,57 @@ mod tests {
         assert!(g.link.is_none() && g.calling.is_none(), "{:?}", g.calling);
         drop(g);
         h.send(Cmd::Stop);
+    }
+
+    /// The host closing its table (LEAVE) takes its members with it: they
+    /// leave too, and say why.
+    #[test]
+    fn members_leave_when_the_host_closes_the_table() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let f = rt
+            .block_on(crate::fake_mercury::FakeMercury::start(FakeOptions {
+                fast: true,
+                bot_cq_table: Some("Bot Table".into()),
+                bot_table_leave_after: Some(6.0),
+                ..Default::default()
+            }))
+            .unwrap();
+        let h = spawn(|| {});
+        let mut cfg = Config {
+            callsign: "N0MBR".into(),
+            demo: false,
+            rigctld: "none".into(),
+            mercury_port: f.port,
+            mercury_bcast_port: f.bcast_port,
+            ..Default::default()
+        };
+        cfg.sdr.enabled = false;
+        cfg.sdr.wide_search = false;
+        h.send(Cmd::Start(cfg));
+        let wait = |what: &str, secs: u64, f: &dyn Fn(&State) -> bool| {
+            let t = Instant::now();
+            while t.elapsed() < Duration::from_secs(secs) {
+                if f(&h.state.lock().unwrap()) {
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            let g = h.state.lock().unwrap();
+            let log: Vec<_> = g.log.iter().map(|l| l.1.clone()).collect();
+            panic!("timed out waiting for {what}; log:\n{}", log.join("\n"));
+        };
+        wait("Mercury", 10, &|s| s.mercury_ok);
+        h.send(Cmd::JoinTable("Bot Table".into()));
+        wait("the host known", 30, &|s| {
+            s.table.as_ref().is_some_and(|t| t.host_call.as_deref() == Some("K7BOT"))
+        });
+        wait("left with the host", 30, &|s| s.table.is_none());
+        let g = h.state.lock().unwrap();
+        assert!(g.log.iter().any(|l| l.1.contains("the host K7BOT closed")));
+        assert!(g.chat.iter().any(|c| c.text.contains("closed the Roundtable")));
+        drop(g);
+        h.send(Cmd::Stop);
+        drop(rt);
     }
 
     /// Join a Roundtable right after hanging up: Mercury refuses the mode

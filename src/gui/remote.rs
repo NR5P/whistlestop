@@ -107,7 +107,7 @@ impl RemoteWin {
                         None => {}
                     }
                     ui.label(RichText::new("Only computers on your home network (private addresses) can connect, and only with the password. The connection isn't encrypted: don't open this port to the internet.").small().color(DIM));
-                    ui.label(RichText::new("Turning sharing off or changing the password disconnects anyone operating. After 10 wrong passwords within a minute from one computer, that computer's logins are refused for 5 minutes.").small().color(DIM));
+                    ui.label(RichText::new("Turning sharing off or changing the password disconnects anyone operating. After 10 wrong passwords within a minute from one computer, that computer's logins are refused for 5 minutes; after 30 within 10 minutes from all of them together, computers that haven't logged in yet are refused for 5 minutes.").small().color(DIM));
                     if changed {
                         act = Some(RemoteAction::Serve);
                     }

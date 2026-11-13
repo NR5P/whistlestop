@@ -434,11 +434,16 @@ mod bench {
         fn s_roundtable(&mut self) {
             self.disconnect_both();
             self.b.send(Cmd::SetFreq(A_DIAL));
+            // Not about listen-before-transmit: Mercury's busy detector can
+            // still be latched from the last scenario's noise step, and the
+            // CQ would wait out its 60 s.
             self.update(&self.a, |c| {
                 c.whistle_s = 6.0;
                 c.cq_cycles = 1;
                 c.cq_listen_s = 5.0;
+                c.busy_detect = false;
             });
+            self.update(&self.b, |c| c.busy_detect = false);
             std::thread::sleep(Duration::from_secs(2));
             self.a.send(Cmd::CallCq { table: Some("Bench Table".into()) });
             // B hears the CALL packet and joins.
@@ -465,8 +470,22 @@ mod bench {
                     got_short.map(|d| format!("in {:.0} s", d.as_secs_f64())).unwrap_or("LOST".into()),
                 ),
             );
+            // The host closes the table: the member, knowing who hosts it
+            // from the CALL it joined on, leaves by itself.
+            self.wait_air_quiet(5.0, 60.0);
             self.a.send(Cmd::LeaveTable);
-            self.b.send(Cmd::LeaveTable);
+            let left = self.wait(90.0, |_, b| b.table.is_none());
+            let said = self.st(&self.b).chat.iter().any(|c| c.text.contains("closed the Roundtable"));
+            self.record(
+                "Roundtable: the host leaving closes it for the member",
+                left.is_some() && said,
+                format!("BRAVO left {}; said why {said}", Self::took(left)),
+            );
+            if left.is_none() {
+                self.b.send(Cmd::LeaveTable);
+            }
+            self.update(&self.a, |_| {});
+            self.update(&self.b, |_| {});
             std::thread::sleep(Duration::from_secs(3));
         }
 

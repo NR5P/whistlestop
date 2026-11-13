@@ -63,6 +63,12 @@ const LOGIN_TIME: Duration = Duration::from_secs(15);
 const FAIL_LIMIT: usize = 10;
 const FAIL_WINDOW: Duration = Duration::from_secs(60);
 const LOCKOUT: Duration = Duration::from_secs(5 * 60);
+/// The backstop: this many wrong passwords within `ALL_FAIL_WINDOW` from
+/// every computer together (someone changing address to get round the
+/// per-computer limit) pauses, for `LOCKOUT`, logins from computers that
+/// haven't logged in this session. Those that have keep working.
+const ALL_FAIL_LIMIT: usize = 30;
+const ALL_FAIL_WINDOW: Duration = Duration::from_secs(10 * 60);
 
 #[derive(Serialize, Deserialize, Debug)]
 enum ToServer {
@@ -338,6 +344,86 @@ impl LoginGuard {
         }
         false
     }
+
+    /// Nothing to remember: no recent wrong password, not paused.
+    fn idle(&self, now: Instant) -> bool {
+        self.locked(now).is_none()
+            && self
+                .fails
+                .back()
+                .is_none_or(|t| now.saturating_duration_since(*t) > FAIL_WINDOW)
+    }
+}
+
+/// Wrong passwords: per computer, and from all of them together.
+#[derive(Default)]
+struct Guards {
+    per_ip: HashMap<IpAddr, LoginGuard>,
+    all: VecDeque<Instant>,
+    /// The backstop's pause, while it lasts.
+    all_until: Option<Instant>,
+    /// Computers that logged in this session: the backstop leaves them be.
+    known: HashSet<IpAddr>,
+}
+
+/// What a wrong password set off.
+#[derive(Debug, Default, PartialEq)]
+struct Paused {
+    /// That computer's logins.
+    this_computer: bool,
+    /// Logins from computers new to this session (the backstop).
+    new_computers: bool,
+}
+
+impl Guards {
+    /// Refused now, and for how much longer, and why.
+    fn refused(&self, ip: IpAddr, now: Instant) -> Option<String> {
+        if let Some(left) = self.per_ip.get(&ip).and_then(|g| g.locked(now)) {
+            return Some(lockout_msg(left));
+        }
+        let left = self
+            .all_until
+            .map(|u| u.saturating_duration_since(now))
+            .filter(|d| !d.is_zero())?;
+        if self.known.contains(&ip) {
+            return None;
+        }
+        let min = left.as_secs().div_ceil(60).max(1);
+        Some(format!(
+            "too many wrong passwords from several computers; logins from computers that haven't logged in yet are paused for {min} more minute{}",
+            if min == 1 { "" } else { "s" }
+        ))
+    }
+
+    /// A wrong password from `ip`. Computers with nothing left to remember
+    /// are forgotten, so one trying from address after address doesn't
+    /// grow the table for ever.
+    fn failed(&mut self, ip: IpAddr, now: Instant) -> Paused {
+        self.per_ip.retain(|_, g| !g.idle(now));
+        let this_computer = self.per_ip.entry(ip).or_default().failed(now);
+        while self
+            .all
+            .front()
+            .is_some_and(|t| now.saturating_duration_since(*t) > ALL_FAIL_WINDOW)
+        {
+            self.all.pop_front();
+        }
+        self.all.push_back(now);
+        let paused = self.all_until.is_some_and(|u| u > now);
+        let new_computers = self.all.len() >= ALL_FAIL_LIMIT && !paused;
+        if new_computers {
+            self.all.clear();
+            self.all_until = Some(now + LOCKOUT);
+        }
+        Paused {
+            this_computer,
+            new_computers,
+        }
+    }
+
+    fn logged_in(&mut self, ip: IpAddr) {
+        self.known.insert(ip);
+    }
 }
 
 fn lockout_msg(left: Duration) -> String {
@@ -359,7 +445,7 @@ struct Srv {
     clients: Arc<Mutex<Vec<String>>>,
     listeners: Listeners,
     stop: Arc<AtomicBool>,
-    guard: Mutex<HashMap<std::net::IpAddr, LoginGuard>>,
+    guard: Mutex<Guards>,
 }
 
 /// Running server; stops when dropped (see `stop`).
@@ -568,9 +654,9 @@ fn pump_audio(stop: &AtomicBool, listeners: &Listeners, tap: &PcmTap) {
 fn login(s: &mut TcpStream, srv: &Srv, ip: std::net::IpAddr) -> Result<()> {
     s.set_nodelay(true)?;
     s.set_write_timeout(Some(Duration::from_secs(30)))?;
-    let paused = srv.guard.lock().unwrap().get(&ip).and_then(|g| g.locked(Instant::now()));
-    if let Some(left) = paused {
-        send_json(s, &ToClient::Denied(lockout_msg(left)))?;
+    let refused = srv.guard.lock().unwrap().refused(ip, Instant::now());
+    if let Some(why) = refused {
+        send_json(s, &ToClient::Denied(why))?;
         bail!("refused (logins paused after too many wrong passwords)");
     }
     let until = Instant::now() + LOGIN_TIME;
@@ -590,13 +676,14 @@ fn login(s: &mut TcpStream, srv: &Srv, ip: std::net::IpAddr) -> Result<()> {
         _ => String::new(),
     };
     // Paused meanwhile: even the right password waits.
-    let paused = srv.guard.lock().unwrap().get(&ip).and_then(|g| g.locked(Instant::now()));
-    if let Some(left) = paused {
-        send_json(s, &ToClient::Denied(lockout_msg(left)))?;
+    let refused = srv.guard.lock().unwrap().refused(ip, Instant::now());
+    if let Some(why) = refused {
+        send_json(s, &ToClient::Denied(why))?;
         bail!("refused (logins paused after too many wrong passwords)");
     }
     if !mac_ok(&srv.password, &n, &mac) {
-        if srv.guard.lock().unwrap().entry(ip).or_default().failed(Instant::now()) {
+        let paused = srv.guard.lock().unwrap().failed(ip, Instant::now());
+        if paused.this_computer {
             log(
                 &srv.shared.handle.state,
                 format!(
@@ -605,10 +692,21 @@ fn login(s: &mut TcpStream, srv: &Srv, ip: std::net::IpAddr) -> Result<()> {
                 ),
             );
         }
+        if paused.new_computers {
+            log(
+                &srv.shared.handle.state,
+                format!(
+                    "🛰 Remote: {ALL_FAIL_LIMIT} wrong passwords within {} minutes from several computers; refusing logins from computers that haven't logged in yet for {} minutes",
+                    ALL_FAIL_WINDOW.as_secs() / 60,
+                    LOCKOUT.as_secs() / 60
+                ),
+            );
+        }
         std::thread::sleep(Duration::from_secs(2)); // slow down guessing
         send_json(s, &ToClient::Denied("wrong password".into()))?;
         bail!("refused (wrong password)");
     }
+    srv.guard.lock().unwrap().logged_in(ip);
     s.set_read_timeout(None)?;
     Ok(())
 }
@@ -1743,6 +1841,58 @@ mod tests {
         assert!(start.elapsed() < Duration::from_millis(1500), "{:?}", start.elapsed());
         drop(s);
         let _ = t.join();
+    }
+
+    /// Computers whose wrong passwords are old news are forgotten.
+    #[test]
+    fn login_guards_forget_old_computers() {
+        let mut m = Guards::default();
+        let t0 = Instant::now();
+        for i in 0..1000u32 {
+            let ip = IpAddr::V4(std::net::Ipv4Addr::from(0x0a00_0000 + i));
+            m.failed(ip, t0);
+        }
+        assert_eq!(m.per_ip.len(), 1000);
+        let later = t0 + LOCKOUT + Duration::from_secs(1);
+        let one = IpAddr::V4(std::net::Ipv4Addr::LOCALHOST);
+        m.failed(one, later);
+        assert_eq!(m.per_ip.len(), 1);
+        // A paused computer is kept until its pause is over.
+        for _ in 0..FAIL_LIMIT {
+            m.failed(one, later);
+        }
+        let other = IpAddr::V4(std::net::Ipv4Addr::BROADCAST);
+        m.failed(other, later + FAIL_WINDOW * 2);
+        assert!(m.per_ip.get(&one).is_some_and(|g| g.locked(later + FAIL_WINDOW * 2).is_some()));
+    }
+
+    /// Guessing from address after address: after 30 wrong passwords in
+    /// 10 minutes, computers new to this session are refused for 5
+    /// minutes; one that has logged in is not.
+    #[test]
+    fn many_computers_guessing_set_off_the_backstop() {
+        let mut m = Guards::default();
+        let t0 = Instant::now();
+        let ip = |i: u32| IpAddr::V4(std::net::Ipv4Addr::from(0x0a00_0000 + i));
+        let owner = IpAddr::V4(std::net::Ipv4Addr::new(192, 168, 1, 20));
+        m.logged_in(owner);
+        for i in 0..ALL_FAIL_LIMIT as u32 - 1 {
+            let p = m.failed(ip(i), t0 + Duration::from_secs(i as u64 * 10));
+            assert!(!p.new_computers && !p.this_computer);
+        }
+        let t1 = t0 + Duration::from_secs(300);
+        assert!(m.refused(ip(999), t1).is_none());
+        assert!(m.failed(ip(500), t1).new_computers);
+        let why = m.refused(ip(999), t1).expect("a new computer is refused");
+        assert!(why.contains("several computers") && why.contains("5 more minutes"), "{why}");
+        assert!(m.refused(owner, t1).is_none(), "the owner was locked out");
+        // Once the pause is over, everyone may try again.
+        assert!(m.refused(ip(999), t1 + LOCKOUT).is_none());
+        // Spread over more than 10 minutes, the same number never sets it off.
+        let mut m = Guards::default();
+        for i in 0..ALL_FAIL_LIMIT as u32 * 2 {
+            assert!(!m.failed(ip(i), t0 + Duration::from_secs(i as u64 * 30)).new_computers);
+        }
     }
 
     #[test]

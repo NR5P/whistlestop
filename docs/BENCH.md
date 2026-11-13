@@ -137,6 +137,43 @@ building any audio stream now reports its message instead of "did not
 start". Checked with `airtest whistle`: 4/4, no false alarm in 15 s of
 quiet, then the computer heard the phone's CQ whistle 3 s in (score 0.9).
 
+## Closed tables, links at a table, remote backstop (2026-11-12, night)
+
+Mercury 1.9.23 on the ether, Ubuntu on WSL 2, on top of `1c40080`:
+
+| Set | Result |
+|---|---|
+| Standard two-station | **35/35** (34, plus the new "the host leaving closes it for the member") |
+| `watch table` | 4/4 |
+| `table3` | **10/10** |
+
+Found and fixed:
+
+- **A member stayed at a closed table for good.** When the host left (or
+  went off the air), its members stayed, trying the table's speeds every
+  4 minutes, with the schedule, Station ID and Depot automation waiting
+  for them to leave. The host's LEAVE now closes the table for its members,
+  and a member that hears nothing of its table for 15 minutes leaves. A
+  member now knows the host from the CALL it joined on, so the goodbye is
+  recognised even before the host's next CALL or SPEED. Bench: BRAVO left
+  4–5 s after ALPHA did, and said why.
+- **A 1:1 link at a table could be cut by a mode change.** A member that
+  took an incoming link heard nothing of the table during it, so after
+  4 minutes it took the table for lost and sent Mercury a `MODE` in the
+  middle of the link. The table's clocks now wait while a link is up.
+- **Remote logins:** the per-computer lockout table never forgot an address
+  (someone changing address grew it without end); and as a backstop, 30
+  wrong passwords within 10 minutes from all computers together pause
+  logins from computers that haven't logged in this session for 5 minutes.
+- Bench: the two-station Roundtable scenario turns listen-before-transmit
+  off. Mercury's busy detector was still latched from the previous
+  scenario's noise step, and the CQ waited out its 60 s, as long as the
+  bench waits for its CALL (CALL heard false on the first run).
+
+`soak_growth::transfer_list_is_bounded` failed once in a full `cargo test`
+(201+ rows kept) and passed in three loaded reruns; its message now lists
+the rows still open, should it come back.
+
 ## Second bug hunt (2026-11-12, evening)
 
 A read-through of the protocol, encryption, Depot, settings, remote and
