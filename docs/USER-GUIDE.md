@@ -100,6 +100,8 @@ An RTL-SDR dongle connected to your radio's **RX OUT** (receive antenna output) 
 
 ## A tour of the screen
 
+The window opens at 1440 × 920 points; on a screen too small for that (a 1080p laptop at 125 % scaling, say) it opens maximized instead, so nothing is cut off at the bottom.
+
 From top to bottom:
 
 - **Top bar**: the Whistlestop mark; the **frequency display** (TX/RX lamp, dial frequency, band, radio mode); the **S-meter** and **SNR** meters; **🙋 Here / 🚪 Away** (see "Away"); **🛰 Remote** (see "Remote operation"); **DEMO** when in Demo mode; **🔈 Listen** (the radio's audio on your speakers); **📖 Guide** (this manual, in its own window); the **? Help** toggle; and **Settings**.

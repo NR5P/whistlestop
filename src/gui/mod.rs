@@ -198,6 +198,8 @@ pub struct App {
     search_band: String,
     power: f32,
     zip: bool,
+    /// The window has been checked against the screen (see `fit_screen`).
+    fitted_screen: bool,
     audio_wf: Waterfall,
     wide_wf: Waterfall,
     devices: (Vec<String>, Vec<String>),
@@ -272,6 +274,7 @@ impl App {
             search_band: "20m".into(),
             power: 0.5,
             zip: true,
+            fitted_screen: false,
             audio_wf: Waterfall::new("audio-wf", 512, 160),
             wide_wf: Waterfall::new("wide-wf", whistlestop::sdr::COLS, 160),
             devices: whistlestop::audio::list_devices(),
@@ -2488,10 +2491,32 @@ impl App {
     }
 }
 
+impl App {
+    /// The starting window (1440 × 920 points) is taller than many laptop
+    /// screens: 1800 × 1150 pixels at 125 % on a 1080p one, with the bottom
+    /// (the waterfall, the Send box) off the screen. Once the screen's size
+    /// is known, a window that doesn't fit is maximized instead.
+    fn fit_screen(&mut self, ctx: &egui::Context) {
+        if self.fitted_screen {
+            return;
+        }
+        let (monitor, outer) = ctx.input(|i| (i.viewport().monitor_size, i.viewport().outer_rect));
+        let (Some(m), Some(o)) = (monitor, outer) else {
+            return;
+        };
+        self.fitted_screen = true;
+        // Leave room for a taskbar or dock.
+        if o.width() > m.x || o.height() > m.y - 48.0 {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(true));
+        }
+    }
+}
+
 impl eframe::App for App {
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         let _ = &self.logo;
+        self.fit_screen(&ctx);
         // Files dropped on the window go to the current link.
         let dropped: Vec<_> = ctx.input(|i| i.raw.dropped_files.iter().map(|f| f.path().to_path_buf()).filter(|p| !p.as_os_str().is_empty()).collect());
         if !dropped.is_empty() {
