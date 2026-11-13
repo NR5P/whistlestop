@@ -871,6 +871,10 @@ impl Session {
                         },
                     };
                     self.bcast_out.push(call.encode());
+                    // Real Mercury follows a decoded frame with its SN, on
+                    // the control socket: it can reach the app after the
+                    // frame itself (which comes on the broadcast one).
+                    self.after(1.0, Act::Line("SN 7.0".into()));
                 }
             }
         }

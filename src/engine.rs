@@ -3357,7 +3357,20 @@ impl Station {
                 if let (Some((call, at)), Some(snr)) = (self.call_snr_wait.take(), v)
                     && at.elapsed() < Duration::from_secs(2)
                 {
+                    // Joined in the moment between the CALL and its SN (the
+                    // two come on different sockets; an auto-answer joins on
+                    // the CALL itself): the JOIN said "not measured yet", and
+                    // the host would leave us out of its speed for a whole
+                    // report period. Now we know: say so at once.
+                    let late_join = self.host_snr.is_none()
+                        && self.st.lock().unwrap().table.as_ref().is_some_and(|t| {
+                            !t.host && t.host_call.as_deref() == Some(call.as_str())
+                        });
                     self.call_snr = Some((call, snr, Instant::now()));
+                    if late_join {
+                        self.host_snr = Some(snr);
+                        self.send_table_report();
+                    }
                 }
                 self.set(|g| g.snr_db = v);
             }
@@ -7587,6 +7600,63 @@ mod tests {
         let g = h.state.lock().unwrap();
         assert!(g.link.is_none() && g.calling.is_none(), "{:?}", g.calling);
         drop(g);
+        h.send(Cmd::Stop);
+    }
+
+    /// Join pressed the moment a Roundtable's CALL is heard, before
+    /// Mercury's SN for it comes in (on the other socket): the JOIN can't
+    /// say how well we hear the host, so the SN goes out in a report as
+    /// soon as it arrives, not at the next one 2 min later (until then the
+    /// host leaves us out of its speed and can outrun us).
+    #[test]
+    fn join_before_the_calls_sn_reports_it_when_it_comes() {
+        let _one = REALTIME.lock().unwrap_or_else(|e| e.into_inner());
+        crate::fake_mercury::TEST_BOT_TABLE
+            .lock()
+            .unwrap()
+            .push(("N0LATE".into(), "Bot Table".into()));
+        let h = spawn(|| {});
+        let mut cfg = Config {
+            demo: true,
+            demo_real_mercury: false,
+            callsign: "N0LATE".into(),
+            ..Default::default()
+        };
+        cfg.sdr.enabled = false;
+        h.send(Cmd::Start(cfg));
+        let t = Instant::now();
+        while !h.state.lock().unwrap().mercury_ok {
+            assert!(t.elapsed() < Duration::from_secs(10), "Mercury didn't start");
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        h.send(Cmd::StartSearch(SearchScope::CurrentBand));
+        loop {
+            if h.state.lock().unwrap().heard.iter().any(|x| x.table.as_deref() == Some("Bot Table")) {
+                break;
+            }
+            assert!(t.elapsed() < Duration::from_secs(150), "never heard the table's CALL");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        h.send(Cmd::JoinTable("Bot Table".into()));
+        let joins = || -> Vec<i8> {
+            crate::fake_mercury::TEST_BCAST_SENT
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|f| f.from == "N0LATE")
+                .filter_map(|f| match f.body {
+                    TableBody::Join { snr_of_host, .. } => Some(snr_of_host),
+                    _ => None,
+                })
+                .collect()
+        };
+        let t = Instant::now();
+        while joins().len() < 2 && t.elapsed() < Duration::from_secs(20) {
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        let sent = joins();
+        assert_eq!(sent.first(), Some(&SNR_UNKNOWN), "the JOIN didn't beat the SN: {sent:?}");
+        assert_eq!(sent.get(1), Some(&7), "the CALL's 7 dB wasn't reported once it came: {sent:?}");
         h.send(Cmd::Stop);
     }
 
