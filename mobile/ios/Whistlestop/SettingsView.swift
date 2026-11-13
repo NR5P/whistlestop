@@ -63,6 +63,19 @@ struct SettingsView: View {
                 } header: { header("Modem (Mercury)", .modem) }
 
                 Section {
+                    Toggle("Accept files by myself", isOn: core.boolBinding("auto_accept_away"))
+                    LabeledContent("Each up to (MB)") {
+                        TextField("5", value: core.doubleBinding("auto_accept_max_mb"), format: .number)
+                            .keyboardType(.decimalPad)
+                            .multilineTextAlignment(.trailing)
+                            .frame(width: 80)
+                    }
+                    .disabled(!core.bool("auto_accept_away"))
+                } header: { header("While away", .autoAccept) } footer: {
+                    Text("Off by default. A bigger file waits for you. Takes effect when you tap Save.")
+                }
+
+                Section {
                     Picker("Encryption", selection: e2e) {
                         Text("Off").tag("off")
                         Text("Prefer").tag("prefer")

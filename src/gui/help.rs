@@ -490,6 +490,11 @@ pub const ALERT_OURS: Topic =
 pub const ALERT_THEIRS: Topic =
     ("Mail waiting for you", "A station says it holds mail for you. Collect connects to it; the mail arrives in your Arrivals.", "Automatic mail handling");
 pub const ST_AWAY_MSG: Topic = ("Away message", "What stations see when they connect while you're away. Your callsign is added in front.", "Away");
+pub const ST_AUTO_ACCEPT: Topic = (
+    "Accept files while away",
+    "While you're away, a file a station offers is accepted by itself, as if you had pressed Accept, when it's no bigger than this (default 5 MB, up to 200 MB). A bigger one waits for you to answer it. Files are saved in your download folder like any other and never opened. Off by default.",
+    "Away",
+);
 pub const ST_AWAY_IDLE: Topic =
     ("Hang up after", "While away, a link with nothing happening for this long is ended, so the next station can get through.", "Away");
 pub const ST_BEACON: Topic = (

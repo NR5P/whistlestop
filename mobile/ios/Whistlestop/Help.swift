@@ -5,7 +5,7 @@ import SwiftUI
 enum HelpTopic: String, CaseIterable, Identifiable {
     case helpMode, status, dial, waterfall, search, whistle, heard, cq, connect,
          link, chat, qsy, away, depot, depotPost, depotLists, log,
-         station, modem, radio, demo, autoAnswer,
+         station, modem, radio, demo, autoAnswer, autoAccept,
          encryption, linkE2e, cqKind, roundtable, tableJoin, tableJoinWait, tableMembers, tableSay
 
     var id: String { rawValue }
@@ -73,6 +73,8 @@ enum HelpTopic: String, CaseIterable, Identifiable {
             ("At the table", "Who's at the table. Tap a member to pass them the floor (the talking stick): a courtesy so people take turns, not a lock. The number is how well they hear the host. Leave says goodbye and stops listening.")
         case .tableSay:
             ("Roundtable message", "Goes to everyone at the table as broadcast frames. They aren't acknowledged, so a station missing part of a message asks for just that part again.")
+        case .autoAccept:
+            ("Accept files while away", "While you're away, a file a station offers is accepted by itself, as if you had tapped Accept, when it's no bigger than the limit (5 MB unless you change it). A bigger one waits for you. Files are saved like any other and never opened. Off by default.")
         case .autoAnswer:
             ("Answer automatically", "When a search locks onto a whistle and the caller's CQ is decoded, connect at once instead of waiting for you to tap Answer. A CQ for a Roundtable is answered by joining the table.")
         }

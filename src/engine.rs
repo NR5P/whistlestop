@@ -3463,6 +3463,20 @@ impl Station {
                 // A library file we asked for: take it.
                 if self.wanted.remove(&fid) {
                     self.answer_offer(fid, true).await?;
+                } else if self.away && self.cfg.auto_accept_away {
+                    // Away, with no one to press Accept: take it if it's
+                    // within the limit; a bigger one waits for you.
+                    let max = (self.cfg.auto_accept_max_mb * 1e6) as u64;
+                    if size <= max {
+                        self.log(format!("🤖 Away: accepting {name} from {peer} by itself"));
+                        self.answer_offer(fid, true).await?;
+                    } else {
+                        self.log(format!(
+                            "Away: {name} ({}) is over the {} limit for accepting files by itself; it waits for you",
+                            modes::human_bytes(size as usize),
+                            modes::human_bytes(max as usize)
+                        ));
+                    }
                 }
             }
             Link::Answer {
@@ -6222,6 +6236,72 @@ mod tests {
         });
         h.send(Cmd::Stop);
         std::fs::remove_dir_all(&cfg.download_dir).ok();
+    }
+
+    /// Away with "accept files by myself" on: an offered file within the
+    /// limit is taken without anyone pressing Accept; a bigger one waits.
+    #[test]
+    fn away_accepts_files_within_the_limit() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let f = rt
+            .block_on(crate::fake_mercury::FakeMercury::start(FakeOptions {
+                fast: true,
+                bot_e2e: e2e::Policy::Off,
+                ..Default::default()
+            }))
+            .unwrap();
+        let h = spawn(|| {});
+        let mut cfg = Config {
+            callsign: "N0AWAY".into(),
+            demo: false,
+            rigctld: "none".into(),
+            mercury_port: f.port,
+            mercury_bcast_port: f.bcast_port,
+            auto_accept_away: true,
+            // The bot's file is about 3 KB: over this.
+            auto_accept_max_mb: 0.001,
+            ..Default::default()
+        };
+        cfg.sdr.enabled = false;
+        cfg.sdr.wide_search = false;
+        cfg.download_dir = std::env::temp_dir().join(format!("ws-awayfiles-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&cfg.download_dir);
+        h.send(Cmd::Start(cfg.clone()));
+        let wait = |what: &str, secs: u64, f: &dyn Fn(&State) -> bool| {
+            let t = Instant::now();
+            while t.elapsed() < Duration::from_secs(secs) {
+                if f(&h.state.lock().unwrap()) {
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            let g = h.state.lock().unwrap();
+            let log: Vec<_> = g.log.iter().map(|l| l.1.clone()).collect();
+            panic!("timed out waiting for {what}; log:\n{}", log.join("\n"));
+        };
+        wait("Mercury", 10, &|s| s.mercury_ok);
+        h.send(Cmd::SetAway(true));
+        h.send(Cmd::Connect("K7BOT".into()));
+        wait("link", 30, &|s| s.link.is_some());
+        let incoming = |s: &State| -> Vec<XferState> {
+            s.transfers.iter().filter(|t| t.dir == Dir::In).map(|t| t.state.clone()).collect()
+        };
+        // Over the limit: it waits for you.
+        h.send(Cmd::Chat("send me a file please".into()));
+        wait("the offer", 30, &|s| incoming(s).contains(&XferState::WaitingForYou));
+        std::thread::sleep(Duration::from_secs(2));
+        assert_eq!(incoming(&h.state.lock().unwrap()), vec![XferState::WaitingForYou]);
+        assert!(h.state.lock().unwrap().log.iter().any(|l| l.1.contains("over the")));
+        // Within the limit: taken by itself.
+        cfg.auto_accept_max_mb = 5.0;
+        h.send(Cmd::Update(cfg.clone()));
+        h.send(Cmd::Chat("send me another file".into()));
+        wait("the file, accepted by itself", 30, &|s| {
+            incoming(s).iter().any(|x| matches!(x, XferState::Done(Some(_))))
+        });
+        h.send(Cmd::Stop);
+        std::fs::remove_dir_all(&cfg.download_dir).ok();
+        drop(rt);
     }
 
     /// A station that sends a file's pieces without waiting for the answer

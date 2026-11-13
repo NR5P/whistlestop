@@ -86,6 +86,10 @@ enum class HelpTopic(val title: String, val body: String) {
         "Demo station",
         "Try Whistlestop without a radio: a simulated band with a demo station (K7BOT) that whistles, calls CQ and chats back.",
     ),
+    autoAccept(
+        "Accept files while away",
+        "While you're away, a file a station offers is accepted by itself, as if you had tapped Accept, when it's no bigger than the limit (5 MB unless you change it). A bigger one waits for you. Files are saved like any other and never opened. Off by default.",
+    ),
     autoAnswer(
         "Answer automatically",
         "When a search locks onto a whistle and the caller's CQ is decoded, connect at once instead of waiting for you to tap Answer. A CQ for a Roundtable is answered by joining the table.",

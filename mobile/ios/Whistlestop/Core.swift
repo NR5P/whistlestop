@@ -160,6 +160,9 @@ final class Core: ObservableObject {
     func boolBinding(_ key: String) -> Binding<Bool> {
         Binding(get: { self.bool(key) }, set: { self.config[key] = $0 })
     }
+    func doubleBinding(_ key: String) -> Binding<Double> {
+        Binding(get: { self.number(key) }, set: { self.config[key] = $0 })
+    }
     func intBinding(_ key: String) -> Binding<Int> {
         Binding(get: { Int(self.number(key)) }, set: { self.config[key] = $0 })
     }

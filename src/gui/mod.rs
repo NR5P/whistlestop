@@ -2301,6 +2301,14 @@ impl App {
                             ui.label("Hang up quiet links after");
                             ui.add(egui::Slider::new(&mut c.away_idle_s, 60.0..=900.0).suffix(" s").integer()).help(&help::ST_AWAY_IDLE);
                         });
+                        ui.horizontal(|ui| {
+                            ui.checkbox(&mut c.auto_accept_away, "Accept files by myself, each up to").help(&help::ST_AUTO_ACCEPT);
+                            ui.add_enabled(
+                                c.auto_accept_away,
+                                egui::DragValue::new(&mut c.auto_accept_max_mb).range(0.1..=200.0).speed(0.1).fixed_decimals(1).suffix(" MB"),
+                            )
+                            .help(&help::ST_AUTO_ACCEPT);
+                        });
                         ui.add_space(4.0);
                         ui.label(RichText::new("Station ID").strong());
                         ui.horizontal(|ui| {

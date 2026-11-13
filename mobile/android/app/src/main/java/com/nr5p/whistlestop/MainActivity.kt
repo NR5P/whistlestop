@@ -743,6 +743,23 @@ private fun SettingsScreen(station: Station, s: EngineState) {
             Field(str("mercury_port"), { v -> v.toIntOrNull()?.let { n -> station.edit { it["mercury_port"] = JsonPrimitive(n) } } },
                 "Port", Modifier.fillMaxWidth(), caps = false, number = true)
         }
+        WCard("While away", HelpTopic.autoAccept) {
+            val on = (cfg["auto_accept_away"] as? JsonPrimitive)?.content == "true"
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text("Accept files by myself", color = C.text, modifier = Modifier.weight(1f))
+                Switch(
+                    on,
+                    { v -> station.edit { it["auto_accept_away"] = JsonPrimitive(v) } },
+                    colors = SwitchDefaults.colors(checkedTrackColor = C.teal),
+                    modifier = Modifier.semantics { contentDescription = "Accept files by myself while away" },
+                )
+            }
+            if (on) {
+                Field(str("auto_accept_max_mb"), { v -> v.toDoubleOrNull()?.let { n -> station.edit { it["auto_accept_max_mb"] = JsonPrimitive(n) } } },
+                    "Each up to (MB)", Modifier.fillMaxWidth(), caps = false, number = true)
+            }
+            Text("Off by default. A bigger file waits for you. Takes effect when you tap Save.", color = C.dim, fontSize = 12.sp)
+        }
         WCard("Encryption", HelpTopic.encryption) {
             val e2e = str("e2e").ifEmpty { "off" }
             Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {

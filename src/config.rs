@@ -86,6 +86,10 @@ pub struct Config {
     pub away_message: String,
     /// While away, hang up a link that has been quiet this long (s).
     pub away_idle_s: f64,
+    /// While away: accept offered files by yourself (no one is there to
+    /// press Accept), up to `auto_accept_max_mb` each.
+    pub auto_accept_away: bool,
+    pub auto_accept_max_mb: f64,
     /// Send a Station ID beacon every `beacon_minutes` (no whistle).
     pub beacon: bool,
     pub beacon_minutes: f64,
@@ -188,6 +192,8 @@ impl Default for Config {
             mercury_bin: String::new(),
             away_message: "Away from the radio right now. Type a message and it will wait for me in my Depot. 73".into(),
             away_idle_s: 180.0,
+            auto_accept_away: false,
+            auto_accept_max_mb: 5.0,
             beacon: false,
             beacon_minutes: 30.0,
             notify_mail: false,
@@ -353,6 +359,7 @@ impl Config {
         num32(&mut n, "swr_limit", &mut self.swr_limit, 1.1, 10.0, d.swr_limit);
         num32(&mut n, "monitor_volume", &mut self.monitor_volume, 0.0, 1.5, d.monitor_volume);
         num(&mut n, "away_idle_s", &mut self.away_idle_s, 0.5, 86_400.0, d.away_idle_s);
+        num(&mut n, "auto_accept_max_mb", &mut self.auto_accept_max_mb, 0.0, 4096.0, d.auto_accept_max_mb);
         num(&mut n, "beacon_minutes", &mut self.beacon_minutes, 10.0, 120.0, d.beacon_minutes);
         // Negative would mean "anywhere" (0): a typo mustn't widen it.
         if self.qsy_max_khz < 0.0 {
