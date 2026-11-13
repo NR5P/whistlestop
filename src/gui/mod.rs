@@ -497,11 +497,7 @@ impl App {
                     (None, Some(_)) => ("🛰 Shared", CARD_HI, GREEN),
                     _ => ("🛰 Remote", CARD_HI, TEXT),
                 };
-                // One width for all four labels: a LAN client connecting
-                // mustn't push the rest of the top bar sideways.
-                let rb = egui::Button::new(RichText::new(rl).size(bs).strong().color(fg))
-                    .fill(fill)
-                    .min_size(vec2(bs * 7.2, 0.0));
+                let rb = egui::Button::new(RichText::new(rl).size(bs).strong().color(fg)).fill(fill);
                 let tip = match (&self.client, &self.server) {
                     (Some(c), _) => format!("Operating {}", c.desc),
                     (None, Some(srv)) => format!("Sharing this station on the LAN (port {}); {} connected", srv.port, srv.clients.lock().unwrap().len()),
