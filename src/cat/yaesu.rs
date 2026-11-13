@@ -197,7 +197,8 @@ impl Driver for Yaesu {
             "RF" => self.s(&format!("RG0{:03};", n(255.0))),
             "SQL" => self.s(&format!("SQ0{:03};", n(100.0))),
             "MICGAIN" => self.s(&format!("MG{:03};", n(100.0))),
-            "RFPOWER" => self.s(&format!("PC{:03};", n(self.max_w).max(5))),
+            // Three digits (see kenwood.rs): never more than 999.
+            "RFPOWER" => self.s(&format!("PC{:03};", n(self.max_w).clamp(5, 999))),
             "PREAMP" => self.s(&format!(
                 "PA0{};",
                 if v >= 15.0 {

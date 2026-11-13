@@ -362,9 +362,12 @@ impl Driver for Kenwood {
             return self.s(&format!("{prefix}{n:0digits$};"));
         }
         match name {
+            // Three digits: a max power set above 999 W (allowed up to
+            // 2000 for other radios) would make "PC2000;", which the radio
+            // misreads.
             "RFPOWER" => self.s(&format!(
                 "PC{:03};",
-                (v.clamp(0.0, 1.0) * self.max_w).round() as u32
+                ((v.clamp(0.0, 1.0) * self.max_w).round() as u32).min(999)
             )),
             "PREAMP" if self.v != Variant::Plain => self.s(&format!("PA{};", (v > 0.0) as u8)),
             "ATT" if self.v != Variant::Plain => self.s(&format!("RA{:02};", (v > 0.0) as u8)),

@@ -137,6 +137,51 @@ building any audio stream now reports its message instead of "did not
 start". Checked with `airtest whistle`: 4/4, no false alarm in 15 s of
 quiet, then the computer heard the phone's CQ whistle 3 s in (score 0.9).
 
+## Third bug hunt: transmit safety, phones, search and audio (2026-11-12, night)
+
+Four more read-throughs (rig/CAT/PTT, search and SDR, audio and modes, the
+UI logic of all three apps), each finding checked against the code:
+
+- **Never left transmitting** (`341a375`): a whistle whose sound output
+  stopped held PTT for ever (playback now gives up 3 s after the sound's
+  length, and the CQ unkeys); a failed unkey was never retried (now owed and
+  retried every poll); a late rigctld reply was read as the next command's,
+  giving wrong PTT results both ways (a fresh connection after any timeout,
+  which also follows a restarted rigctld; test `rig::a_late_reply_is_not_the_next_commands`
+  fails without it); TX shown stayed on after a hand-mic or tuner
+  transmission; shutdown unkeyed before closing the port Mercury keys
+  through; `T VFOA 0` or a bare `T` on the shared port keyed the radio.
+- **Phones** (`2d874c7`): they couldn't see an outgoing call (Join even went
+  through mid-CONNECT; the engine now refuses it too); Answer automatically
+  saved every unsaved Settings edit; numbers typed in Settings were lost on
+  iOS or fought on Android, and an out-of-range port failed Save silently;
+  chat stopped scrolling after 500 lines; comma decimals; bands offered that
+  Search refuses.
+- **Search, SDR, audio** (`270ad77`): an SDR hit or Lock on retuned the radio
+  off a Roundtable; a failed retune left a dead search shown as running; a
+  failed sound device left audio green with a frozen waterfall; one NaN
+  sample panicked the detectors; a custom wide segment over ~200 kHz showed
+  phantom whistles 256 kHz away; a stalled RTL-SDR held its thread and the
+  device; MFSK500's BITRATE code (103, not 100) and Mercury's "0 BPS"
+  placeholder (ETAs of 22 h).
+- **Bench**: the iPhone Simulator's and Android emulator's own app settings
+  were left as the bench's stations (`0aee326`).
+
+Not changed:
+- The desktop Remote button still changes width with its label (a fixed
+  width broke the window test that opens and closes the Guide, which the
+  test harness draws over the main window).
+- The iPhone app drops the whole state if one number is NaN (none is sent today).
+- Roundtable speed changes timed by a clock rather than by the two
+  announcements going out; members' SNR reports that may not be about the
+  host, and the host ignoring members' bandwidth (left for the Roundtable
+  work going on in parallel).
+- The ether (test band) doesn't stop its threads when stopped; the
+  simulated band's phase jumps every 50 ms distort offsets by a few Hz.
+- `fine_offset` checks one alias only (latent: not seen past ~900 Hz).
+- "scan speed, weak signal" misses 1 of 4 now and then (twice in five runs
+  today, before and after these changes; 4/4 on the reruns).
+
 ## Closed tables, links at a table, remote backstop (2026-11-12, night)
 
 Mercury 1.9.23 on the ether, Ubuntu on WSL 2, on top of `1c40080`:
