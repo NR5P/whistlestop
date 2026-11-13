@@ -373,12 +373,23 @@ impl LiveOutput {
         }
     }
 
-    pub async fn play(&self, samples: &[f32]) {
+    /// Play `samples` and wait until they're out. False if the device
+    /// stopped taking them (unplugged, its stream failed): after the
+    /// sound's own length plus 3 s the rest is dropped, so whoever keyed
+    /// the radio for it can unkey instead of waiting for ever.
+    pub async fn play(&self, samples: &[f32]) -> bool {
+        let secs = samples.len() as f64 / self.rate.max(1) as f64;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs_f64(secs + 3.0);
         self.queue.lock().unwrap().extend(samples.iter().copied());
         while !self.queue.lock().unwrap().is_empty() {
+            if tokio::time::Instant::now() >= deadline {
+                self.queue.lock().unwrap().clear();
+                return false;
+            }
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
         tokio::time::sleep(Duration::from_millis(60)).await; // device buffer
+        true
     }
 
     pub fn abort(&self) {
@@ -829,5 +840,28 @@ mod built_tests {
         let e = r.unwrap_err().to_string();
         assert!(e.contains("android context was not initialized"), "{e}");
         assert_eq!(super::built(|| Ok(7)).unwrap(), 7);
+    }
+}
+
+#[cfg(test)]
+mod play_tests {
+    use super::*;
+
+    /// A sound output that stops taking samples (unplugged, its stream
+    /// failed) doesn't hold `play`, and with it the radio's PTT, for ever:
+    /// it gives up 3 s after the sound's own length.
+    #[tokio::test]
+    async fn play_gives_up_when_the_device_stops() {
+        let o = LiveOutput {
+            queue: Default::default(),
+            rate: 8000,
+            stop: Arc::new(AtomicBool::new(false)),
+        };
+        let t = std::time::Instant::now();
+        let finished = o.play(&vec![0.1; 8000]).await; // 1 s, never drained
+        assert!(!finished);
+        let took = t.elapsed().as_secs_f64();
+        assert!((3.5..6.0).contains(&took), "took {took:.1} s");
+        assert!(o.queue.lock().unwrap().is_empty(), "the rest was dropped");
     }
 }

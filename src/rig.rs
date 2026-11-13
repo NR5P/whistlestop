@@ -27,6 +27,11 @@ pub struct RigStatus {
 pub struct RigctldClient {
     r: BufReader<OwnedReadHalf>,
     w: OwnedWriteHalf,
+    addr: String,
+    /// A reply timed out (it may still come, and would be read as the next
+    /// command's) or the connection dropped: the next command opens a
+    /// fresh connection first. That also follows a rigctld that restarted.
+    stale: bool,
 }
 
 impl RigctldClient {
@@ -40,13 +45,34 @@ impl RigctldClient {
         Ok(Self {
             r: BufReader::new(r),
             w,
+            addr: addr.to_string(),
+            stale: false,
         })
+    }
+
+    /// Before a command: a fresh connection if the last one went wrong.
+    async fn ready(&mut self) -> Result<()> {
+        if self.stale {
+            *self = Self::connect(&self.addr.clone()).await?;
+        }
+        Ok(())
     }
 
     async fn line(&mut self) -> Result<String> {
         let mut l = String::new();
-        let n = tokio::time::timeout(Duration::from_secs(3), self.r.read_line(&mut l)).await??;
+        let n = match tokio::time::timeout(Duration::from_secs(3), self.r.read_line(&mut l)).await {
+            Err(_) => {
+                self.stale = true;
+                bail!("rigctld did not answer in 3 s");
+            }
+            Ok(Err(e)) => {
+                self.stale = true;
+                return Err(e.into());
+            }
+            Ok(Ok(n)) => n,
+        };
         if n == 0 {
+            self.stale = true;
             bail!("rigctld closed the connection");
         }
         Ok(l.trim().to_string())
@@ -54,8 +80,13 @@ impl RigctldClient {
 
     /// A set command: one `RPRT n` line back.
     async fn set(&mut self, cmd: &str) -> Result<()> {
+        self.ready().await?;
+        // Stale until the whole reply is read: an exchange cut short (a
+        // timeout here or around the call) leaves it for a fresh connection.
+        self.stale = true;
         self.w.write_all(format!("{cmd}\n").as_bytes()).await?;
         let l = self.line().await?;
+        self.stale = false;
         if l != "RPRT 0" {
             bail!("rigctld: {cmd:?} -> {l}");
         }
@@ -64,15 +95,20 @@ impl RigctldClient {
 
     /// A get command returning `n` lines (or an `RPRT` error).
     async fn get(&mut self, cmd: &str, n: usize) -> Result<Vec<String>> {
+        self.ready().await?;
+        self.stale = true;
         self.w.write_all(format!("{cmd}\n").as_bytes()).await?;
         let mut out = vec![];
         for _ in 0..n {
             let l = self.line().await?;
             if l.starts_with("RPRT") {
+                // An error answer is a whole reply: still in step.
+                self.stale = false;
                 bail!("rigctld: {cmd:?} -> {l}");
             }
             out.push(l);
         }
+        self.stale = false;
         Ok(out)
     }
 }
@@ -353,6 +389,8 @@ impl Rig {
     pub async fn caps(&mut self) -> Result<RigCaps> {
         match self {
             Rig::Rigctld(c) => {
+                c.ready().await?;
+                c.stale = true;
                 c.w.write_all(b"\\dump_caps\n").await?;
                 let mut text = String::new();
                 loop {
@@ -363,6 +401,7 @@ impl Rig {
                     text.push_str(&l);
                     text.push('\n');
                 }
+                c.stale = false;
                 Ok(RigCaps::parse(&text))
             }
             Rig::Cat(h) => Ok(h.caps.clone()),
@@ -558,6 +597,43 @@ mod tests {
     use super::*;
     use tokio::io::AsyncReadExt;
     use tokio::net::TcpListener;
+
+    /// A reply that comes after its command gave up (3 s) must not be read
+    /// as the next command's: the client reconnects, and the next command
+    /// gets its own answer. (Before, PTT results came back for the wrong
+    /// command, both ways.)
+    #[tokio::test]
+    async fn a_late_reply_is_not_the_next_commands() {
+        let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = l.local_addr().unwrap().to_string();
+        tokio::spawn(async move {
+            let mut first = true;
+            while let Ok((s, _)) = l.accept().await {
+                let slow = std::mem::replace(&mut first, false);
+                tokio::spawn(async move {
+                    let (r, mut w) = s.into_split();
+                    let mut lines = BufReader::new(r).lines();
+                    while let Ok(Some(cmd)) = lines.next_line().await {
+                        let reply = match cmd.as_str() {
+                            "f" => "14074000\n",
+                            _ => "RPRT 0\n",
+                        };
+                        if slow {
+                            tokio::time::sleep(Duration::from_millis(3500)).await;
+                        }
+                        let _ = w.write_all(reply.as_bytes()).await;
+                    }
+                });
+            }
+        });
+        let mut r = Rig::Rigctld(RigctldClient::connect(&addr).await.unwrap());
+        assert!(r.ptt(false).await.is_err(), "the first answer is late");
+        tokio::time::sleep(Duration::from_millis(800)).await; // it arrives now
+        // On a fresh connection: "f" gets the frequency, not T's late RPRT 0.
+        let Rig::Rigctld(c) = &mut r else { unreachable!() };
+        assert_eq!(c.get("f", 1).await.unwrap(), vec!["14074000".to_string()]);
+        r.ptt(false).await.unwrap();
+    }
 
     /// A tiny rigctld that answers the commands we send.
     async fn fake_rigctld() -> String {

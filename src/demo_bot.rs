@@ -293,7 +293,7 @@ pub async fn run(p: BotPorts, stop: std::sync::Arc<std::sync::atomic::AtomicBool
                     next_cq = now + Duration::from_secs(45);
                     rig.ptt(true).await?;
                     let o = out.clone();
-                    whistling = Some(tokio::spawn(async move { o.play(&whistle(10.0, &WhistleParams::default())).await }));
+                    whistling = Some(tokio::spawn(async move { { o.play(&whistle(10.0, &WhistleParams::default())).await; } }));
                 }
             }
         }

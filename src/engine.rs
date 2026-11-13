@@ -656,7 +656,9 @@ impl Search {
 }
 
 enum CqPhase {
-    Whistle { done: Arc<AtomicBool> },
+    /// `until`: by then the whistle has finished or the sound output has
+    /// failed; either way the radio is unkeyed.
+    Whistle { done: Arc<AtomicBool>, until: Instant },
     Frame { until: Instant },
     Listen { until: Instant },
 }
@@ -748,6 +750,16 @@ struct Station {
     rig_server: Option<crate::rigserve::RigServer>,
     rig_caps: crate::rig::RigCaps,
     rig_watch: bool,
+    /// Who has the radio keyed: Whistlestop itself (a whistle), and Mercury
+    /// (its PTT lines). The shown TX is either, or what the radio reports.
+    engine_keyed: bool,
+    mercury_ptt: bool,
+    /// An unkey that failed (CAT upset by RF, rigctld not answering): it's
+    /// owed to the radio and retried on every poll until it goes through.
+    unkey_owed: bool,
+    /// The last radio error logged, and when: the same one isn't logged
+    /// again every poll.
+    rig_err: Option<(String, Instant)>,
     last_ext_poll: Instant,
     tx_was: bool,
     swr_peak: f32,
@@ -991,6 +1003,10 @@ impl Station {
             rig_server: None,
             rig_caps: Default::default(),
             rig_watch: false,
+            engine_keyed: false,
+            mercury_ptt: false,
+            unkey_owed: false,
+            rig_err: None,
             last_ext_poll: Instant::now(),
             tx_was: false,
             swr_peak: 0.0,
@@ -1379,11 +1395,19 @@ impl Station {
         }
         self.sim_stop.store(true, Ordering::Relaxed);
         self.sdr_stop.store(true, Ordering::Relaxed);
-        if let Some(r) = self.rig.as_mut() {
-            let _ = r.ptt(false).await;
-        }
+        // First close the shared radio port, so Mercury can't key the radio
+        // after this (its client's unkey is queued to the radio as it goes),
+        // and stop Mercury listening; then unkey, last, and wait for it.
+        drop(self.rig_server.take());
         if let Some(t) = self.tnc.as_mut() {
             let _ = t.command("LISTEN OFF").await;
+        }
+        if let Some(r) = self.rig.as_mut() {
+            for _ in 0..3 {
+                if r.ptt(false).await.is_ok() {
+                    break;
+                }
+            }
         }
         for i in self.incoming.values() {
             i.save_partial();
@@ -1622,6 +1646,16 @@ impl Station {
     }
 
     async fn poll_rig(&mut self) {
+        if self.unkey_owed && !self.engine_keyed {
+            let ok = match self.rig.as_mut() {
+                Some(r) => r.ptt(false).await.is_ok(),
+                None => return,
+            };
+            if ok {
+                self.unkey_owed = false;
+                self.log("Radio unkeyed (after an earlier failure)".into());
+            }
+        }
         let Some(r) = self.rig.as_mut() else { return };
         match r.poll().await {
             Ok(status) => {
@@ -1634,13 +1668,20 @@ impl Station {
                 if moved {
                     self.last_tune = Instant::now(); // turned by hand on the radio
                 }
-                let tx = status.ptt;
+                // TX as the radio has it, or as Whistlestop or Mercury keyed
+                // it (a poll can just miss a key-up): a transmission someone
+                // else made (a hand mic, the tuner) clears when it ends.
+                let tx = status.ptt || self.engine_keyed || self.mercury_ptt;
+                if status.ptt && self.unkey_owed && !self.engine_keyed && !self.mercury_ptt {
+                    self.log("⚠ The radio is still keyed: unkeying again".into());
+                }
+                if let Some((e, _)) = self.rig_err.take() {
+                    self.log(format!("Radio: back ({e} cleared)"));
+                }
                 self.set(|g| {
                     g.rig = status;
                     g.rig_ok = true;
-                    if tx {
-                        g.tx = true;
-                    }
+                    g.tx = tx;
                 });
                 self.poll_meters().await;
                 if self.rig_watch && self.last_ext_poll.elapsed() > Duration::from_millis(1500) {
@@ -1650,7 +1691,17 @@ impl Station {
             }
             Err(e) => {
                 self.set(|g| g.rig_ok = false);
-                self.log(format!("⚠ Radio: {e}"));
+                // The same error every poll (0.7 s) would bury the Log: once,
+                // then again only if it changes or once a minute.
+                let e = e.to_string();
+                let quiet = self
+                    .rig_err
+                    .as_ref()
+                    .is_some_and(|(last, at)| *last == e && at.elapsed() < Duration::from_secs(60));
+                if !quiet {
+                    self.log(format!("⚠ Radio: {e}"));
+                    self.rig_err = Some((e, Instant::now()));
+                }
             }
         }
     }
@@ -2084,12 +2135,27 @@ impl Station {
     }
 
     async fn ptt(&mut self, on: bool) {
-        if let Some(r) = self.rig.as_mut()
-            && let Err(e) = r.ptt(on).await
-        {
-            self.log(format!("⚠ PTT: {e}"));
+        self.engine_keyed = on;
+        if let Some(r) = self.rig.as_mut() {
+            match r.ptt(on).await {
+                Ok(()) => {
+                    if !on {
+                        self.unkey_owed = false;
+                    }
+                }
+                Err(e) => {
+                    if on {
+                        self.log(format!("⚠ PTT: {e}"));
+                    } else {
+                        // Never leave the radio keyed: keep trying.
+                        self.unkey_owed = true;
+                        self.log(format!("⚠ Unkeying the radio failed ({e}); trying again"));
+                    }
+                }
+            }
         }
-        self.set(|g| g.tx = on);
+        let mercury = self.mercury_ptt;
+        self.set(|g| g.tx = on || mercury);
     }
 
     // -------------------------------------------------------------- search
@@ -2584,8 +2650,11 @@ impl Station {
         let Some(cq) = self.cq.as_mut() else { return };
         cq.cycle += 1;
         let done = Arc::new(AtomicBool::new(false));
-        cq.phase = CqPhase::Whistle { done: done.clone() };
         let secs = self.cfg.whistle_s;
+        cq.phase = CqPhase::Whistle {
+            done: done.clone(),
+            until: Instant::now() + Duration::from_secs_f64(secs + 5.0),
+        };
         let params = self.whistle_params();
         let out = self.output.clone();
         let mon = if self.cfg.demo {
@@ -2627,8 +2696,23 @@ impl Station {
         };
         let cycles = self.cfg.cq_cycles;
         let (cycle, table) = (cq.cycle, cq.table.clone());
+        if let CqPhase::Whistle { done, until } = &cq.phase
+            && !done.load(Ordering::Relaxed)
+            && Instant::now() >= *until
+        {
+            // The sound output stopped taking the whistle (unplugged, its
+            // stream failed): don't hold the radio keyed waiting for it.
+            if let Some(o) = &self.output {
+                o.abort();
+            }
+            self.ptt(false).await;
+            self.log("⚠ The whistle didn't finish playing (has the radio's sound output gone?): unkeyed, CQ stopped".into());
+            self.cq = None;
+            self.set(|g| g.cq = CqView::default());
+            return Ok(());
+        }
         let phase = match &cq.phase {
-            CqPhase::Whistle { done } if done.load(Ordering::Relaxed) => {
+            CqPhase::Whistle { done, .. } if done.load(Ordering::Relaxed) => {
                 self.ptt(false).await;
                 let me = self.mycall();
                 let arq_bw = self.bw.mercury_arq_bw();
@@ -2971,9 +3055,13 @@ impl Station {
                     o.next = None; // re-offer (with resume) on the next link
                 }
                 self.hi_queue.clear();
+                // Mercury is done with the radio (a PTT OFF lost with the
+                // link would otherwise leave TX shown).
+                self.mercury_ptt = false;
+                let keyed = self.engine_keyed;
                 self.set(|g| {
                     g.link = None;
-                    g.tx = false;
+                    g.tx = keyed;
                     g.calling = None;
                     g.incoming_call = false;
                     for t in g.transfers.iter_mut() {
@@ -3073,7 +3161,9 @@ impl Station {
             }
             "PTT" => {
                 let on = l.ends_with("ON");
-                self.set(|g| g.tx = on);
+                self.mercury_ptt = on;
+                let keyed = self.engine_keyed;
+                self.set(|g| g.tx = on || keyed);
                 if let Some(r) = self.rig.as_mut().filter(|r| r.is_sim()) {
                     let _ = r.ptt(on).await;
                 }

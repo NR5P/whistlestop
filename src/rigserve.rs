@@ -59,11 +59,21 @@ impl Drop for KeyGuard {
     }
 }
 
+/// The PTT state a `T` command asks for: its last argument (after an
+/// optional VFO, in rigctld's VFO mode: `T VFOA 0`), a number. None for
+/// anything else (no argument, `T x`): refused, never taken as "key up".
+fn ptt_arg(args: &[&str]) -> Option<bool> {
+    args.last()?.parse::<u8>().ok().map(|n| n != 0)
+}
+
 /// `Some(on)` if this line asks to set PTT.
 fn ptt_request(line: &str) -> Option<bool> {
     let line = line.trim_start_matches(['+', ';', '|', ',']);
     let mut it = line.split_whitespace();
-    matches!(it.next(), Some("T" | "\\set_ptt")).then(|| it.next().unwrap_or("") != "0")
+    if !matches!(it.next(), Some("T" | "\\set_ptt")) {
+        return None;
+    }
+    ptt_arg(&it.collect::<Vec<_>>())
 }
 
 async fn client(s: TcpStream, radio: CatHandle) {
@@ -100,6 +110,8 @@ async fn client(s: TcpStream, radio: CatHandle) {
 const OK: &str = "RPRT 0\n";
 const ENIMPL: &str = "RPRT -4\n";
 const EIO: &str = "RPRT -6\n";
+/// Hamlib RIG_EINVAL: a malformed argument.
+const EINVAL: &str = "RPRT -1\n";
 
 /// The reply to one command line, or None to close the connection.
 async fn answer(radio: &CatHandle, line: &str) -> Option<String> {
@@ -148,8 +160,11 @@ async fn answer(radio: &CatHandle, line: &str) -> Option<String> {
             Err(_) => EIO.into(),
         }),
         "T" | "\\set_ptt" => {
-            let on = arg(0) != "0";
-            done(radio.call(move |d| d.set_ptt(on)).await)
+            let a: Vec<&str> = args.iter().map(String::as_str).collect();
+            match ptt_arg(&a) {
+                Some(on) => done(radio.call(move |d| d.set_ptt(on)).await),
+                None => Some(EINVAL.into()),
+            }
         }
         "v" | "\\get_vfo" => Some(format!(
             "{}\n",
@@ -271,6 +286,21 @@ fn dump_state(radio: &CatHandle) -> String {
 mod tests {
     use super::*;
     use crate::cat::sim::{Kind, SimRadio};
+
+    /// `T` takes its last argument as the state (after a VFO, in rigctld's
+    /// VFO mode), and anything that isn't a number is refused, never taken
+    /// as "key up".
+    #[test]
+    fn ptt_argument() {
+        assert_eq!(ptt_request("T 1"), Some(true));
+        assert_eq!(ptt_request("T 0"), Some(false));
+        assert_eq!(ptt_request("T VFOA 0"), Some(false));
+        assert_eq!(ptt_request("T VFOA 1"), Some(true));
+        assert_eq!(ptt_request("\\set_ptt 0"), Some(false));
+        assert_eq!(ptt_request("T"), None);
+        assert_eq!(ptt_request("T x"), None);
+        assert_eq!(ptt_request("t"), None);
+    }
 
     async fn ask(s: &mut BufReader<TcpStream>, cmd: &str, lines: usize) -> Vec<String> {
         s.get_mut()

@@ -596,6 +596,14 @@ With **Settings → Radio connection → Direct CAT (built in)**, Whistlestop co
 
 **Sharing with Mercury.** Only one program can open the serial port, so Whistlestop serves the rigctld protocol on **Share with Mercury on port** (default 4532). Set Mercury to **Hamlib model 2 (NET rigctl)** at `127.0.0.1:4532` and it keys the radio through Whistlestop. Loggers and other programs that speak rigctld can use it too. Turn sharing off only if Mercury keys the radio another way (VOX, or its own PTT port). If a program keys the radio through this port and then disconnects or crashes without unkeying, Whistlestop unkeys the radio for it. Quitting Whistlestop also waits (up to 3 s) until the radio is unkeyed.
 
+**Never left transmitting.** Whistlestop keeps the radio from staying keyed when something goes wrong:
+- If the radio's sound output stops taking the whistle (unplugged, or its stream failed), the whistle gives up 3 s after its own length: the radio is unkeyed, the CQ stops, and the Log says "⚠ The whistle didn't finish playing …".
+- If an unkey fails (CAT upset by RF, rigctld not answering), Whistlestop keeps trying on every radio poll (0.7 s) until it goes through ("⚠ Unkeying the radio failed …; trying again", then "Radio unkeyed").
+- The TX lamp shows what the radio reports, or what Whistlestop or Mercury keyed, so a transmission made another way (your mic, the antenna tuner) clears when it ends.
+- On the shared port, a PTT command needs its state as a number (`T 1`, `T 0`, or `T VFOA 0` in rigctld's VFO mode); anything else is refused, never taken as key up.
+- When Whistlestop stops, it closes the shared port first (so Mercury can't key the radio after that), stops Mercury listening, then unkeys the radio, trying up to 3 times.
+- With rigctld, a reply that comes too late, or a dropped connection, makes Whistlestop open a fresh connection for the next command, so a late answer is never taken for the next command's; it also reconnects by itself to a rigctld that restarted. The same radio error is logged once (again if it changes, or after a minute), and "Radio: back" when it clears.
+
 **FT-817 family PTT.** Whistlestop checks that the radio did key or unkey, from its acknowledgement or, failing that, its TX status; if it can't confirm, it reports an error instead of assuming the radio is receiving. The PTT readout comes from the radio's own TX status.
 
 **Kenwood TS-990.** Mode is read and set with the TS-990's own `OM` command (main band), including its data modes (USB-D, LSB-D, FM-D).
