@@ -204,7 +204,7 @@ fn analytic_spectrum(x: &[f64], fft: &Arc<dyn Fft<f64>>, nfft: usize) -> Vec<Com
 /// returned in time order.
 fn peaks(r: &[f64], threshold: f64, min_sep: usize) -> Vec<usize> {
     let mut idx: Vec<usize> = (0..r.len()).filter(|&i| r[i] > threshold).collect();
-    idx.sort_by(|&a, &b| r[b].partial_cmp(&r[a]).unwrap());
+    idx.sort_by(|&a, &b| r[b].total_cmp(&r[a]));
     let mut picked: Vec<usize> = Vec::new();
     for i in idx {
         if picked.iter().all(|&j| i.abs_diff(j) >= min_sep) {
@@ -228,7 +228,7 @@ fn refine(r: &[f64], i: usize) -> f64 {
 }
 
 fn median(v: &mut [f64]) -> f64 {
-    v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    v.sort_by(|a, b| a.total_cmp(b));
     let n = v.len();
     if n % 2 == 1 {
         v[n / 2]
@@ -513,7 +513,7 @@ impl TrackDetector {
         // cells, so a click or a burst can't fake a whole track.
         for b in 0..nb {
             let mut col: Vec<f64> = rows.iter().map(|r| r[b]).collect();
-            col.sort_by(|a, c| a.partial_cmp(c).unwrap());
+            col.sort_by(|a, c| a.total_cmp(c));
             let q = (col[(col.len() * 3) / 4] / 4f64.ln()).max(1e-30);
             rows.iter_mut().for_each(|r| r[b] /= q);
         }
@@ -656,6 +656,19 @@ mod tests {
     use super::*;
     use rand::{SeedableRng, rngs::StdRng};
     use rand_distr::{Distribution, Normal};
+
+    /// One sample that isn't a number (off a socket, say) doesn't panic the
+    /// detectors: the whole minute of audio held would otherwise panic them
+    /// on every look.
+    #[test]
+    fn a_nan_sample_does_not_panic() {
+        let p = WhistleParams::default();
+        let mut x = vec![0.01; 3 * FS as usize];
+        x[1000] = f64::NAN;
+        x[2000] = f64::INFINITY;
+        let _ = TrackDetector::new(p).scan(&x);
+        let _ = Detector::new(p).detect(&x);
+    }
 
     /// Whistle through a mistuned receiver with noise at `snr_db` (2500 Hz BW).
     fn received(off: f64, snr_db: f64, start: usize, len: usize, rng: &mut StdRng) -> Vec<f64> {

@@ -50,7 +50,9 @@ pub const MODES: &[Mode] = &[
     Mode {
         name: "MFSK500",
         index: 12,
-        bitrate_code: 100,
+        // Mercury's MERCURY_MODE_MFSK_N32 (32 tones in 500 Hz), which it
+        // reports as BITRATE (103); 100 is the 2300 Hz MFSK.
+        bitrate_code: 103,
         bandwidth_hz: 500,
         payload_bps: 31.0,
         frame_bytes: 98,
@@ -183,9 +185,7 @@ pub fn mode_by_index(index: u8) -> Option<&'static Mode> {
 }
 
 pub fn mode_by_bitrate_code(code: u16) -> Option<&'static Mode> {
-    MODES
-        .iter()
-        .find(|m| m.bitrate_code == code && m.name != "MFSK500")
+    MODES.iter().find(|m| m.bitrate_code == code)
 }
 
 /// Bandwidth the operator selects, narrow to wide.
@@ -405,6 +405,12 @@ impl ThroughputEstimator {
                 .ok()
         });
         let bps = it.next().and_then(|b| b.parse::<f64>().ok());
+        // Right after a link comes up Mercury answers "BITRATE (0) 0 BPS"
+        // (nothing measured yet): not a speed, and it would make every
+        // estimate hours long.
+        if code == Some(0) || bps.is_some_and(|b| !(b > 0.0)) {
+            return;
+        }
         if let Some(c) = code {
             self.reported_mode = mode_by_bitrate_code(c);
         }
@@ -442,6 +448,24 @@ impl ThroughputEstimator {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Mercury's codes: 103 is MFSK500 (32 tones in 500 Hz), 100 the 2300 Hz
+    /// MFSK. And its "0 BPS" placeholder before anything is measured isn't
+    /// taken as a speed.
+    #[test]
+    fn bitrate_lines() {
+        assert_eq!(mode_by_bitrate_code(103).map(|m| m.name), Some("MFSK500"));
+        assert_eq!(mode_by_bitrate_code(100).map(|m| m.name), Some("MFSK"));
+        let mut e = ThroughputEstimator::default();
+        e.on_bitrate_line("BITRATE (0) 0 BPS");
+        assert!(e.reported_bps.is_none() && e.reported_mode.is_none());
+        let fallback = e.bps(Bandwidth::Hz2300);
+        assert!(fallback > 1.0, "{fallback}");
+        assert!(e.eta_s(10_000, Bandwidth::Hz2300) < 3600.0);
+        e.on_bitrate_line("BITRATE (103) 38 BPS");
+        assert_eq!(e.reported_mode.map(|m| m.name), Some("MFSK500"));
+        assert_eq!(e.reported_bps, Some(38.0));
+    }
 
     #[test]
     fn ramps_up_with_snr() {

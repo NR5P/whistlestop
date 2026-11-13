@@ -207,11 +207,12 @@ Even when you're not searching, Whistlestop listens for whistles on the frequenc
 With an RTL-SDR running, tick **Wide search (SDR)** in the Search card. The SDR's wide view is split into virtual receivers every 1.8 kHz (with the default whistle) across the band's digital segment, and the whistle detector runs on all of them every second. A whistle anywhere in the segment is found within about 1.5 s, without moving your radio.
 
 - Hits appear under **Heard** with an **SDR** tag and a **Lock on** button, and as a 🚂 box on the wide waterfall.
-- **auto-tune**: tune the radio to new hits by itself (when you're not linked, calling or searching).
+- **auto-tune**: tune the radio to new hits by itself (when you're not linked, calling, being called or searching, and not at a Roundtable or joining one). **Lock on** is refused at a Roundtable too ("leave it first"): it would take the radio off the table's frequency.
 - **With a search running, both methods work together**, auto-tune or not. While the stepping search is still going channel to channel (listening, or holding on something whistle-like), a fresh SDR hit pauses it: the radio goes straight to the hit, fine-locks, and waits up to 45 s for the CQ. If the hit isn't confirmed or no CQ comes, the search resumes on the channel it was on ("Back to the … search" in the Log). A search that has already found a whistle itself (measuring it, or waiting for its CQ) is never interrupted. Each SDR frequency is tried at most once every 2 minutes (within 200 Hz), so one caller can't keep pulling the search away.
 - The stepping search still matters with an SDR: it covers any part of the segment the SDR can't see, and it hears through your radio's better front end.
 - **Lock on** (or auto-tune) tunes your radio to the hit and **fine-locks using the radio's own audio**. That matters because RTL-SDR crystals are often 15–50 ppm off (a few hundred Hz on HF), too far for Mercury. In the demo the SDR is deliberately 240 Hz off and the fine-lock removes it.
-- The SDR must be able to see the segment: with RX OUT it follows your radio (±800 kHz); with IF OUT it sees what your radio's IF passes.
+- The SDR must be able to see the segment: with RX OUT it follows your radio (±800 kHz); with IF OUT it sees what your radio's IF passes. A segment wider than about 200 kHz (only a custom one: the default segments all fit) is watched only in its middle 200 kHz; channels past that would wrap round in the SDR's spectrum and show whistles that aren't there.
+- If the dongle stops sending samples for 10 s, the wide receiver stops and releases it (turn it off and on in Settings to open it again).
 
 ### Heard
 
@@ -725,7 +726,9 @@ The **Whistle** length and **Answer automatically** are set on the main screen a
 
 - **Radio**: rigctld (or RigHelm's server) isn't running or the address is wrong. Check **Settings → rigctld**.
 - **Mercury**: Mercury isn't running, the ports differ, or another program (VarAC, vARIM) already holds Mercury's TNC port. Only one program at a time.
-- **Audio**: the audio device in Settings isn't available. Pick it again; on macOS allow microphone access for Whistlestop in System Settings → Privacy.
+- **Audio**: the audio device in Settings isn't available. Pick it again; on macOS allow microphone access for Whistlestop in System Settings → Privacy. It also turns red if the device stops working while running (unplugged, a driver error): the Log says "⚠ Sound: …". Plug it back in, then **Save & connect** to open it again.
+
+**"⚠ Search stopped: …" in the Log.** A search step needed the radio (a retune) and the radio didn't answer: the search ends and says why, instead of looking as if it were still running. Check the Radio pill, then search again.
 - **SDR**: no dongle found, or the wide receiver is off in Settings.
 
 **The radio isn't detected.**

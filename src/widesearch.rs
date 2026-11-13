@@ -167,13 +167,23 @@ impl WideWatch {
     }
 
     /// Dial frequencies of the virtual receivers covering the segment.
+    ///
+    /// Only those inside the decimated stream's usable 80 %: a segment
+    /// wider than that (a custom one over ~200 kHz) would have channels
+    /// past the band edge, whose audio wraps round from the other side of
+    /// the spectrum and shows phantom whistles 256 kHz away.
     pub fn channels(&self) -> Vec<f64> {
+        let half = 0.4 * self.fs as f64;
+        let (a_lo, a_hi) = crate::whistle::PASSBAND;
         bandplan::channels(
             &self.seg,
             self.step_hz,
             self.params.f_lo - 200.0,
             self.params.f_hi + 200.0,
         )
+        .into_iter()
+        .filter(|d| (d + a_lo - self.center_rf).abs() <= half && (d + a_hi - self.center_rf).abs() <= half)
+        .collect()
     }
 
     /// Cut 8 kHz USB receiver audio for `dial` out of the window spectrum.
@@ -277,6 +287,21 @@ mod tests {
     use rand::{SeedableRng, rngs::StdRng};
     use rand_distr::{Distribution, Normal};
 
+    /// A custom segment wider than the decimated stream's usable band gets
+    /// channels only inside it: past the edge the audio wraps round and
+    /// phantom whistles appear 256 kHz away.
+    #[test]
+    fn channels_stay_inside_the_usable_band() {
+        let seg = crate::bandplan::Segment { band: "10m".into(), lo_hz: 28_000_000.0, hi_hz: 28_300_000.0 };
+        let w = WideWatch::new(seg, WhistleParams::default(), 2000.0);
+        let half = 0.4 * w.fs as f64;
+        let ch = w.channels();
+        assert!(!ch.is_empty());
+        for d in ch {
+            assert!((d + 2700.0 - w.center_rf).abs() <= half && (d + 300.0 - w.center_rf).abs() <= half, "{d}");
+        }
+    }
+
     fn seg20() -> Segment {
         Segment {
             band: "20m".into(),
@@ -348,7 +373,7 @@ mod tests {
         }
         w.push(&x);
         let mut hits = w.scan();
-        hits.sort_by(|a, b| a.dial_hz.partial_cmp(&b.dial_hz).unwrap());
+        hits.sort_by(|a, b| a.dial_hz.total_cmp(&b.dial_hz));
         assert_eq!(hits.len(), 2, "{hits:?}");
         for (h, (dial, _)) in hits.iter().zip(callers) {
             assert!((h.dial_hz - dial).abs() < 3.0, "{} vs {dial}", h.dial_hz);

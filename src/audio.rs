@@ -199,14 +199,29 @@ fn find_device(name: &str, input: bool) -> Result<cpal::Device> {
 /// every platform) and feeds the shared RX buffer at 8 kHz.
 pub struct LiveInput {
     stop: Arc<AtomicBool>,
+    /// Why the stream stopped working, once it has (unplugged, a driver
+    /// error): the engine shows audio as down and says so.
+    failed: Failure,
+}
+
+/// A stream's failure, set from its error callback.
+pub type Failure = Arc<Mutex<Option<String>>>;
+
+fn note_failure(f: &Failure, what: &str, e: impl std::fmt::Display) {
+    let mut g = f.lock().unwrap();
+    if g.is_none() {
+        *g = Some(format!("{what}: {e}"));
+    }
 }
 
 impl LiveInput {
     pub fn start(device_name: &str, rx: SharedRx) -> Result<Self> {
         let stop = Arc::new(AtomicBool::new(false));
+        let failed: Failure = Default::default();
         let (ready_tx, ready_rx) = std::sync::mpsc::channel::<Result<()>>();
         let name = device_name.to_string();
         let st = stop.clone();
+        let fl = failed.clone();
         std::thread::spawn(move || {
             let build = || -> Result<cpal::Stream> {
                 let dev = find_device(&name, true)?;
@@ -223,7 +238,7 @@ impl LiveInput {
                         ds.process(&mono, &mut out);
                         rx.lock().unwrap().push(&out);
                     },
-                    |e| eprintln!("audio input error: {e}"),
+                    move |e| note_failure(&fl, "the radio's audio input", e),
                     None,
                 )?;
                 stream.play()?;
@@ -245,7 +260,12 @@ impl LiveInput {
         ready_rx
             .recv_timeout(Duration::from_secs(5))
             .map_err(|_| anyhow!("audio input did not start"))??;
-        Ok(Self { stop })
+        Ok(Self { stop, failed })
+    }
+
+    /// Why the input stopped working, if it has.
+    pub fn failure(&self) -> Option<String> {
+        self.failed.lock().unwrap().clone()
     }
 }
 
@@ -254,26 +274,35 @@ impl LiveInput {
     pub fn ether(mut stream: std::net::TcpStream, rx: SharedRx) -> Self {
         use std::io::Read;
         let stop = Arc::new(AtomicBool::new(false));
-        let st = stop.clone();
+        let failed: Failure = Default::default();
+        let (st, fl) = (stop.clone(), failed.clone());
         std::thread::spawn(move || {
             let mut buf = vec![0u8; 8192];
             let mut carry: Vec<u8> = vec![];
             while !st.load(Ordering::Relaxed) {
                 let n = match stream.read(&mut buf) {
-                    Ok(0) | Err(_) => break,
+                    Ok(0) | Err(_) => {
+                        if !st.load(Ordering::Relaxed) {
+                            note_failure(&fl, "the radio's audio input", "the connection closed");
+                        }
+                        break;
+                    }
                     Ok(n) => n,
                 };
                 carry.extend_from_slice(&buf[..n]);
                 let whole = carry.len() / 4 * 4;
+                // Raw floats off a socket: anything that isn't a number is
+                // silence (one NaN would poison every detector downstream).
                 let x: Vec<f32> = carry[..whole]
                     .chunks(4)
                     .map(|b| f32::from_le_bytes(b.try_into().unwrap()))
+                    .map(|v| if v.is_finite() { v } else { 0.0 })
                     .collect();
                 carry.drain(..whole);
                 rx.lock().unwrap().push(&x);
             }
         });
-        Self { stop }
+        Self { stop, failed }
     }
 }
 
@@ -289,6 +318,7 @@ pub struct LiveOutput {
     queue: Arc<Mutex<VecDeque<f32>>>,
     pub rate: u32,
     stop: Arc<AtomicBool>,
+    failed: Failure,
 }
 
 impl LiveOutput {
@@ -296,7 +326,9 @@ impl LiveOutput {
         let queue: Arc<Mutex<VecDeque<f32>>> = Default::default();
         let stop = Arc::new(AtomicBool::new(false));
         let (ready_tx, ready_rx) = std::sync::mpsc::channel::<Result<u32>>();
+        let failed: Failure = Default::default();
         let (q, st, name) = (queue.clone(), stop.clone(), device_name.to_string());
+        let fl = failed.clone();
         std::thread::spawn(move || {
             let build = || -> Result<(cpal::Stream, u32)> {
                 let dev = find_device(&name, false)?;
@@ -312,7 +344,7 @@ impl LiveOutput {
                             frame.iter_mut().for_each(|s| *s = v);
                         }
                     },
-                    |e| eprintln!("audio output error: {e}"),
+                    move |e| note_failure(&fl, "the radio's audio output", e),
                     None,
                 )?;
                 stream.play()?;
@@ -334,7 +366,12 @@ impl LiveOutput {
         let rate = ready_rx
             .recv_timeout(Duration::from_secs(5))
             .map_err(|_| anyhow!("audio output did not start"))??;
-        Ok(Self { queue, rate, stop })
+        Ok(Self { queue, rate, stop, failed })
+    }
+
+    /// Why the output stopped working, if it has.
+    pub fn failure(&self) -> Option<String> {
+        self.failed.lock().unwrap().clone()
     }
 
     /// Send audio to the test ether, paced in real time at 8 kHz.
@@ -342,7 +379,8 @@ impl LiveOutput {
         use std::io::Write;
         let queue: Arc<Mutex<VecDeque<f32>>> = Default::default();
         let stop = Arc::new(AtomicBool::new(false));
-        let (q, st) = (queue.clone(), stop.clone());
+        let failed: Failure = Default::default();
+        let (q, st, fl) = (queue.clone(), stop.clone(), failed.clone());
         std::thread::spawn(move || {
             let block = FS as usize / 50;
             let mut next = std::time::Instant::now();
@@ -354,7 +392,8 @@ impl LiveOutput {
                 };
                 if !chunk.is_empty() {
                     let bytes: Vec<u8> = chunk.iter().flat_map(|v| v.to_le_bytes()).collect();
-                    if stream.write_all(&bytes).is_err() {
+                    if let Err(e) = stream.write_all(&bytes) {
+                        note_failure(&fl, "the radio's audio output", e);
                         return;
                     }
                 }
@@ -370,6 +409,7 @@ impl LiveOutput {
             queue,
             rate: FS,
             stop,
+            failed,
         }
     }
 
@@ -850,12 +890,31 @@ mod play_tests {
     /// A sound output that stops taking samples (unplugged, its stream
     /// failed) doesn't hold `play`, and with it the radio's PTT, for ever:
     /// it gives up 3 s after the sound's own length.
+    /// An audio input whose stream ends is reported, so the engine can
+    /// show audio as down instead of a frozen waterfall.
+    #[test]
+    fn a_closed_input_is_reported() {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let c = std::net::TcpStream::connect(l.local_addr().unwrap()).unwrap();
+        let (s, _) = l.accept().unwrap();
+        let rx: SharedRx = Default::default();
+        let i = LiveInput::ether(c, rx);
+        assert!(i.failure().is_none());
+        drop(s);
+        let t = std::time::Instant::now();
+        while i.failure().is_none() && t.elapsed() < Duration::from_secs(3) {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(i.failure().is_some_and(|f| f.contains("audio input")), "{:?}", i.failure());
+    }
+
     #[tokio::test]
     async fn play_gives_up_when_the_device_stops() {
         let o = LiveOutput {
             queue: Default::default(),
             rate: 8000,
             stop: Arc::new(AtomicBool::new(false)),
+            failed: Default::default(),
         };
         let t = std::time::Instant::now();
         let finished = o.play(&vec![0.1; 8000]).await; // 1 s, never drained

@@ -410,11 +410,23 @@ fn run_dongle_usb(
     let mut wide = WideFront::new(out.clone());
     while !stop.load(Ordering::Relaxed) {
         let mut got = 0;
+        let mut empty = 0;
         while got < FFT_SIZE {
-            got += rx
+            // A dongle that stops streaming times out with 0 samples (not an
+            // error): still answer `stop`, and give up after 10 s of nothing,
+            // so the device is released and can be opened again.
+            if stop.load(Ordering::Relaxed) {
+                return Ok(());
+            }
+            let n = rx
                 .read(&mut buf[got..], Some(Duration::from_millis(500)))
                 .wait()
                 .map_err(|e| anyhow::anyhow!("{e}"))?;
+            empty = if n == 0 { empty + 1 } else { 0 };
+            if empty >= 20 {
+                anyhow::bail!("the RTL-SDR stopped sending samples");
+            }
+            got += n;
         }
         let vf = *vfo.lock().unwrap();
         let sp = *span.lock().unwrap();
@@ -570,7 +582,7 @@ mod tests {
             .levels
             .iter()
             .enumerate()
-            .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
+            .max_by(|a, b| a.1.total_cmp(b.1))
             .unwrap()
             .0;
         let f = r.start_hz + (peak as f64 + 0.5) * r.bin_hz;
@@ -580,7 +592,7 @@ mod tests {
             .levels
             .iter()
             .enumerate()
-            .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
+            .max_by(|a, b| a.1.total_cmp(b.1))
             .unwrap()
             .0;
         let f = r.start_hz + (peak as f64 + 0.5) * r.bin_hz;

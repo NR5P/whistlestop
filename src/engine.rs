@@ -682,6 +682,8 @@ struct Station {
     rx: SharedRx,
     _input: Option<LiveInput>,
     output: Option<Arc<LiveOutput>>,
+    /// A sound stream failure already reported (once is enough).
+    audio_failed: bool,
     sim_stop: Arc<AtomicBool>,
     sdr_stop: Arc<AtomicBool>,
     vfo: Arc<Mutex<f64>>,
@@ -955,6 +957,7 @@ impl Station {
             rx: rx.clone(),
             _input: None,
             output: None,
+            audio_failed: false,
             sim_stop: sim_stop.clone(),
             sdr_stop: Arc::new(AtomicBool::new(false)),
             vfo: vfo.clone(),
@@ -2100,9 +2103,11 @@ impl Station {
             }
             Cmd::SetSdrSpan(hz) => *self.sdr_span.lock().unwrap() = hz.clamp(5_000.0, 1_600_000.0),
             Cmd::LockOn(dial) => {
-                if self.cq.is_some() || self.peer.is_some() {
-                    anyhow::bail!("busy: stop the CQ or link first");
+                if self.cq.is_some() {
+                    anyhow::bail!("busy: stop the CQ first");
                 }
+                self.no_retune_while_linked()?;
+                self.not_at_table("lock on to a whistle")?;
                 self.wide_handoff(dial, 0.0);
             }
             Cmd::WideSearch { on, auto } => {
@@ -4885,6 +4890,22 @@ impl Station {
     // ---------------------------------------------------------------- tick
 
     async fn tick(&mut self) -> anyhow::Result<()> {
+        // A sound stream that stopped (unplugged, a driver error) shows as
+        // audio down, with why, instead of a frozen waterfall and silence.
+        if !self.audio_failed {
+            let why = self
+                ._input
+                .as_ref()
+                .and_then(|i| i.failure())
+                .or_else(|| self.output.as_ref().and_then(|o| o.failure()));
+            if let Some(why) = why {
+                self.audio_failed = true;
+                self.set(|g| g.audio_ok = false);
+                self.log(format!(
+                    "⚠ Sound: {why}. Check the radio's audio cable, then Save & connect (or restart) to open it again"
+                ));
+            }
+        }
         // An automatic call that hasn't linked: another station probably won
         // the CQ, or the station is gone. Stop calling (Mercury would go on
         // for minutes, on top of whoever is on the frequency).
@@ -4927,7 +4948,17 @@ impl Station {
             }
         }
         if self.search.is_some() {
-            self.step_search().await?;
+            if let Err(e) = self.step_search().await {
+                // A step that failed (the radio didn't take a retune) has
+                // dropped the search: say so, instead of a search shown
+                // running that isn't.
+                if self.search.is_none() {
+                    self.set(|g| g.search.active = false);
+                    self.log(format!("⚠ Search stopped: {e}"));
+                    return Ok(());
+                }
+                return Err(e);
+            }
         } else if self.cq.is_none() {
             self.step_watch();
         }
@@ -5735,10 +5766,16 @@ impl Station {
         // whistles"). One that is measuring a whistle or waiting for its
         // CQ is left alone.
         let scanning = self.search.as_ref().is_some_and(|s| s.interruptible());
+        // Nor at a Roundtable (a hand-off retunes the radio off it), or
+        // with a call or join on the way.
         let busy = (self.search.is_some() && !scanning)
             || self.cq.is_some()
             || self.peer.is_some()
-            || self.st.lock().unwrap().calling.is_some();
+            || self.at_table_or_joining()
+            || {
+                let g = self.st.lock().unwrap();
+                g.calling.is_some() || g.incoming_call
+            };
         if !self.wide_on || !(self.wide_auto || scanning) || busy {
             return Ok(());
         }
@@ -6412,6 +6449,41 @@ mod tests {
         });
         h.send(Cmd::Stop);
         std::fs::remove_dir_all(&cfg.download_dir).ok();
+    }
+
+    /// At a Roundtable, an SDR "Lock on" would retune the radio off the
+    /// table: refused, like Search.
+    #[test]
+    fn no_lock_on_at_a_table() {
+        let h = spawn(|| {});
+        let mut cfg = Config { demo: true, demo_real_mercury: false, callsign: "N0LOCK".into(), ..Default::default() };
+        cfg.sdr.enabled = false;
+        h.send(Cmd::Start(cfg));
+        let t = Instant::now();
+        while !h.state.lock().unwrap().mercury_ok {
+            assert!(t.elapsed() < Duration::from_secs(10), "no Mercury");
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        h.send(Cmd::JoinTable("Evening Table".into()));
+        while h.state.lock().unwrap().table.is_none() {
+            assert!(t.elapsed() < Duration::from_secs(15), "didn't join");
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        let before = h.state.lock().unwrap().rig.freq_hz;
+        h.send(Cmd::LockOn(before + 5000.0));
+        let t = Instant::now();
+        loop {
+            {
+                let g = h.state.lock().unwrap();
+                if g.log.iter().any(|l| l.1.contains("leave it first, then lock on")) {
+                    assert_eq!(g.rig.freq_hz, before, "retuned off the table");
+                    break;
+                }
+            }
+            assert!(t.elapsed() < Duration::from_secs(5), "no refusal");
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        h.send(Cmd::Stop);
     }
 
     /// Joining a Roundtable while a call is going out is refused: the link
