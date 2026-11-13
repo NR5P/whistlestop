@@ -779,6 +779,9 @@ struct Station {
     /// When the radio last changed frequency: audio from before then
     /// belongs to another frequency.
     last_tune: Instant,
+    /// Recent dial moves (when, from, to), so a frame Mercury decodes after
+    /// a retune is filed under the frequency it was sent on.
+    dial_moves: VecDeque<(Instant, f64, f64)>,
     rigctld: Option<crate::rigsetup::RigctldProcess>,
     /// Built-in rigctld server sharing a direct-CAT radio with Mercury.
     rig_server: Option<crate::rigserve::RigServer>,
@@ -1061,6 +1064,7 @@ impl Station {
             wide_auto: cfg.sdr.wide_auto,
             wide_tried: vec![],
             last_tune: Instant::now(),
+            dial_moves: VecDeque::new(),
             rigctld: None,
             rig_server: None,
             rig_caps: Default::default(),
@@ -1547,7 +1551,8 @@ impl Station {
         if let Some(r) = self.rig.as_mut() {
             r.set_freq(hz).await?;
         }
-        *self.vfo.lock().unwrap() = hz;
+        let from = std::mem::replace(&mut *self.vfo.lock().unwrap(), hz);
+        self.note_move(from, hz);
         self.last_tune = Instant::now();
         self.set(|g| g.rig.freq_hz = hz);
         Ok(())
@@ -1731,13 +1736,9 @@ impl Station {
         let Some(r) = self.rig.as_mut() else { return };
         match r.poll().await {
             Ok(status) => {
-                let moved = {
-                    let mut v = self.vfo.lock().unwrap();
-                    let moved = (*v - status.freq_hz).abs() > 1.0;
-                    *v = status.freq_hz;
-                    moved
-                };
-                if moved {
+                let from = std::mem::replace(&mut *self.vfo.lock().unwrap(), status.freq_hz);
+                if (from - status.freq_hz).abs() > 1.0 {
+                    self.note_move(from, status.freq_hz);
                     self.last_tune = Instant::now(); // turned by hand on the radio
                 }
                 // TX as the radio has it, or as Whistlestop or Mercury keyed
@@ -3240,7 +3241,7 @@ impl Station {
                 if !crate::protocol::valid_call(&call) {
                     return Ok(());
                 }
-                let dial = self.dial();
+                let dial = self.heard_dial();
                 self.log(format!("📣 CQ from {call} on {:.3} kHz", dial / 1e3));
                 self.add_heard(&call, "CQ".into(), None);
                 self.heard_station(&call).await?;
@@ -3427,8 +3428,21 @@ impl Station {
         Ok(())
     }
 
+    fn note_move(&mut self, from: f64, to: f64) {
+        let now = Instant::now();
+        self.dial_moves.retain(|(at, _, _)| now.duration_since(*at) < Duration::from_secs(30));
+        if (from - to).abs() > 1.0 {
+            self.dial_moves.push_back((now, from, to));
+        }
+    }
+
+    /// The frequency a frame Mercury just decoded was sent on.
+    fn heard_dial(&self) -> f64 {
+        heard_dial(&self.dial_moves, self.dial(), Instant::now())
+    }
+
     fn add_heard(&self, call: &str, what: String, table: Option<String>) {
-        let dial = self.dial();
+        let dial = self.heard_dial();
         self.set(|g| {
             g.heard.retain(|h| !(h.call == call && h.what == what));
             g.heard.insert(
@@ -6398,6 +6412,24 @@ impl Station {
     }
 }
 
+/// Mercury reports a frame once it has ended and been decoded; a retune
+/// in the last HEARD_LAG_S came after it was on the air.
+pub const HEARD_LAG_S: f64 = 2.0;
+
+/// The dial a decoded frame was sent on, given the recent dial moves
+/// (when, from, to): the dial HEARD_LAG_S ago. Small moves (a search's
+/// fine-tuning onto the caller) keep the dial as it is now: that is the
+/// better measurement, and Mercury hears ±55 Hz either way.
+pub fn heard_dial(moves: &VecDeque<(Instant, f64, f64)>, now_dial: f64, now: Instant) -> f64 {
+    let then = now.checked_sub(Duration::from_secs_f64(HEARD_LAG_S));
+    let was = moves
+        .iter()
+        .find(|(at, _, _)| then.is_none_or(|t| *at > t))
+        .map(|(_, from, _)| *from)
+        .unwrap_or(now_dial);
+    if (was - now_dial).abs() < 300.0 { now_dial } else { was }
+}
+
 /// Missing messages in the order to ask for them again: never asked first,
 /// then the one asked longest ago (ties by sender and id).
 pub fn again_order(wanted: &mut [(String, u64, u64)], asked: &HashMap<(String, u64), Instant>) {
@@ -7014,6 +7046,27 @@ mod tests {
 
     /// One request that can't be answered (sender gone, an unfillable gap)
     /// doesn't block the others: each round asks the one asked longest ago.
+    #[test]
+    fn a_frame_heard_after_a_retune_keeps_its_frequency() {
+        let now = Instant::now();
+        let ago = |s: f64| now - Duration::from_secs_f64(s);
+        let mut moves = VecDeque::new();
+        // Nothing moved: the dial now.
+        assert_eq!(heard_dial(&moves, 14_103_150.0, now), 14_103_150.0);
+        // Retuned 5 kHz half a second ago: the CQ was sent where we were.
+        moves.push_back((ago(0.5), 14_103_150.0, 14_098_300.0));
+        assert_eq!(heard_dial(&moves, 14_098_300.0, now), 14_103_150.0);
+        // Stepping through two channels since: still the first one.
+        moves.push_back((ago(0.3), 14_098_300.0, 14_100_300.0));
+        assert_eq!(heard_dial(&moves, 14_100_300.0, now), 14_103_150.0);
+        // Moves older than the lag: the frame was sent on the dial now.
+        let old: VecDeque<_> = [(ago(5.0), 14_090_000.0, 14_103_150.0)].into();
+        assert_eq!(heard_dial(&old, 14_103_150.0, now), 14_103_150.0);
+        // A search's fine-tune onto the caller keeps the better dial.
+        let fine: VecDeque<_> = [(ago(0.5), 14_103_073.0, 14_103_150.0)].into();
+        assert_eq!(heard_dial(&fine, 14_103_150.0, now), 14_103_150.0);
+    }
+
     #[test]
     fn resend_requests_take_turns() {
         let mut asked: HashMap<(String, u64), Instant> = HashMap::new();

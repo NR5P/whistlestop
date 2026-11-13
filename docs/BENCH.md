@@ -71,6 +71,7 @@ Slower scenarios run only when named (not part of a run with no names):
 | `away_long` | BRAVO away, `away_idle_s` 60 (Settings' minimum), 500 Hz: a 4 KB file takes several minutes. No hang-up mid-transfer; hang-up about 60 s after it ends (the 30 s signal reports don't count). |
 | `away_weak` | The same with 20 dB more noise and a 3 KB file. |
 | `table_slow` | ALPHA hosts "Sunday Morning Net"; once BRAVO has joined, 12 dB of noise is added and ALPHA's ramp margin set from BRAVO's report, so the table drops from DATAC1 to DATAC15 (27-byte frames). A message ALPHA queues while the change is announced (cut for DATAC1) is split again and reaches BRAVO; BRAVO's reports (31 bytes with the name) still reach the host; a ~560-character message from BRAVO goes as several and all of it arrives. About 15 min. |
+| `scanhard` | Scan speed on a hard band, 4 trials each, as `scan` does: fading (depth 0.5) at about +11 dB, about 0 dB and about −5 dB SNR (signals weakened by path loss, so the noise stays well under full scale); then +11 dB with an FT8-like signal (8 tones, 0.16 s symbols, 12.64 s of every 15 s) and a carrier inside the caller's passband and another FT8 signal in the next channel. Passes with at least 3/4 found (2/4 at −5 dB) and no lock on anything but ALPHA. The band's interference is `ether::Interferer`. About 20 min. |
 
 For example `... bench-run cancel chat_during resume e2e_require away_long away_weak`
 (about 30 min).
@@ -137,6 +138,64 @@ had never handed them over (`ndk_context`), killing the audio thread. Fixed
 building any audio stream now reports its message instead of "did not
 start". Checked with `airtest whistle`: 4/4, no false alarm in 15 s of
 quiet, then the computer heard the phone's CQ whistle 3 s in (score 0.9).
+
+## Fourth bug hunt: desktop, radio drivers, Roundtables, a hard scan (2026-11-13)
+
+- **Desktop window** (`15da623`): mode, tune and the rig's own controls
+  wait while linked or calling (the engine refuses them too, test
+  `radio_controls_wait_for_the_link`); CQ waits while a call is going out,
+  which has its own **Cancel the call**; Search, Lock on and the mail
+  buttons wait at a table, a link, a call or a CQ; chat Send only while
+  linked; Answer and Join on a Heard entry tune there first. Log toasts
+  count lines by a sequence number (the 500-line log no longer hides new
+  ones). Settings typed but unsaved are dropped on connect and disconnect.
+  Sliders take typed values beyond their range.
+- **Radio drivers**: per-model S-meter tables and IDs for Kenwood (TS-890S
+  uses OM; TS-990S goes through Hamlib), the K3's VFO B refused, a refused
+  unkey reported as an error; Yaesu ranges, split and levels by model, and
+  the CAT port opened with two stop bits and RTS high, as RigHelm does
+  (Yaesu's CP2105 radios: the Enhanced port, interface 0, is CAT). The
+  managed rigctld stops a leftover copy, says when its port is taken, keeps
+  a log, and reads `rigctl -l` by its columns.
+- **Roundtables** (`1c6595f`): requests to resend take turns (never asked
+  first, then the oldest ask: test `resend_requests_take_turns`); a member
+  who leaves is forgotten by the assembler; a message too long for the
+  slowest speed is split into new pieces; the ramp's backoff resets after
+  10 min; leaving or joining clears the last table's queues.
+- **Hard scan** (`scanhard`, opt-in): `scan` had no fading or interference
+  and its "very weak" was +8 dB. The band can now carry interference
+  (`ether::Interferer`: a carrier, or an FT8-like signal, 8 tones 6.25 Hz
+  apart, 0.16 s symbols, 12.64 s of every 15 s), and `scanhard` runs 4 trials
+  each with fading (depth 0.5) at +11, 0 and −5 dB SNR in 2500 Hz, then +11 dB
+  with FT8 and a carrier inside the caller's passband and FT8 next door.
+  The SNR line now says the noise bandwidth and remembers each station's
+  last TX level (it printed −99 dBFS for a station that hadn't sent yet).
+- **Heard frequency**: the hard scan caught BRAVO filing ALPHA's CQ under
+  14098.300 kHz: the bench had retuned BRAVO for the next trial while ALPHA's
+  CQFRAME was still on the air, and Mercury reported it after the move. Heard
+  entries (and the Log line) now take the dial from 2 s before the report when
+  the radio moved 300 Hz or more since (test
+  `a_frame_heard_after_a_retune_keeps_its_frequency`); Answer and Join tune
+  there. Both scan scenarios check every CQ heard from ALPHA is filed under
+  ALPHA's frequency.
+
+Why trial 0 of a scan is the slowest (7–11 s against 3–6 s): the search
+always starts at the bottom of the segment (the bench's different starting
+frequency per trial changes nothing; only the delay before the CQ does), so
+in trial 0 it reaches ALPHA's channel just as the whistle starts, catches
+part of it, and has to come round again (10 channels, about 6.5 s a pass).
+On top of that, 1 % of 0.5 s dwells on noise score as a whistle by design
+(`TrackDetector::found`), and checking one costs about 2 s: 3 in about 160
+dwells in one `scanhard` run. Together they make the occasional 3/4.
+
+**Results**: `cargo test` all pass (177 in the library); standard bench on
+real Mercury **36/36** (all three `scan` conditions 4/4), `scanhard` **6/6**
+(and 8/8 and 5/5 in two runs before it: every trial found, also at −5 dB with
+fading, never a lock on the FT8 or the carrier), `table3` **10/10**; phone UI
+tests 7/7 on the iPhone Simulator and the Android emulator. A CQFRAME
+arriving after a retune is rare on the bench (once in the three `scanhard`
+runs, before the fix); `a_frame_heard_after_a_retune_keeps_its_frequency`
+covers it.
 
 ## Mercury's MFSK taken for whistles (2026-11-13)
 

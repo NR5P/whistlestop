@@ -209,6 +209,7 @@ pub async fn start(mercury: &std::path::Path) -> Result<RealDemo> {
             noise_dbfs: -42.0,
             path_loss_db: 0.0,
             fading: 0.15,
+            interference: vec![],
         },
     )?;
     let (pa, pb, ba, bb) = pick_ports()?;

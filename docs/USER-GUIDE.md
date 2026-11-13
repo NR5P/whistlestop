@@ -219,7 +219,7 @@ With an RTL-SDR running, tick **Wide search (SDR)** in the Search card. The SDR'
 
 ### Heard
 
-The **Heard** card lists recent CQs (from Mercury's CQFRAME decodes), Roundtable calls, and SDR whistle hits, newest first. Buttons: **Answer** (connect), **Join** (a Roundtable), **Lock on** (an SDR hit). Answer and Join first tune the radio to where the station was heard (a search may have moved on since). None of them is offered during a link or a call, or at a Roundtable.
+The **Heard** card lists recent CQs (from Mercury's CQFRAME decodes), Roundtable calls, and SDR whistle hits, newest first. Buttons: **Answer** (connect), **Join** (a Roundtable), **Lock on** (an SDR hit). Answer and Join first tune the radio to where the station was heard (a search may have moved on since). Mercury reports a frame once it has ended and been decoded, so if the radio moved by **300 Hz or more** in the last **2 s** before that (a search stepping on, a retune by hand or from the app), the entry and the Log keep the frequency the radio was on before the move, where the station actually is. A smaller move, such as a search fine-tuning onto the caller, keeps the new frequency, which is the more exact one. None of them is offered during a link or a call, or at a Roundtable.
 
 ## Chat
 

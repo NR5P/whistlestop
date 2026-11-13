@@ -49,6 +49,8 @@ pub struct Channel {
     pub path_loss_db: f64,
     /// Slow fading depth, 0 = none, 1 = deep.
     pub fading: f64,
+    /// Other signals on the band, heard by every receiver tuned near them.
+    pub interference: Vec<Interferer>,
 }
 
 impl Default for Channel {
@@ -57,6 +59,49 @@ impl Default for Channel {
             noise_dbfs: -45.0,
             path_loss_db: 0.0,
             fading: 0.0,
+            interference: vec![],
+        }
+    }
+}
+
+/// Something else on the band, at an RF frequency (USB dial + audio), with
+/// its level as received (dBFS, rms).
+#[derive(Clone, Debug)]
+pub enum Interferer {
+    /// A steady carrier (someone tuning up).
+    Carrier { rf_hz: f64, dbfs: f64 },
+    /// An FT8-like signal: 8 tones 6.25 Hz apart, 0.16 s each, for 12.64 s
+    /// of every 15 s, tones made up (repeatable) per cycle.
+    Ft8 { rf_hz: f64, dbfs: f64 },
+}
+
+impl Interferer {
+    fn rf_hz(&self) -> f64 {
+        match self {
+            Interferer::Carrier { rf_hz, .. } | Interferer::Ft8 { rf_hz, .. } => *rf_hz,
+        }
+    }
+    fn dbfs(&self) -> f64 {
+        match self {
+            Interferer::Carrier { dbfs, .. } | Interferer::Ft8 { dbfs, .. } => *dbfs,
+        }
+    }
+    /// Its audio frequency at time `t` (s) for a receiver hearing its base
+    /// tone at `af` Hz; None while it's silent.
+    fn tone(&self, af: f64, t: f64) -> Option<f64> {
+        match self {
+            Interferer::Carrier { .. } => Some(af),
+            Interferer::Ft8 { rf_hz, .. } => {
+                let cycle = (t / 15.0).floor();
+                let into = t - cycle * 15.0;
+                if into >= 12.64 {
+                    return None;
+                }
+                let sym = (into / 0.16).floor() as u64;
+                let mut h = (cycle as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ sym.wrapping_mul(0xBF58_476D_1CE4_E5B9) ^ (*rf_hz as u64);
+                h ^= h >> 31;
+                Some(af + (h % 8) as f64 * 6.25)
+            }
         }
     }
 }
@@ -495,6 +540,8 @@ fn run(
     // the ether's own clock (seconds of audio since it started).
     let mut trace = std::env::var_os("ETHER_TRACE").and_then(|p| std::fs::File::create(p).ok());
     let mut last: Vec<Option<(f64, bool, bool)>> = vec![None; n];
+    // Interferers' phase at each receiver (kept continuous across blocks).
+    let mut iphase: Vec<Vec<f64>> = vec![vec![]; n];
     while !stop.load(Ordering::Relaxed) {
         // Accept Mercury connections as they arrive.
         for (i, l) in listeners.iter().enumerate() {
@@ -557,6 +604,24 @@ fn run(
                     };
                     let (path, out) = (&mut paths[r][t], &mut rx[r]);
                     path.process(&tx_prev[t], delta, gain, ch.fading, out);
+                }
+            }
+            // Other signals on the band, where this receiver hears them.
+            if iphase[r].len() != ch.interference.len() {
+                iphase[r] = vec![0.0; ch.interference.len()];
+            }
+            for (j, it) in ch.interference.iter().enumerate() {
+                let af = it.rf_hz() - dials[r];
+                if !(50.0..3950.0).contains(&af) {
+                    continue;
+                }
+                let a = 10f64.powf(it.dbfs() / 20.0) * 2f64.sqrt();
+                for (k, v) in rx[r].iter_mut().enumerate() {
+                    let t = (seq * BLOCK as u64 + k as u64) as f64 / FS;
+                    if let Some(f) = it.tone(af, t) {
+                        iphase[r][j] = (iphase[r][j] + 2.0 * PI * f / FS) % (2.0 * PI);
+                        *v += a * iphase[r][j].sin();
+                    }
                 }
             }
             for v in rx[r].iter_mut() {

@@ -60,6 +60,9 @@ mod bench {
         started: Instant,
         /// Log lengths when the link came up, to count false whistles after.
         mark: (usize, usize),
+        /// Each station's last heard TX level (the ether's reading falls
+        /// to nothing while a station is quiet).
+        tx_seen: std::cell::Cell<[f64; 2]>,
     }
 
     impl Drop for Bench {
@@ -146,7 +149,7 @@ mod bench {
             } else {
                 None
             };
-            Ok(Bench { ether, a, b, c, mercs, stations, work, results: vec![], started: Instant::now(), mark: (0, 0) })
+            Ok(Bench { ether, a, b, c, mercs, stations, work, results: vec![], started: Instant::now(), mark: (0, 0), tx_seen: std::cell::Cell::new([0.0; 2]) })
         }
 
         fn st<'a>(&self, h: &'a Handle) -> std::sync::MutexGuard<'a, State> {
@@ -216,13 +219,26 @@ mod bench {
             let s = self.ether.stats();
             let ch = self.ether.channel.lock().unwrap().clone();
             let noise = ch.noise_dbfs;
-            let lvl = |r: f64| if r > 0.0 { 20.0 * r.log10() } else { -99.0 };
+            let mut seen = self.tx_seen.get();
+            for (i, st) in s.iter().take(2).enumerate() {
+                if st.tx_rms > 1e-4 {
+                    seen[i] = st.tx_rms;
+                }
+            }
+            self.tx_seen.set(seen);
+            let part = |who: &str, i: usize| {
+                if seen[i] > 0.0 {
+                    let l = 20.0 * seen[i].log10();
+                    format!("{who} {l:.0} dBFS → {:+.0} dB", l - ch.path_loss_db - noise)
+                } else {
+                    format!("{who} not heard yet")
+                }
+            };
             format!(
-                "TX level A {:.0} dBFS, B {:.0} dBFS, noise {noise:.0} dBFS → channel SNR ≈ A→B {:+.0} dB, B→A {:+.0} dB",
-                lvl(s[0].tx_rms),
-                lvl(s[1].tx_rms),
-                lvl(s[0].tx_rms) - ch.path_loss_db - noise,
-                lvl(s[1].tx_rms) - ch.path_loss_db - noise
+                "noise {noise:.0} dBFS in 2500 Hz, path loss {:.0} dB; TX level and SNR {}, {}",
+                ch.path_loss_db,
+                part("A→B", 0),
+                part("B→A", 1)
             )
         }
 
@@ -760,8 +776,30 @@ mod bench {
             self.update(&self.a, |c| c.auto_collect = false);
         }
 
-        /// Scan speed: BRAVO scans the 20 m segment (from a different start
-        /// each time); ALPHA calls CQ once. How long until BRAVO is locked on
+        /// Every CQ BRAVO heard from ALPHA since log line `from` is filed
+        /// under ALPHA's frequency, though the bench retunes BRAVO for the
+        /// next trial while ALPHA's CQFRAME is still on the air.
+        fn record_heard_dials(&mut self, name: &str, from: usize) {
+            let khz: Vec<f64> = self
+                .st(&self.b)
+                .log
+                .iter()
+                .skip(from)
+                .filter_map(|l| l.1.strip_prefix("📣 CQ from ALPHA on "))
+                .filter_map(|r| r.split_whitespace().next()?.parse::<f64>().ok())
+                .collect();
+            let wrong: Vec<f64> = khz.iter().copied().filter(|k| (k * 1e3 - A_DIAL).abs() > 100.0).collect();
+            self.record(
+                name,
+                wrong.is_empty(),
+                format!("{} CQs heard, {} filed under another frequency {:?}", khz.len(), wrong.len(), wrong),
+            );
+        }
+
+        /// Scan speed: BRAVO scans the 20 m segment; ALPHA calls CQ once,
+        /// 0.8 to 5.9 s into the scan, so the whistle starts with the scan at
+        /// a different place each trial (a search always starts at the bottom
+        /// of the segment, whatever the radio was on). How long until BRAVO is locked on
         /// within Mercury's ±55 Hz, and does it ever pass ALPHA over?
         fn s_scan(&mut self) {
             self.disconnect_both();
@@ -776,6 +814,7 @@ mod bench {
             // then wait up to a minute for a clear channel).
             self.update(&self.a, |c| c.busy_detect = false);
             let base = self.ether.channel.lock().unwrap().noise_dbfs;
+            let log_from = self.st(&self.b).log.len();
             for (label, extra_db) in [("normal", 0.0), ("weak", 22.0), ("very weak", 28.0)] {
                 self.ether.channel.lock().unwrap().noise_dbfs = base + extra_db;
                 println!("   scan test ({label}): {}", self.snr_note());
@@ -828,6 +867,106 @@ mod bench {
             }
             self.ether.channel.lock().unwrap().noise_dbfs = base;
             self.update(&self.a, |c| c.busy_detect = true);
+            self.record_heard_dials("scan: CQs heard filed under the caller's frequency", log_from);
+        }
+
+        /// Scan speed on a hard band: fading at +11, 0 and −5 dB SNR, then
+        /// an FT8 signal and a carrier inside the caller's passband plus FT8
+        /// in another channel. How often BRAVO finds ALPHA within one
+        /// whistle, and whether it ever locks on something else.
+        fn s_scanhard(&mut self) {
+            use whistlestop::ether::Interferer;
+            self.disconnect_both();
+            self.wait_air_quiet(25.0, 240.0);
+            let w = Config::default().whistle_s;
+            self.update(&self.a, |c| c.busy_detect = false);
+            let base = self.ether.channel.lock().unwrap().clone();
+            let log_from = self.st(&self.b).log.len();
+            let conditions: Vec<(&str, f64, f64, f64, Vec<Interferer>, usize)> = vec![
+                ("fading, about +11 dB", 22.0, 0.0, 0.5, vec![], 3),
+                ("fading, about 0 dB", 0.0, 36.0, 0.5, vec![], 3),
+                ("fading, about -5 dB", 0.0, 41.0, 0.5, vec![], 2),
+                (
+                    "FT8 and a carrier on the caller, FT8 next door, +11 dB",
+                    22.0,
+                    0.0,
+                    0.3,
+                    vec![
+                        Interferer::Ft8 { rf_hz: A_DIAL + 1500.0, dbfs: -20.0 },
+                        Interferer::Carrier { rf_hz: A_DIAL + 1150.0, dbfs: -26.0 },
+                        Interferer::Ft8 { rf_hz: A_DIAL - 2600.0, dbfs: -18.0 },
+                    ],
+                    3,
+                ),
+            ];
+            for (label, extra_noise, loss, fading, interference, min_found) in conditions {
+                {
+                    let mut ch = self.ether.channel.lock().unwrap();
+                    *ch = base.clone();
+                    ch.noise_dbfs = base.noise_dbfs + extra_noise;
+                    ch.path_loss_db = loss;
+                    ch.fading = fading;
+                    ch.interference = interference;
+                }
+                println!("   hard scan ({label}): {}", self.snr_note());
+                let mut times: Vec<f64> = vec![];
+                let mut elsewhere = 0;
+                let trials = 4;
+                for trial in 0..trials {
+                    self.a.send(Cmd::StopCq);
+                    self.b.send(Cmd::StopSearch);
+                    self.update(&self.a, |c| {
+                        c.whistle_s = w;
+                        c.cq_cycles = 1;
+                        c.busy_detect = false;
+                    });
+                    self.update(&self.b, |c| c.auto_answer = false);
+                    self.b.send(Cmd::SetFreq(14_096_000.0 + 2300.0 * trial as f64));
+                    std::thread::sleep(Duration::from_secs(2));
+                    self.b.send(Cmd::StartSearch(SearchScope::CurrentBand));
+                    std::thread::sleep(Duration::from_millis(800 + 1700 * trial as u64));
+                    let mark = self.st(&self.b).log.len();
+                    self.a.send(Cmd::CallCq { table: None });
+                    let t = self.wait(w + 25.0, |_, b| {
+                        b.log.iter().skip(mark).any(|l| l.1.starts_with("Locked on") || l.1.starts_with("Whistle ended; staying"))
+                            && (b.rig.freq_hz - A_DIAL).abs() <= 55.0
+                    });
+                    // A lock somewhere ALPHA isn't (on the interference).
+                    let wrong = self.st(&self.b).log.iter().skip(mark).filter(|l| l.1.starts_with("Locked on")).any(|l| {
+                        l.1.split_whitespace()
+                            .nth(2)
+                            .and_then(|k| k.parse::<f64>().ok())
+                            .is_some_and(|khz| (khz * 1e3 - A_DIAL).abs() > 55.0)
+                    });
+                    elsewhere += wrong as usize;
+                    if let Some(t) = t {
+                        times.push(t.as_secs_f64());
+                    }
+                    println!(
+                        "     trial {trial}: {}{}",
+                        t.map(|d| format!("locked {:.1} s after the whistle began", d.as_secs_f64())).unwrap_or("missed".into()),
+                        if wrong { " (also locked on something else)" } else { "" }
+                    );
+                    self.a.send(Cmd::StopCq);
+                    self.b.send(Cmd::StopSearch);
+                    std::thread::sleep(Duration::from_secs(3));
+                }
+                times.sort_by(|a, b| a.total_cmp(b));
+                let med = times.get(times.len() / 2).copied();
+                self.record(
+                    &format!("hard scan, {label}"),
+                    times.len() >= min_found && elsewhere == 0,
+                    format!(
+                        "found {}/{trials} within one {w:.0} s whistle (needs {min_found}); median {}; locks elsewhere {elsewhere}; times {:?}",
+                        times.len(),
+                        med.map(|m| format!("{m:.1} s")).unwrap_or("—".into()),
+                        times.iter().map(|t| (t * 10.0).round() / 10.0).collect::<Vec<_>>()
+                    ),
+                );
+            }
+            *self.ether.channel.lock().unwrap() = base;
+            self.update(&self.a, |c| c.busy_detect = true);
+            self.record_heard_dials("hard scan: CQs heard filed under the caller's frequency", log_from);
         }
 
         /// QSY and the library over real Mercury, BRAVO away and serving:
@@ -2739,6 +2878,9 @@ mod bench {
         }
         // Slow ones, run only when named.
         let named = |n: &str| only.iter().any(|o| o == n);
+        if named("scanhard") {
+            b.s_scanhard();
+        }
         if named("cancel") {
             b.s_cancel();
         }
