@@ -412,7 +412,7 @@ Run Whistlestop on the computer wired to the radio (the **radio computer**), and
 - set a **Password** of at least 4 characters;
 - the **Port** defaults to 7373.
 
-The window then shows the address to connect to, for example `192.168.1.20:7373`, and who is connected. The button reads **🛰 Shared**, and turns amber while someone is operating.
+The window then shows the address to connect to, for example `192.168.1.20:7373`, and who is connected. The **🛰 Remote** button's text turns green while this station is shared, and the button turns amber while someone is operating it (teal on the other computer, while it operates this one); hovering says who. Its label stays the same, so nothing else in the top bar moves.
 
 **On the other computer:** press **🛰 Remote**, type the radio computer's address (its LAN address, or a name such as `shack.local`; add `:port` if it isn't 7373) and the password, and press **Connect to the radio computer**. The button turns teal (**🛰 Remote ●**), and from then on everything happens on the radio computer:
 - search, CQ, chat, Roundtables, the Depot, QSY, the library, Radio Controls and the waterfalls;

@@ -622,7 +622,7 @@ pub const ST_SCHED_SLOT: Topic = (
 pub const ST_SCHED_ADD: Topic = ("Add a time slot", "Adds a slot you can then edit.", "Schedule");
 pub const REMOTE_BTN: Topic = (
     "Remote",
-    "Operate the Whistlestop on the computer wired to your radio from this one, anywhere on your home network, or share this station so another computer can. Lit while you're operating remotely; 'Shared' while this station is shared.",
+    "Operate the Whistlestop on the computer wired to your radio from this one, anywhere on your home network, or share this station so another computer can. Its colour says what's going on: teal while you're operating another station from here, green text while this station is shared on your LAN, amber while someone is operating it. Hover for who and where.",
     "Remote operation",
 );
 pub const RM_ADDR: Topic = (

@@ -491,13 +491,15 @@ impl App {
                     self.send(Cmd::Monitor(!lon));
                 }
                 // Remote operation.
-                let (rl, fill, fg) = match (&self.client, &self.server) {
-                    (Some(_), _) => ("🛰 Remote ●", TEAL, BG),
-                    (None, Some(srv)) if !srv.clients.lock().unwrap().is_empty() => ("🛰 Shared ●", AMBER, BG),
-                    (None, Some(_)) => ("🛰 Shared", CARD_HI, GREEN),
-                    _ => ("🛰 Remote", CARD_HI, TEXT),
+                // One label in every state, so the buttons beside it never
+                // move; the state is its colour (and the hover text).
+                let (fill, fg) = match (&self.client, &self.server) {
+                    (Some(_), _) => (TEAL, BG),
+                    (None, Some(srv)) if !srv.clients.lock().unwrap().is_empty() => (AMBER, BG),
+                    (None, Some(_)) => (CARD_HI, GREEN),
+                    _ => (CARD_HI, TEXT),
                 };
-                let rb = egui::Button::new(RichText::new(rl).size(bs).strong().color(fg)).fill(fill);
+                let rb = egui::Button::new(RichText::new("🛰 Remote").size(bs).strong().color(fg)).fill(fill);
                 let tip = match (&self.client, &self.server) {
                     (Some(c), _) => format!("Operating {}", c.desc),
                     (None, Some(srv)) => format!("Sharing this station on the LAN (port {}); {} connected", srv.port, srv.clients.lock().unwrap().len()),

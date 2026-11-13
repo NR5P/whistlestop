@@ -390,7 +390,7 @@ fn click_remote_connect_and_back() {
     type_into(&mut h, "its remote password", "shack123");
     click_exact(&mut h, "Connect to the radio computer");
     wait(&mut h, 15.0, "operating the radio computer", |a, s| a.client.is_some() && s.mycall == "N0SHACK");
-    assert!(has_button(&h, "Remote ●"));
+    assert!(has_button(&h, "🛰 Remote"));
     assert_eq!(srv.clients.lock().unwrap().len(), 1);
     // A command from here acts there.
     h.state().h.send(Cmd::SetFreq(14_104_000.0));

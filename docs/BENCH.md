@@ -168,9 +168,6 @@ UI logic of all three apps), each finding checked against the code:
   were left as the bench's stations (`0aee326`).
 
 Not changed:
-- The desktop Remote button still changes width with its label (a fixed
-  width broke the window test that opens and closes the Guide, which the
-  test harness draws over the main window).
 - The iPhone app drops the whole state if one number is NaN (none is sent today).
 - Roundtable speed changes timed by a clock rather than by the two
   announcements going out; members' SNR reports that may not be about the
