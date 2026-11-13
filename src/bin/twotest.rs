@@ -2108,9 +2108,19 @@ mod bench {
         forwards: Vec<String>,
         /// `adb reverse` ports (a real phone).
         reverses: Vec<String>,
-        /// A real phone's own settings file, put back when the bench ends
-        /// (`Some(None)`: it had none).
+        /// The phone app's own settings file (real phone, emulator or
+        /// Simulator), put back when the bench ends (`Some(None)`: it had
+        /// none), so the app isn't left set up as a bench station.
         phone_toml: Option<Option<Vec<u8>>>,
+    }
+
+    /// A station that started before a later one failed still gets its app
+    /// stopped and its settings put back. (`stop` may run twice: it's
+    /// harmless.)
+    impl Drop for Station {
+        fn drop(&mut self) {
+            self.stop();
+        }
     }
 
     fn adb(args: &[&str]) -> anyhow::Result<Vec<u8>> {
@@ -2277,6 +2287,8 @@ mod bench {
                     }
                     let _ = std::fs::remove_file(&cfg.depot_file);
                     let _ = std::fs::remove_file(dir.join("mercury.log"));
+                    // The app's own settings, to put back at the end.
+                    st.phone_toml = Some(std::fs::read(dir.join("whistlestop.toml")).ok());
                     std::fs::write(dir.join("whistlestop.toml"), toml)?;
                     std::fs::write(dir.join("bench.json"), bench_json(sock.to_string_lossy().to_string()))?;
                     let o = Command::new("xcrun").args(["simctl", "launch", "booted", APP_ID]).output()?;
@@ -2290,8 +2302,8 @@ mod bench {
                     let tcp = [7401u16, 7402][i] + off();
                     bridge(tcp, sock.to_path_buf())?;
                     let path = format!("{ANDROID_DIR}/whistlestop.toml");
-                    if android_host() == "127.0.0.1" {
-                        // A real phone: keep its own settings to put back.
+                    {
+                        // The app's own settings, to put back at the end.
                         st.phone_toml = Some(
                             adb(&["exec-out", "run-as", APP_ID, "sh", "-c", &format!("[ -f '{path}' ] && cat '{path}' || echo -n NONE")])
                                 .ok()
@@ -2367,6 +2379,13 @@ mod bench {
                 Kind::Ios => {
                     let _ = Command::new("xcrun").args(["simctl", "terminate", "booted", APP_ID]).output();
                     let _ = std::fs::remove_file(self.dir.join("bench.json"));
+                    if let Some(t) = self.phone_toml.take() {
+                        let p = self.dir.join("whistlestop.toml");
+                        let _ = match t {
+                            Some(t) => std::fs::write(&p, t),
+                            None => std::fs::remove_file(&p),
+                        };
+                    }
                 }
                 Kind::Android => {
                     let _ = adb(&["shell", "am", "force-stop", APP_ID]);
