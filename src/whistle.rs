@@ -180,6 +180,47 @@ pub struct Detection {
     pub spread_hz: f64,
 }
 
+impl Detection {
+    /// Several of the whistle's chirp pairs, all giving the same offset. A
+    /// whistle from −10 dB up does this (three or four pairs within 2 Hz in
+    /// 1.6 s); data doesn't. Mercury's MFSK, one tone at a time hopping
+    /// over the whistle's own 1–2 kHz, gives one chance pair, or a few
+    /// that disagree by 10–45 Hz.
+    pub fn lined_up(&self) -> bool {
+        self.n_pairs >= 2 && self.spread_hz <= LINED_UP_HZ
+    }
+}
+
+/// Most the pairs of a `lined_up` detection may disagree by.
+pub const LINED_UP_HZ: f64 = 5.0;
+
+/// From this scan score up, a whistle's chirps line up in the matched
+/// filter (a whistle at −10 dB scores about 15–20 in 1.2–1.6 s).
+pub const LINE_UP_Z: f64 = 15.0;
+
+/// A `TrackHit::fit` this good is a whistle's own track: Mercury's MFSK
+/// and MFSK500 reach 0.39 at most (its own signals, any strength); a strong
+/// whistle that the matched filter can't measure, 0.58 at least.
+pub const FIT_MIN: f64 = 0.5;
+
+/// A scan hit `h`, with the matched filter's `d` on the same audio: a
+/// signal this strong whose chirps don't line up and that doesn't own its
+/// track is data, not a whistle. Mercury's MFSK lights the whistle's band
+/// just as a whistle does and passes the scan detector at any strength.
+/// (A strong carrier inside the sweep can blind the matched filter to a
+/// strong whistle: its clipping stands down when the whistle fills the
+/// band. The fit still knows it.)
+pub fn looks_like_data(h: &TrackHit, d: Option<&Detection>) -> bool {
+    h.z >= LINE_UP_Z && !d.is_some_and(Detection::lined_up) && h.fit < FIT_MIN
+}
+
+/// The whistle watch's test of one look (it needs the matched filter's
+/// offset anyway, so it can be stricter than `looks_like_data`): the
+/// chirps line up, or the scan's track is the signal's own.
+pub fn watch_confirms(h: &TrackHit, d: &Detection) -> bool {
+    d.lined_up() || h.fit >= FIT_MIN
+}
+
 fn next_pow2(n: usize) -> usize {
     n.next_power_of_two()
 }
@@ -419,6 +460,12 @@ pub struct TrackHit {
     /// Coarse offset (Hz, audio higher than sent), good to about ±30 Hz and
     /// never ambiguous: the UP and DOWN legs only line up at the true one.
     pub offset_hz: f64,
+    /// Of the frames along the best track, the share whose strongest cell
+    /// (after levelling) is on it. A whistle owns its track: 0.75–1 from
+    /// −5 dB up, a carrier in the sweep or not (the levelling removes it).
+    /// Mercury's MFSK, one tone hopping over the same band, is on any
+    /// track only now and then: 0.2–0.4.
+    pub fit: f64,
 }
 
 /// The scanning detector: a short-frame spectrogram, each frequency bin
@@ -585,6 +632,7 @@ impl TrackDetector {
                         TrackHit {
                             z,
                             offset_hz: df as f64 * bw,
+                            fit: 0.0,
                         },
                         dt,
                         df,
@@ -592,8 +640,25 @@ impl TrackDetector {
                 }
             }
         }
+        let fit_at = |dt: usize, df: i64| -> f64 {
+            let (mut n, mut on) = (0usize, 0usize);
+            for (t, r) in rows.iter().enumerate() {
+                let tc = (t + dt) as f64 * hop_s;
+                let (fa, fb) = (self.track(tc), self.track(tc + frame_s));
+                let blo = (fa.min(fb) / bw).round() as i64 + df - k0 as i64;
+                let bhi = (fa.max(fb) / bw).round() as i64 + df - k0 as i64;
+                if blo < 0 || bhi >= nb as i64 {
+                    continue;
+                }
+                n += 1;
+                let top = (0..nb).max_by(|&a, &b| r[a].total_cmp(&r[b])).unwrap_or(0) as i64;
+                on += usize::from((blo - 1..=bhi + 1).contains(&top));
+            }
+            on as f64 / n.max(1) as f64
+        };
         // Sub-bin offset from the neighbouring hypotheses (parabola).
         best.map(|(mut h, dt, df)| {
+            h.fit = fit_at(dt, df);
             if let (Some(a), Some(c)) = (z_at(dt, df - 1), z_at(dt, df + 1)) {
                 let d = a - 2.0 * h.z + c;
                 if d < 0.0 {
@@ -856,6 +921,159 @@ mod tests {
             }
         }
         assert!(over <= 1, "{over} of 60 bursts looked like whistles");
+    }
+
+    /// Mercury's MFSK: one of 32 tones `spacing` Hz apart, centred on
+    /// 1500 Hz, for each symbol (`sym` samples), hopped 13 tones a symbol.
+    /// MFSK: 31.25 Hz and 40 ms (1015.6–1984.4 Hz); MFSK500: 15.625 Hz and
+    /// 80 ms. `n` samples at `snr_db` (2500 Hz noise bandwidth).
+    fn mfsk(n: usize, spacing: f64, sym: usize, snr_db: f64, rng: &mut StdRng) -> Vec<f64> {
+        use rand::Rng;
+        let noise = 0.5 / 10f64.powf(snr_db / 10.0) * (FS as f64 / 2.0) / 2500.0;
+        let nd = Normal::new(0.0, noise.sqrt()).unwrap();
+        let (mut ph, mut f) = (0.0f64, 0.0);
+        let start = (rng.next_u32() as usize) % sym;
+        let x: Vec<f64> = (0..n)
+            .map(|i| {
+                if (i + start) % sym == 0 || i == 0 {
+                    let s = (i + start) / sym;
+                    let k = ((rng.next_u32() % 32) as usize + s * 13) % 32;
+                    f = 1500.0 + spacing * (k as f64 - 15.5);
+                }
+                ph += 2.0 * PI * f / FS as f64;
+                ph.cos() + nd.sample(rng)
+            })
+            .collect();
+        ssb_channel(&x, 0.0, FS, PASSBAND)
+    }
+
+    /// A whistle `off` Hz off at `snr_db`, with a strong carrier inside the
+    /// sweep if `carrier`: `n` samples from `start`.
+    fn whistle_in(p: &WhistleParams, off: f64, snr_db: f64, carrier: bool, start: usize, n: usize, rng: &mut StdRng) -> Vec<f64> {
+        let w: Vec<f64> = whistle(6.0, p).iter().map(|&v| v as f64).collect();
+        let noise = p.amplitude * p.amplitude / 2.0 / 10f64.powf(snr_db / 10.0) * (FS as f64 / 2.0) / 2500.0;
+        let nd = Normal::new(0.0, noise.sqrt()).unwrap();
+        let mut x: Vec<f64> = ssb_channel(&w, off, FS, (0.0, 4000.0)).iter().map(|v| v + nd.sample(rng)).collect();
+        if carrier {
+            for (j, v) in x.iter_mut().enumerate() {
+                *v += 3.0 * (2.0 * PI * 1420.0 * j as f64 / 8000.0).sin();
+            }
+        }
+        ssb_channel(&x, 0.0, FS, PASSBAND)[start..start + n].to_vec()
+    }
+
+    #[test]
+    fn mfsk_is_not_a_whistle() {
+        // CHARLIE, parked on ALPHA's frequency, reported ALPHA and BRAVO's
+        // MFSK link as whistles (bench, cq_pileup): MFSK passes the scan
+        // detector at any strength. The watch's look (1.6 s) and search's
+        // (1.2 s), both whistle shapes, both MFSK geometries.
+        let mut rng = StdRng::seed_from_u64(41);
+        for p in [profile("wide"), profile("narrow")] {
+            let (mut t, mut d) = (TrackDetector::new(p), Detector::new(p));
+            for n in [12_800, 9_600] {
+                let secs = n as f64 / FS as f64;
+                for (spacing, sym) in [(31.25, 320), (15.625, 640)] {
+                    let (mut looks, mut watch, mut data) = (0, 0, 0);
+                    for snr in [35.0, 10.0, 0.0, -5.0] {
+                        for _ in 0..25 {
+                            let x = mfsk(n, spacing, sym, snr, &mut rng);
+                            let Some(h) = t.scan(&x).filter(|h| h.z >= TrackDetector::found(secs)) else {
+                                continue;
+                            };
+                            let det = d.detect(&x);
+                            looks += 1;
+                            watch += usize::from(det.as_ref().is_some_and(|det| watch_confirms(&h, det)));
+                            data += usize::from(looks_like_data(&h, det.as_ref()));
+                        }
+                    }
+                    assert!(looks >= 80, "the scan passed only {looks} of 100 MFSK looks: test no longer needed?");
+                    assert!(watch * 100 <= 4 * looks, "f_lo {} {secs} s {spacing} Hz: watch took {watch} of {looks} MFSK looks for whistles", p.f_lo);
+                    let strong = 50; // 35, 10 and 0 dB
+                    assert!(data * 100 >= 90 * strong.min(looks), "f_lo {} {secs} s {spacing} Hz: only {data} MFSK looks known for data", p.f_lo);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn whistles_are_not_data() {
+        // Every whistle the scan finds, from −12 dB to +30 dB, a quarter of
+        // them with a strong carrier inside the sweep: never taken for data,
+        // and the watch confirms nearly all from −10 dB up (with the carrier
+        // the matched filter often measures nothing: as before).
+        let mut rng = StdRng::seed_from_u64(43);
+        for p in [profile("wide"), profile("narrow")] {
+            let (mut t, mut d) = (TrackDetector::new(p), Detector::new(p));
+            for n in [12_800, 9_600] {
+                let secs = n as f64 / FS as f64;
+                let (mut looks, mut watch) = (0, 0);
+                for snr in [30.0, 10.0, 0.0, -5.0, -10.0, -12.0] {
+                    for k in 0..16 {
+                        let x = whistle_in(&p, -150.0 + 19.0 * k as f64, snr, k % 4 == 0, 500 + 211 * k, n, &mut rng);
+                        let Some(h) = t.scan(&x).filter(|h| h.z >= TrackDetector::found(secs)) else {
+                            continue;
+                        };
+                        let det = d.detect(&x);
+                        assert!(!looks_like_data(&h, det.as_ref()), "f_lo {} {secs} s {snr} dB #{k}: {h:?}, {det:?}", p.f_lo);
+                        if snr >= -10.0 && k % 4 != 0 {
+                            looks += 1;
+                            watch += usize::from(det.as_ref().is_some_and(|det| watch_confirms(&h, det)));
+                        }
+                    }
+                }
+                assert!(watch * 100 >= 95 * looks, "f_lo {} {secs} s: watch confirmed {watch} of {looks}", p.f_lo);
+            }
+        }
+    }
+
+    /// Mercury's own signals: `mercury -x fifo -t -m <mode>` with `-o` a
+    /// fifo read into `tx-<mode>.raw` (s32le, 8 kHz), in $WS_TX_DIR. The
+    /// watch, looking every second as it does (a report: two looks in a
+    /// row within 15 Hz), at several strengths.
+    #[test]
+    #[ignore]
+    fn mercury_modes_are_not_whistles() {
+        let dir = std::env::var("WS_TX_DIR").expect("WS_TX_DIR");
+        let mut rng = StdRng::seed_from_u64(44);
+        for p in [profile("wide"), profile("narrow")] {
+            let (mut t, mut d) = (TrackDetector::new(p), Detector::new(p));
+            for m in [11, 12, 0, 1, 3, 7, 9] {
+                let Ok(raw) = std::fs::read(format!("{dir}/tx-{m}.raw")) else {
+                    continue;
+                };
+                let x: Vec<f64> = raw.chunks_exact(4).map(|b| i32::from_le_bytes([b[0], b[1], b[2], b[3]]) as f64 / 2e9).collect();
+                let pw = x.iter().map(|v| v * v).sum::<f64>() / x.len() as f64;
+                for snr in [30.0, 10.0, 0.0, -5.0] {
+                    let nd = Normal::new(0.0, (pw / 10f64.powf(snr / 10.0) * (FS as f64 / 2.0) / 2500.0).sqrt()).unwrap();
+                    let y: Vec<f64> = x.iter().map(|v| v + nd.sample(&mut rng)).collect();
+                    let y = ssb_channel(&y, 0.0, FS, PASSBAND);
+                    let (mut found, mut data) = (0, 0);
+                    let (mut before, mut now) = ((0, None::<f64>), (0, None::<f64>));
+                    let report = |r: &mut (usize, Option<f64>), off: Option<f64>| {
+                        if let (Some(a), Some(b)) = (r.1, off)
+                            && (a - b).abs() <= 15.0
+                        {
+                            r.0 += 1;
+                            r.1 = None;
+                        } else {
+                            r.1 = off;
+                        }
+                    };
+                    for s in (0..y.len().saturating_sub(12_800)).step_by(8000) {
+                        let w = &y[s..s + 12_800];
+                        let h = t.scan(w).filter(|h| h.z >= TrackDetector::found(1.6));
+                        let det = h.and_then(|_| d.detect(w));
+                        found += usize::from(h.is_some());
+                        data += usize::from(h.is_some_and(|h| looks_like_data(&h, det.as_ref())));
+                        report(&mut before, det.as_ref().map(|d| d.offset_hz));
+                        report(&mut now, det.as_ref().filter(|det| h.is_some_and(|h| watch_confirms(&h, det))).map(|d| d.offset_hz));
+                    }
+                    eprintln!("f_lo {} mode {m:2} {snr:5.1} dB: {found} looks pass the scan, {data} known for data; whistles reported {} before, {} now", p.f_lo, before.0, now.0);
+                    assert_eq!(now.0, 0, "mode {m} at {snr} dB");
+                }
+            }
+        }
     }
 
     #[test]

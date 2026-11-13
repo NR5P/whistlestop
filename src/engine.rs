@@ -14,7 +14,7 @@ use crate::protocol::*;
 use crate::rig::{Rig, RigStatus, RigctldClient};
 use crate::sdr;
 use crate::tnc::{Tnc, TncEvent, parse_connected};
-use crate::whistle::{Detector, FS, TrackDetector, WhistleParams, whistle};
+use crate::whistle::{Detector, FS, TrackDetector, WhistleParams, looks_like_data, watch_confirms, whistle};
 use crate::ziputil;
 use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
@@ -2407,10 +2407,15 @@ impl Station {
                     } else {
                         150.0
                     };
-                    let coarse_now = self.tracker.scan(&x).filter(|h| {
-                        h.z >= TrackDetector::found(secs) && h.offset_hz.abs() <= reach
-                    });
-                    let fine = self.detector.detect(&x).map(|d| d.offset_hz);
+                    let hit = self.tracker.scan(&x).filter(|h| h.z >= TrackDetector::found(secs));
+                    let det = self.detector.detect(&x);
+                    // Mercury's MFSK (someone's link or table at the slowest
+                    // speeds) passes the scan detector at any strength; a
+                    // strong signal whose chirps don't line up and that
+                    // doesn't own its track is data.
+                    let data = hit.filter(|h| looks_like_data(h, det.as_ref()));
+                    let coarse_now = hit.filter(|h| h.offset_hz.abs() <= reach);
+                    let fine = det.map(|d| d.offset_hz);
                     let v = match (coarse_now, fine) {
                         (Some(h), Some(f)) => {
                             let f = self.fine_offset(h.offset_hz, f);
@@ -2440,7 +2445,14 @@ impl Station {
                     } else {
                         None
                     };
-                    if let Some(h) = walk {
+                    if data.is_some() {
+                        // Move on, rather than wait 45 s here for a CQ.
+                        self.log(format!(
+                            "🚂 Not a whistle on {:.3} kHz after all: data (its chirps don't line up); resuming search",
+                            target / 1e3
+                        ));
+                        next_channel = true;
+                    } else if let Some(h) = walk {
                         self.log(format!(
                             "🚂 The whistle is {:+.0} Hz further; retuning again",
                             h.offset_hz
@@ -6231,7 +6243,9 @@ impl Station {
         else {
             return;
         };
-        let Some(mut d) = self.detector.detect(&x) else {
+        // Its chirps line up, or it owns its track: Mercury's MFSK (a link
+        // or table at the slowest speeds) passes the scan at any strength.
+        let Some(mut d) = self.detector.detect(&x).filter(|d| watch_confirms(&h, d)) else {
             self.watch_pending = None;
             return;
         };

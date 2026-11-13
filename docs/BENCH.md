@@ -138,6 +138,53 @@ building any audio stream now reports its message instead of "did not
 start". Checked with `airtest whistle`: 4/4, no false alarm in 15 s of
 quiet, then the computer heard the phone's CQ whistle 3 s in (score 0.9).
 
+## Mercury's MFSK taken for whistles (2026-11-13)
+
+Mercury 1.9.23 on the ether, Ubuntu on WSL 2, on top of `b2de518`:
+
+| Set | Result |
+|---|---|
+| Standard two-station | **35/35** |
+| Three-station + `watch_mfsk` (new) | **34/34**, `cq_pileup` included |
+| `watch_mfsk` on the code before this fix | **1/3**: CHARLIE reported a whistle at +51 Hz from the table's frames, and its search locked onto the table to wait for a CQ |
+
+`cq_pileup`'s "no false whistles once linked" failed twice on 11-13: the
+station that lost the pileup reported whistles from the winner's link. Both
+times that link had come up in **MFSK** (Mercury's control mode after a slow,
+contested connect; the runs that passed linked in OFDM). MFSK sends one of 32
+tones 31.25 Hz apart every 40 ms, hopped 13 tones a symbol, over 1016–1984 Hz:
+the whistle's own band. Each bin is lit about as often as a whistle lights it,
+so the scan detector, which levels away anything steady and any burst that
+lights the whole band, takes it for a whistle at any strength (score 20–90 in
+1.6 s, against 2.3 to stop). The matched filter then often found one chance
+chirp pair, and the watch's "two looks in a row agree" didn't help: the looks
+overlap by 0.6 s, so the same pair counts twice.
+
+Mercury's own signals (`mercury -x fifo -t -m <mode>`, 20 s of each, noise
+added for −5 to +30 dB): only MFSK and MFSK500 pass the scan; DATAC1, DATAC3,
+DATAC4, DATAC15 and DATAC17 never do. With the old test the watch reported
+whistles from MFSK500 at every strength (up to 5 in 20 s) and from MFSK at
++10 and +30 dB.
+
+What tells them apart:
+
+- **The chirp pairs line up.** A whistle's pairs all give the same offset:
+  three or four within 2 Hz from −10 dB up (−12 dB: 3 of 4 looks). MFSK gives
+  one pair, or two or three that disagree by 10–45 Hz.
+- **A whistle owns its track.** Of the frames along the best track, the share
+  whose strongest (levelled) cell is on it: whistles 0.6–1 from −5 dB up,
+  MFSK 0.2–0.4 at any strength. This is what keeps a strong whistle with a
+  strong carrier inside its sweep: the matched filter's clipping stands down
+  when the whistle fills the band, and it measures nothing.
+
+The watch now needs the pairs to line up, or a signal that owns its track.
+Search, after retuning onto a stop, takes a strong signal (score 15 and up)
+whose pairs don't line up and that doesn't own its track for data and moves
+on ("Not a whistle on … after all") instead of waiting 45 s for a CQ: an MFSK
+QSO used to hold it on every pass. The SDR wide search needs three agreeing
+pairs in its 2.2 s check (whistles give five; 40/40 looks down to −12 dB);
+before, 9 of 12 looks at MFSK traffic showed callers.
+
 ## Roundtables at the slowest speed (2026-11-13)
 
 Mercury 1.9.23 on the ether, Ubuntu on WSL 2, on top of `3bc4b05`:
@@ -464,8 +511,9 @@ these names the bench is the two-station bench, unchanged.
 | `relay3` | ALPHA posts Depot mail for CHARLIE via BRAVO (relay on). ALPHA links BRAVO: the mail is In Transit at BRAVO (hops 1, handed by ALPHA) and ALPHA shows it Delivered, taken by BRAVO (MAILACK). BRAVO links CHARLIE by hand: it arrives in CHARLIE's Arrivals exactly once, hops 1 on the wire, and BRAVO's In Transit empties. Then twice more by automation: CHARLIE away with automatic collection hears BRAVO's Station ID listing it and collects by itself; BRAVO away with automatic delivery hears CHARLIE's Station ID and delivers by itself. About 8 min. |
 | `cq_pileup` | ALPHA calls CQ (20 s whistle, 2 cycles); BRAVO and CHARLIE both search with automatic answer, find it and call it at the same moment. ALPHA links with exactly one; the winner's link carries a chat; the other gives up cleanly (no link, no call or incoming call left showing, search stopped, its Mercury back to LISTENING); no whistle reported anywhere once ALPHA is linked; the other links ALPHA once the first link ends; no Mercury left out of LISTENING. About 8 min. |
 | `busy3` | BRAVO and CHARLIE linked on ALPHA's frequency, an 8 KB file BRAVO→CHARLIE, ALPHA parked there: ALPHA calls BRAVO (busy) and must give up cleanly while their link and file carry on; ALPHA's whistle watch must report no whistles from their traffic; ALPHA then calls CQ on top of them (how long it transmits over them is measured) and their link must survive; once they're done ALPHA links BRAVO; no Mercury stuck. About 8 min. |
+| `watch_mfsk` | ALPHA hosts "MFSK Net", BRAVO joins, noise is added until BRAVO's report lets a 20 dB ramp margin take the table down to MFSK (Mercury's slowest mode: one tone at a time hopping over the whistle's own 1–2 kHz). CHARLIE, parked on the frequency and not at the table, must report no whistles while ALPHA and BRAVO each send a message; then CHARLIE searches the band while ALPHA sends another, and must not lock onto the table to wait for a CQ (it may stop to look, and should know it for data). About 10 min. |
 
-`... bench-run table3 relay3 cq_pileup busy3` takes about 45 min.
+`... bench-run table3 relay3 cq_pileup busy3` takes about 45 min, `watch_mfsk` 10 more.
 
 ## Busy channel, Roundtable sync, merged with the phone work (2026-11-12)
 

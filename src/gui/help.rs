@@ -321,7 +321,7 @@ pub const ST_CYCLES: Topic = ("CQ cycles", "How many whistle → CQFRAME → lis
 pub const ST_LISTEN: Topic = ("Listen after CQ", "How long to wait for answers after each CQ before whistling again.", "Calling CQ");
 pub const ST_WATCH: Topic = (
     "Whistle watch",
-    "Report whistles heard near the frequency you're parked on (with a Tune to it button). Paused while transmitting and during a link.",
+    "Report whistles heard near the frequency you're parked on (with a Tune to it button). Paused while transmitting and during a link. Other stations' data on your frequency isn't reported, even Mercury's MFSK, which hops over the same tones a whistle sweeps through.",
     "Finding stations",
 );
 pub const ST_RAMP: Topic = (

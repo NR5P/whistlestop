@@ -230,12 +230,17 @@ impl WideWatch {
                 }
             }
         }
-        // 2. Verify each candidate with a receiver centred on it.
+        // 2. Verify each candidate with a receiver centred on it: three or
+        // more of its chirp pairs must agree. Mercury's MFSK, one tone
+        // hopping over the whistle's band, gives chance pairs that seldom
+        // do; a whistle gives five in a look, three from −12 dB up.
         let mut hits: Vec<WideHit> = vec![];
         for c in candidates {
             let a = self.channel_audio(&spec, c);
             if let Some(v) = self.det.detect(&a)
                 && v.offset_hz.abs() < 30.0
+                && v.lined_up()
+                && v.n_pairs >= 3
             {
                 let dial = c + v.offset_hz;
                 match hits.iter_mut().find(|h| (h.dial_hz - dial).abs() < 60.0) {
@@ -378,6 +383,38 @@ mod tests {
         for (h, (dial, _)) in hits.iter().zip(callers) {
             assert!((h.dial_hz - dial).abs() < 3.0, "{} vs {dial}", h.dial_hz);
         }
+    }
+
+    #[test]
+    fn mfsk_traffic_is_not_a_caller() {
+        // Two stations in an MFSK link (Mercury's slowest mode: one of 32
+        // tones 31.25 Hz apart every 40 ms, over the whistle's own 1-2 kHz),
+        // loud and weak, and an MFSK500 table: no callers.
+        let mut w = WideWatch::new(seg20(), WhistleParams::default(), 900.0);
+        let fs = w.fs as f64;
+        let mut rng = StdRng::seed_from_u64(6);
+        let (mut hits, mut looks) = (0, 0);
+        for _ in 0..12 {
+            let n = (2.2 * fs) as usize;
+            let mut x = noise(n, 0.05, &mut rng);
+            for (dial, amp, spacing, sym_s) in [(14_103_000.0, 0.5f32, 31.25, 0.04), (14_106_500.0, 0.1, 31.25, 0.04), (14_109_000.0, 0.3, 15.625, 0.08)] {
+                let mut ph = 0.0f64;
+                let mut f = 0.0;
+                let sym = (sym_s * fs) as usize;
+                for (i, s) in x.iter_mut().enumerate() {
+                    if i % sym == 0 {
+                        let k = (rand::Rng::next_u32(&mut rng) % 32) as f64;
+                        f = 1500.0 + spacing * (k - 15.5);
+                    }
+                    ph += 2.0 * PI * (dial - w.center_rf + f) / fs;
+                    *s += Complex32::from_polar(amp, ph as f32);
+                }
+            }
+            w.push(&x);
+            looks += 1;
+            hits += w.scan().len();
+        }
+        assert_eq!(hits, 0, "{hits} callers heard in {looks} looks at MFSK traffic");
     }
 
     #[test]

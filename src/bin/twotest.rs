@@ -42,7 +42,7 @@ mod bench {
     const C_DIAL: f64 = 14_098_000.0;
     /// CHARLIE's Mercury control and broadcast ports, rigctld, app audio.
     /// Scenarios that need CHARLIE.
-    const THREE: &[&str] = &["table3", "relay3", "cq_pileup", "busy3"];
+    const THREE: &[&str] = &["table3", "relay3", "cq_pileup", "busy3", "watch_mfsk"];
     /// table3: how much weaker CHARLIE hears ALPHA (and ALPHA CHARLIE) than
     /// BRAVO does, dB.
     const TABLE3_WEAK_DB: f64 = 25.0;
@@ -2025,6 +2025,123 @@ mod bench {
             self.update(self.c(), |_| {});
         }
 
+        /// A Roundtable slowed right down to MFSK, Mercury's slowest mode: one
+        /// tone at a time hopping over the whistle's own 1-2 kHz, which the
+        /// scan detector takes for a whistle at any strength. CHARLIE, parked
+        /// on its frequency and not at the table, must not report its frames
+        /// as whistles; searching, must not stop there to wait for a CQ.
+        /// (cq_pileup found it: a link that came up in MFSK.)
+        fn s_watch_mfsk(&mut self) {
+            self.disconnect_all();
+            self.wait_air_quiet(25.0, 240.0);
+            self.b.send(Cmd::SetFreq(A_DIAL));
+            self.c().send(Cmd::SetFreq(A_DIAL));
+            let name = "MFSK Net";
+            let base = |c: &mut Config| {
+                c.whistle_s = 6.0;
+                c.cq_cycles = 1;
+                c.cq_listen_s = 5.0;
+                c.busy_detect = false;
+            };
+            self.update(&self.a, base);
+            self.update(&self.b, |c| c.busy_detect = false);
+            self.update(self.c(), |c| c.busy_detect = false);
+            // MFSK is the host's choice when BRAVO's report less the margin
+            // (20 dB at most) is under DATAC15's -7 dB: a report of +8 dB or
+            // so. The bench channel is cleaner: add noise.
+            let mut noise = 15.0;
+            self.ether.channel.lock().unwrap().noise_dbfs += noise;
+            std::thread::sleep(Duration::from_secs(2));
+            self.a.send(Cmd::CallCq { table: Some(name.into()) });
+            self.wait(60.0, |_, b| b.heard.iter().any(|h| h.table.as_deref() == Some(name)));
+            self.b.send(Cmd::JoinTable(name.into()));
+            let report_of_b = |a: &State| a.table.as_ref().and_then(|t| t.members.get(B)).and_then(|m| m.snr_of_host);
+            let joined = self.wait(90.0, |a, _| report_of_b(a).is_some());
+            let mut snr = report_of_b(&self.st(&self.a)).unwrap_or(0) as f64;
+            for _ in 0..2 {
+                if joined.is_none() || snr <= 10.0 {
+                    break;
+                }
+                let more = snr - 7.0;
+                noise += more;
+                self.ether.channel.lock().unwrap().noise_dbfs += more;
+                println!("   MFSK table: report {snr:+} dB, {more:.0} dB more noise");
+                let before = self.st(&self.a).table.as_ref().and_then(|t| t.members.get(B)).and_then(|m| m.last);
+                self.wait(150.0, |a, _| a.table.as_ref().and_then(|t| t.members.get(B)).and_then(|m| m.last) != before);
+                snr = report_of_b(&self.st(&self.a)).unwrap_or(0) as f64;
+            }
+            let cleanup = |s: &mut Self| {
+                s.c().send(Cmd::StopSearch);
+                s.wait_air_quiet(5.0, 120.0);
+                s.a.send(Cmd::LeaveTable);
+                if s.wait(90.0, |_, b| b.table.is_none()).is_none() {
+                    s.b.send(Cmd::LeaveTable);
+                }
+                s.update(&s.a, |_| {});
+                s.update(&s.b, |_| {});
+                s.update(s.c(), |_| {});
+                s.ether.channel.lock().unwrap().noise_dbfs -= noise;
+                std::thread::sleep(Duration::from_secs(3));
+            };
+            self.wait_air_quiet(5.0, 60.0);
+            self.update(&self.a, |c| {
+                base(c);
+                c.ramp_margin_db = 20.0;
+            });
+            let slow = self.wait(180.0, |a, b| Self::table_mode(a) == "MFSK" && Self::table_mode(b) == "MFSK");
+            if slow.is_none() {
+                let (ma, mb) = (Self::table_mode(&self.st(&self.a)), Self::table_mode(&self.st(&self.b)));
+                self.record(
+                    "watch_mfsk: table at MFSK",
+                    false,
+                    format!("BRAVO joined {}, reports {snr:+} dB; table speed A {ma} / B {mb}", Self::took(joined)),
+                );
+                cleanup(self);
+                return;
+            }
+            // Parked: both talk at MFSK while CHARLIE's watch listens.
+            let mc = self.log_mark(self.c());
+            let from_a = "ALPHA at MFSK: one tone at a time, all over the band where whistles go. CHARLIE, parked here, should hear no whistle in this.";
+            let from_b = "BRAVO at MFSK too: solid copy, the noise is up but the slowest speed gets through it.";
+            self.a.send(Cmd::TableSay(from_a.into()));
+            let got_a = self.wait(420.0, |_, b| Self::has_line(b, A, from_a));
+            self.b.send(Cmd::TableSay(from_b.into()));
+            let got_b = self.wait(420.0, |a, _| Self::has_line(a, B, from_b));
+            let parked: Vec<String> = self.log_after(self.c(), &mc).into_iter().filter(|l| l.contains("Whistle heard")).collect();
+            self.record(
+                "watch_mfsk: no whistles heard in an MFSK table's traffic",
+                got_a.is_some() && got_b.is_some() && parked.is_empty(),
+                format!(
+                    "BRAVO reports {snr:+} dB; ALPHA's message {}, BRAVO's {}; CHARLIE (parked, not at the table) reported {}",
+                    Self::took(got_a),
+                    Self::took(got_b),
+                    if parked.is_empty() { "no whistles".into() } else { parked.join("; ") }
+                ),
+            );
+            // Searching: the band's one signal is the table. It must not
+            // stop there to wait for a CQ.
+            let mc = self.log_mark(self.c());
+            self.c().send(Cmd::StartSearch(SearchScope::CurrentBand));
+            let more = "ALPHA again, still at MFSK, while CHARLIE searches the band: a table's traffic, not a whistle, so the search should keep going.";
+            self.a.send(Cmd::TableSay(more.into()));
+            let got = self.wait(420.0, |_, b| Self::has_line(b, A, more));
+            self.c().send(Cmd::StopSearch);
+            let log = self.log_after(self.c(), &mc);
+            let locked = log.iter().filter(|l| l.contains("Locked on") || l.contains("staying on")).count();
+            let data = log.iter().filter(|l| l.contains("Not a whistle")).count();
+            let stops = log.iter().filter(|l| l.contains("Retuning onto it")).count();
+            let whistles = log.iter().filter(|l| l.contains("Whistle heard")).count();
+            self.record(
+                "watch_mfsk: searching doesn't stop on an MFSK table",
+                got.is_some() && locked == 0 && whistles == 0,
+                format!(
+                    "ALPHA's message {}; CHARLIE's search stopped to look {stops}×, knew it for data {data}×, locked on {locked}×, whistles reported {whistles}",
+                    Self::took(got)
+                ),
+            );
+            cleanup(self);
+        }
+
         /// A busy channel: BRAVO and CHARLIE in a 1:1 link on ALPHA's
         /// frequency, ALPHA parked there. ALPHA's whistle watch must not
         /// mistake their traffic for whistles; ALPHA calls BRAVO (busy) and
@@ -2184,7 +2301,15 @@ mod bench {
         fn dump_logs(&self) {
             for (h, n) in [(&self.a, A), (&self.b, B)].into_iter().chain(self.c.as_ref().map(|c| (c, C))) {
                 let g = h.state.lock().unwrap();
-                let lines: Vec<String> = g.log.iter().map(|(at, l)| format!("{} {l}", at.hhmm())).collect();
+                // UTC to the second, to line up with the Mercury logs.
+                let lines: Vec<String> = g
+                    .log
+                    .iter()
+                    .map(|(at, l)| {
+                        let s = at.0 % 86400;
+                        format!("{:02}:{:02}:{:02}Z {l}", s / 3600, s % 3600 / 60, s % 60)
+                    })
+                    .collect();
                 let _ = std::fs::write(self.work.join(format!("whistlestop-{n}.log")), lines.join("\n"));
             }
             for st in &self.stations {
@@ -2648,6 +2773,9 @@ mod bench {
         }
         if named("busy3") {
             b.s_busy3();
+        }
+        if named("watch_mfsk") {
+            b.s_watch_mfsk();
         }
         b.dump_logs();
         let rep = b.report();
