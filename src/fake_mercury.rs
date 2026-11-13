@@ -734,6 +734,8 @@ impl Session {
         let Some(fr) = TableFrame::decode(f) else {
             return;
         };
+        #[cfg(test)]
+        TEST_BCAST_SENT.lock().unwrap().push(fr.clone());
         let bot = self.o.bot_call.clone();
         if matches!(fr.body, TableBody::Call { kind: CALL_TABLE, .. }) {
             self.cq_is_table = true;
@@ -967,6 +969,11 @@ pub fn test_bot_table(_mycall: &str) -> Option<String> {
     #[cfg(not(test))]
     None
 }
+
+/// Tests: every table frame stations sent through a fake Mercury (tests
+/// pick theirs out by callsign).
+#[cfg(test)]
+pub static TEST_BCAST_SENT: std::sync::Mutex<Vec<TableFrame>> = std::sync::Mutex::new(Vec::new());
 
 /// Tests: demo stations started with this callsign get a K7BOT whose JOIN
 /// reports this SNR and bandwidth code.

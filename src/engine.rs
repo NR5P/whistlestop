@@ -301,6 +301,14 @@ pub const TABLE_HOLD: Duration = Duration::from_secs(120);
 /// host to slow down; if no announcement comes in this time, it slows down
 /// by itself (it would never copy the one sent at the faster speed).
 const SLOWDOWN_WAIT: Duration = Duration::from_secs(40);
+/// A member that doesn't know its host yet and hears a station leave: if
+/// no SPEED or CALL (only the host sends those) comes in this long (a
+/// heartbeat's 90 s, at most a minute late, and a margin), it was the host,
+/// and the table is closed.
+pub const HOST_UNKNOWN_GRACE: Duration = Duration::from_secs(180);
+/// A member not heard at all for this long has gone without a goodbye
+/// (power cut, out of range, gave up on the table): it leaves the list.
+pub const TABLE_MEMBER_DROP: Duration = Duration::from_secs(15 * 60);
 /// Roundtable: at most this many AGAIN requests every 20 s.
 // One: the sender answers a request at once, so a second request sent
 // straight after would go out on top of the answer to the first (the
@@ -762,6 +770,10 @@ struct Station {
     /// asks the one asked longest ago, so one that can't be answered
     /// doesn't hold up the others.
     again_asked: HashMap<(String, u64), Instant>,
+    /// A member that doesn't know its host yet (joined by name, before
+    /// the host's first SPEED) heard this station leave, then: if no host
+    /// speaks up within `HOST_UNKNOWN_GRACE`, that was the host closing.
+    host_left_maybe: Option<(String, Instant)>,
     // activities
     search: Option<Search>,
     cq: Option<Cq>,
@@ -1055,6 +1067,7 @@ impl Station {
             upgrade_wait: UPGRADE_WAIT,
             last_again: Instant::now(),
             again_asked: HashMap::new(),
+            host_left_maybe: None,
             search: None,
             cq: None,
             last_watch: Instant::now(),
@@ -4136,6 +4149,13 @@ impl Station {
     /// Leave the table we're at (saying so to the others), back to the
     /// calling mode.
     fn leave_table(&mut self) {
+        self.leave_table_saying(true);
+    }
+
+    /// Leave the table; `goodbye`: say so to the others. Not when the host
+    /// has just closed it: nobody is left to tell, and every member keying
+    /// up at once, the moment the host's goodbye ends, would only collide.
+    fn leave_table_saying(&mut self, goodbye: bool) {
         let Some(id) = self.table_id() else {
             return;
         };
@@ -4145,15 +4165,18 @@ impl Station {
         self.table_queue.clear();
         self.upgrade_wait = UPGRADE_WAIT;
         self.last_upgrade = None;
-        let me = self.mycall();
-        self.table_tx(
-            TableFrame {
-                table: id,
-                from: me,
-                body: TableBody::Leave,
-            }
-            .encode(),
-        );
+        self.host_left_maybe = None;
+        if goodbye {
+            let me = self.mycall();
+            self.table_tx(
+                TableFrame {
+                    table: id,
+                    from: me,
+                    body: TableBody::Leave,
+                }
+                .encode(),
+            );
+        }
         self.set(|g| g.table = None);
         // A table that ramped up (say to DATAC1) left Mercury
         // listening there, deaf to the DATAC3 calls everyone else uses.
@@ -4168,6 +4191,15 @@ impl Station {
         let name = name.trim().to_string();
         if name.is_empty() {
             anyhow::bail!("give the Roundtable a name");
+        }
+        // Already at a table: joining another would leave this one without
+        // a goodbye (and, as its host, close it on everyone without a word).
+        let here = self.st.lock().unwrap().table.as_ref().map(|t| t.name.clone());
+        if let Some(here) = here {
+            if here.eq_ignore_ascii_case(&name) {
+                return Ok(());
+            }
+            self.not_at_table("join another")?;
         }
         if let Some(peer) = self.peer.clone() {
             if !(self.leaving() || self.bye_at.is_some()) {
@@ -4355,6 +4387,7 @@ impl Station {
         self.table_announced = Some(mode);
         self.table_unsynced = !host;
         self.expect_slowdown = None;
+        self.host_left_maybe = None;
         if !host {
             // What we heard of the host's CALL, if that's who this is; never
             // the last 1:1 link's SNR, nor a made-up 0 dB.
@@ -4416,8 +4449,10 @@ impl Station {
         let limit = crate::protocol::again_parts_limit(mode.broadcast_bytes(), &self.table_calls());
         let pieces = crate::protocol::split_for_parts(&me, &text, mode.broadcast_bytes(), limit)?;
         for text in pieces {
+            // The id is taken only once the frames are made: an id with no
+            // message would be asked for by everyone for ten minutes.
+            let frames = table_text_frames(id, &me, self.table_msg_id + 1, &text, mode.broadcast_bytes())?;
             self.table_msg_id += 1;
-            let frames = table_text_frames(id, &me, self.table_msg_id, &text, mode.broadcast_bytes())?;
             let eta = frames.len() as f64 * mode.frame_s;
             self.table_sent.insert(self.table_msg_id, (text.clone(), frames.clone()));
             // Repeats are asked for within minutes: keep the last 64 messages.
@@ -4464,9 +4499,9 @@ impl Station {
             };
             let mut extra: Vec<Vec<u8>> = vec![];
             for t in &more {
-                self.table_msg_id += 1;
-                match table_text_frames(table, &me, self.table_msg_id, t, max) {
+                match table_text_frames(table, &me, self.table_msg_id + 1, t, max) {
                     Ok(f) => {
+                        self.table_msg_id += 1;
                         self.table_sent.insert(self.table_msg_id, (t.clone(), f.clone()));
                         extra.extend(f);
                     }
@@ -4566,9 +4601,16 @@ impl Station {
     /// The callsigns at our table, ours included: the modes whose frames
     /// they don't fit are left out of the speed ramp.
     fn table_calls(&self) -> Vec<String> {
+        // Members heard lately: one gone silent doesn't hold the table out
+        // of the smallest modes (as it no longer holds back its speed).
         let mut v = vec![self.mycall()];
         if let Some(t) = self.st.lock().unwrap().table.as_ref() {
-            v.extend(t.members.keys().cloned());
+            v.extend(
+                t.members
+                    .iter()
+                    .filter(|(_, m)| m.last.is_some_and(|l| l.elapsed() < TABLE_MEMBER_TIMEOUT))
+                    .map(|(c, _)| c.clone()),
+            );
             v.extend(t.host_call.clone());
         }
         v
@@ -4608,19 +4650,10 @@ impl Station {
         }
         // Our own CQ whistle is on the air: a table frame now would be sent
         // on top of it and nobody would copy either.
-        if matches!(
-            self.cq.as_ref().map(|c| &c.phase),
-            Some(CqPhase::Whistle { .. })
-        ) {
-            return Ok(());
-        }
-        // Our CQFRAME is going out (until Mercury's CANCELPENDING): a frame
-        // handed over now would go out in the CQFRAME's mode, cut short, and
-        // nobody could decode it.
-        if self
-            .own_cq_pending
-            .is_some_and(|(at, _)| at.elapsed() < Duration::from_secs(10))
-        {
+        // Nor our CQFRAME (until Mercury's CANCELPENDING): a frame handed
+        // over now would go out in the CQFRAME's mode, cut short, and nobody
+        // could decode it.
+        if self.own_cq_on_air() {
             return Ok(());
         }
         let Some(f) = self.table_queue.pop_front() else {
@@ -4714,6 +4747,7 @@ impl Station {
                 // At this table: its CALL comes from the host (also during a
                 // join window).
                 if *kind == CALL_TABLE && self.table_id() == Some(fr.table) {
+                    self.host_left_maybe = None;
                     let from = fr.from.clone();
                     self.set(|g| {
                         if let Some(t) = g.table.as_mut()
@@ -4793,6 +4827,7 @@ impl Station {
         // Only the host sends SPEED. A member reports how well it hears the
         // host, so it keeps the SN Mercury gave for the host's own frames.
         if matches!(fr.body, TableBody::Speed { .. }) {
+            self.host_left_maybe = None;
             self.set(|g| {
                 if let Some(t) = g.table.as_mut()
                     && !t.host
@@ -4923,9 +4958,20 @@ impl Station {
                 self.system_line(format!(
                     "The host {from} closed the Roundtable \"{name}\"; you've left it"
                 ));
-                self.leave_table();
+                self.leave_table_saying(false);
             }
             TableBody::Leave => {
+                // We don't know the host yet: this may have been it.
+                let unknown_host = self
+                    .st
+                    .lock()
+                    .unwrap()
+                    .table
+                    .as_ref()
+                    .is_some_and(|t| !t.host && t.host_call.is_none());
+                if unknown_host {
+                    self.host_left_maybe = Some((from.clone(), Instant::now()));
+                }
                 // Nothing more will come from it: stop asking for its gaps.
                 self.table_asm.forget_sender(&from);
                 self.set(|g| {
@@ -4975,8 +5021,12 @@ impl Station {
             if self.expect_slowdown.is_some() {
                 self.expect_slowdown = Some(now);
             }
+            if let Some((_, at)) = self.host_left_maybe.as_mut() {
+                *at = now;
+            }
             return Ok(());
         }
+        self.drop_silent_members();
         let me = self.mycall();
         let calling = modes::mode_by_name("DATAC3").expect("DATAC3");
         if !host {
@@ -5004,6 +5054,25 @@ impl Station {
                 ));
                 self.leave_table();
                 return Ok(());
+            }
+            // A station left while we didn't know the host yet, and no host
+            // has spoken since: it was the host, and it closed the table.
+            if let Some((who, at)) = self.host_left_maybe.clone()
+                && at.elapsed() >= HOST_UNKNOWN_GRACE
+            {
+                let still_unknown =
+                    self.st.lock().unwrap().table.as_ref().is_some_and(|t| t.host_call.is_none());
+                self.host_left_maybe = None;
+                if still_unknown {
+                    self.log(format!(
+                        "Roundtable: {who} left \"{name}\" and no host has been heard since; taking it as closed"
+                    ));
+                    self.system_line(format!(
+                        "{who} left and no host has been heard since: the Roundtable \"{name}\" seems to have closed, so you've left it"
+                    ));
+                    self.leave_table_saying(false);
+                    return Ok(());
+                }
             }
             // Into a quiet table (not over someone's message), but not held
             // back more than a minute by a busy one: the host counts on it.
@@ -5079,32 +5148,22 @@ impl Station {
             if Instant::now() < end {
                 return Ok(());
             }
+            // Not while our own CQ is on the air: the announcement would go
+            // out on top of it. The window runs a few seconds longer.
+            if self.own_cq_on_air() {
+                return Ok(());
+            }
             self.join_window = None;
             self.last_join_window = Instant::now();
             // Back to speed: what it was, or slower if a newcomer (or a
-            // member's new report) needs it.
-            let worst = self
-                .st
-                .lock()
-                .unwrap()
-                .table
-                .as_ref()
-                .and_then(|t| {
-                    t.members
-                        .values()
-                        .filter(|m| m.last.is_some_and(|l| l.elapsed() < TABLE_MEMBER_TIMEOUT))
-                        .filter_map(|m| m.snr_of_host)
-                        .min()
-                });
+            // member's new report) needs it, and never wider than the
+            // narrowest bandwidth at the table (a newcomer's included).
+            let (worst, narrow) = self.table_limits();
             let calls = self.table_calls();
-            let target = worst
-                .map(|w| {
-                    modes::best_mode_where(self.bw, w as f64, self.cfg.ramp_margin_db, |m| {
-                        crate::protocol::table_frames_fit(m.broadcast_bytes(), &calls)
-                    })
-                })
-                .filter(|m| m.payload_bps < back.payload_bps)
-                .unwrap_or(back);
+            let snr = worst.map(|w| w as f64).unwrap_or(back.min_snr_db + self.cfg.ramp_margin_db);
+            let target = back_to_speed(back, narrow, snr, self.cfg.ramp_margin_db, |m| {
+                crate::protocol::table_frames_fit(m.broadcast_bytes(), &calls)
+            });
             if target.payload_bps > calling.payload_bps {
                 self.log(format!("Roundtable: join window closed; back to {}", target.name));
                 self.table_set_speed(target).await?;
@@ -5116,6 +5175,7 @@ impl Station {
         if mode.payload_bps > calling.payload_bps
             && self.last_join_window.elapsed() >= JOIN_WINDOW_EVERY
             && self.table_queue.is_empty()
+            && !self.own_cq_on_air()
         {
             self.table_set_speed(calling).await?;
             let switched = self.pending_speed.map(|(_, at, _)| at).unwrap_or_else(Instant::now);
@@ -5256,47 +5316,91 @@ impl Station {
         Ok(())
     }
 
+    /// The weakest SNR of the host among the members heard lately, and the
+    /// narrowest bandwidth at the table (ours included). Members report
+    /// every 2 min: after three missed reports one no longer holds the table
+    /// back.
+    fn table_limits(&self) -> (Option<i8>, Bandwidth) {
+        let g = self.st.lock().unwrap();
+        let recent = |m: &&Member| m.last.is_some_and(|l| l.elapsed() < TABLE_MEMBER_TIMEOUT);
+        let Some(t) = g.table.as_ref() else {
+            return (None, self.bw);
+        };
+        let worst = t.members.values().filter(recent).filter_map(|m| m.snr_of_host).min();
+        let narrow = t
+            .members
+            .values()
+            .filter(recent)
+            .filter_map(|m| m.bw)
+            .chain([self.bw])
+            .min()
+            .unwrap_or(self.bw);
+        (worst, narrow)
+    }
+
+    /// Members not heard at all for `TABLE_MEMBER_DROP` went without a
+    /// goodbye: off the list, so a long callsign that's gone no longer keeps
+    /// the table out of the smallest modes.
+    fn drop_silent_members(&mut self) {
+        let gone: Vec<String> = {
+            let g = self.st.lock().unwrap();
+            let Some(t) = g.table.as_ref() else { return };
+            t.members
+                .iter()
+                .filter(|(_, m)| m.last.is_none_or(|l| l.elapsed() >= TABLE_MEMBER_DROP))
+                .map(|(c, _)| c.clone())
+                .collect()
+        };
+        if gone.is_empty() {
+            return;
+        }
+        for c in &gone {
+            self.table_asm.forget_sender(c);
+        }
+        let mins = TABLE_MEMBER_DROP.as_secs() / 60;
+        self.set(|g| {
+            if let Some(t) = g.table.as_mut() {
+                for c in &gone {
+                    t.members.remove(c);
+                    t.lines.push((
+                        Clock::now(),
+                        String::new(),
+                        format!("{c} not heard for {mins} minutes; taken off the table"),
+                    ));
+                }
+            }
+        });
+    }
+
+    /// Our CQ's whistle or CQFRAME is on the air: nothing of the table may
+    /// go out over it.
+    fn own_cq_on_air(&self) -> bool {
+        matches!(self.cq.as_ref().map(|c| &c.phase), Some(CqPhase::Whistle { .. }))
+            || self
+                .own_cq_pending
+                .is_some_and(|(at, _)| at.elapsed() < Duration::from_secs(10))
+    }
+
     /// Host only: move the table to the fastest mode everyone can copy.
     async fn ramp(&mut self) -> anyhow::Result<()> {
         // No speed changes (a MODE command) in the middle of a 1:1 link.
+        // Nor while our own CQ is on the air: the announcements would go
+        // out on top of it (the next tick tries again).
         if !self.cfg.auto_ramp
             || self.pending_speed.is_some()
             || self.join_window.is_some()
             || self.peer.is_some()
+            || self.own_cq_on_air()
         {
             return Ok(());
         }
-        let (host, worst, current, narrow) = {
-            let g = self.st.lock().unwrap();
-            let Some(t) = g.table.as_ref() else {
-                return Ok(());
-            };
-            let recent = |m: &Member| {
-                // Members report every 2 min: after three missed reports a
-                // member no longer holds the table back.
-                m.last
-                    .is_some_and(|l| l.elapsed() < TABLE_MEMBER_TIMEOUT)
-            };
-            let worst = t
-                .members
-                .values()
-                .filter(|m| recent(m))
-                .filter_map(|m| m.snr_of_host)
-                .min();
-            // The narrowest bandwidth at the table, ours included.
-            let narrow = t
-                .members
-                .values()
-                .filter(|m| recent(m))
-                .filter_map(|m| m.bw)
-                .chain([self.bw])
-                .min()
-                .unwrap_or(self.bw);
-            (t.host, worst, t.mode, narrow)
+        let Some((host, current)) = self.st.lock().unwrap().table.as_ref().map(|t| (t.host, t.mode)) else {
+            return Ok(());
         };
         if !host {
             return Ok(());
         }
+        let (worst, narrow) = self.table_limits();
         // No SNR from anyone yet: still never wider than a member can take.
         let snr = match worst {
             Some(w) => w as f64,
@@ -6428,6 +6532,22 @@ pub fn heard_dial(moves: &VecDeque<(Instant, f64, f64)>, now_dial: f64, now: Ins
         .map(|(_, from, _)| *from)
         .unwrap_or(now_dial);
     if (was - now_dial).abs() < 300.0 { now_dial } else { was }
+}
+
+/// The speed a table returns to when its join window closes: what it ran
+/// at (`back`), or slower if the weakest member (at `snr_db`) needs it, and
+/// never wider than the narrowest bandwidth at the table: a newcomer who
+/// joined in the window may have a narrower one than anyone before.
+pub fn back_to_speed(
+    back: &'static Mode,
+    narrow: Bandwidth,
+    snr_db: f64,
+    margin_db: f64,
+    ok: impl Fn(&Mode) -> bool,
+) -> &'static Mode {
+    let best = modes::best_mode_where(narrow, snr_db, margin_db, ok);
+    let fits = narrow.modes().iter().any(|m| m.index == back.index);
+    if fits && best.payload_bps >= back.payload_bps { back } else { best }
 }
 
 /// Missing messages in the order to ask for them again: never asked first,
@@ -7588,8 +7708,81 @@ mod tests {
         assert!(g.log.iter().any(|l| l.1.contains("the host K7BOT closed")));
         assert!(g.chat.iter().any(|c| c.text.contains("closed the Roundtable")));
         drop(g);
+        // No goodbye of ours into the closed table: every member keying up
+        // the moment the host's ends would only collide.
+        std::thread::sleep(Duration::from_secs(10));
+        let ours = crate::fake_mercury::TEST_BCAST_SENT
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|f| f.from == "N0MBR" && matches!(f.body, TableBody::Leave))
+            .count();
+        assert_eq!(ours, 0, "a goodbye went out into the closed table");
         h.send(Cmd::Stop);
         drop(rt);
+    }
+
+    /// At a table, joining another is refused (it would leave this one
+    /// without a goodbye); joining the same one again changes nothing.
+    #[test]
+    fn no_join_while_at_another_table() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let f = rt.block_on(crate::fake_mercury::FakeMercury::start(FakeOptions::default())).unwrap();
+        let h = spawn(|| {});
+        let mut cfg = Config {
+            callsign: "N0TWO".into(),
+            demo: false,
+            rigctld: "none".into(),
+            mercury_port: f.port,
+            mercury_bcast_port: f.bcast_port,
+            ..Default::default()
+        };
+        cfg.sdr.enabled = false;
+        cfg.sdr.wide_search = false;
+        h.send(Cmd::Start(cfg));
+        let wait = |what: &str, f: &dyn Fn(&State) -> bool| {
+            let t = Instant::now();
+            while t.elapsed() < Duration::from_secs(10) {
+                if f(&h.state.lock().unwrap()) {
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            panic!("timed out waiting for {what}");
+        };
+        wait("Mercury", &|s| s.mercury_ok);
+        h.send(Cmd::JoinTable("Evening Table".into()));
+        wait("at the table", &|s| s.table.is_some());
+        h.send(Cmd::JoinTable("evening table".into()));
+        h.send(Cmd::JoinTable("Other Table".into()));
+        wait("the refusal", &|s| {
+            s.log.iter().any(|l| l.1.contains("leave it first, then join another"))
+        });
+        let g = h.state.lock().unwrap();
+        assert_eq!(g.table.as_ref().map(|t| t.name.as_str()), Some("Evening Table"));
+        assert_eq!(g.log.iter().filter(|l| l.1.contains("Joined Roundtable")).count(), 1);
+        drop(g);
+        h.send(Cmd::Stop);
+        drop(rt);
+    }
+
+    /// A join window closing goes back to the table's speed, slower if the
+    /// weakest member needs it, and never wider than the narrowest
+    /// bandwidth: a 500 Hz newcomer that hears the host well still caps it.
+    #[test]
+    fn join_window_returns_within_the_narrowest_bandwidth() {
+        let all = |_: &Mode| true;
+        let wide = Bandwidth::ALL.iter().copied().max().unwrap();
+        let back = modes::best_mode_where(wide, 40.0, 3.0, all);
+        assert!(!Bandwidth::Hz500.modes().iter().any(|m| m.index == back.index), "test needs a wide mode");
+        // Everyone wide and hearing well: back where it was.
+        assert_eq!(back_to_speed(back, wide, 40.0, 3.0, all).index, back.index);
+        // A 500 Hz newcomer at 40 dB: the best 500 Hz mode, not `back`.
+        let narrow = back_to_speed(back, Bandwidth::Hz500, 40.0, 3.0, all);
+        assert!(Bandwidth::Hz500.modes().iter().any(|m| m.index == narrow.index));
+        // A weak newcomer: slower than `back`.
+        let weak = back_to_speed(back, wide, 0.0, 3.0, all);
+        assert!(weak.payload_bps < back.payload_bps);
     }
 
     /// Join a Roundtable right after hanging up: Mercury refuses the mode
