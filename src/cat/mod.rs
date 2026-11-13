@@ -279,6 +279,12 @@ fn connect_tcp(addr: &str) -> Result<std::net::TcpStream> {
 }
 
 pub fn open_wire(port: &str, baud: u32) -> Result<Box<dyn Wire>> {
+    open_wire_with(port, baud, false)
+}
+
+/// `open_wire`; `yaesu_cat`: the port is a Yaesu radio's CAT port (see
+/// `rigsetup::is_yaesu_cat_port`), opened RigHelm's way for them.
+fn open_wire_with(port: &str, baud: u32, yaesu_cat: bool) -> Result<Box<dyn Wire>> {
     if is_tcp(port) {
         let addr = port.strip_prefix("tcp:").unwrap_or(port);
         let s = connect_tcp(addr)?;
@@ -296,18 +302,24 @@ pub fn open_wire(port: &str, baud: u32) -> Result<Box<dyn Wire>> {
         bail!("{port}: on a phone, choose the radio on USB or a TCP bridge (host:port)")
     }
     #[cfg(not(any(target_os = "ios", target_os = "android")))]
-    open_serial(port, baud)
+    return open_serial(port, baud, yaesu_cat);
+    #[cfg(any(target_os = "ios", target_os = "android"))]
+    let _ = yaesu_cat;
 }
 
 #[cfg(not(any(target_os = "ios", target_os = "android")))]
-fn open_serial(port: &str, baud: u32) -> Result<Box<dyn Wire>> {
-    let mut p = serialport::new(port, baud)
-        .timeout(Duration::from_millis(40))
-        .dtr_on_open(false)
-        .open()
-        .map_err(|e| anyhow!("can't open {port}: {e}"))?;
-    // Hold RTS and DTR low: on many radios they key the transmitter.
-    let _ = p.write_request_to_send(false);
+fn open_serial(port: &str, baud: u32, yaesu_cat: bool) -> Result<Box<dyn Wire>> {
+    let mut b = serialport::new(port, baud).timeout(Duration::from_millis(40)).dtr_on_open(false);
+    if yaesu_cat {
+        // Yaesu CAT: 2 stop bits, as their manuals give it.
+        b = b.stop_bits(serialport::StopBits::Two);
+    }
+    let mut p = b.open().map_err(|e| anyhow!("can't open {port}: {e}"))?;
+    // RTS and DTR low: on many radios (and on a Yaesu's *other* USB port)
+    // they key the transmitter. On a Yaesu's own CAT port RTS is the CAT
+    // handshake instead: with the radio's "CAT RTS" on (often the factory
+    // setting) it won't answer unless RTS is high.
+    let _ = p.write_request_to_send(yaesu_cat);
     let _ = p.write_data_terminal_ready(false);
     Ok(Box::new(SerialWire(p)))
 }
@@ -381,6 +393,23 @@ pub(crate) fn cal(table: &[(f32, f32)], v: f32) -> f32 {
 
 pub(crate) fn unsupported(what: &str) -> anyhow::Error {
     anyhow!("{what} isn't available over direct CAT for this radio")
+}
+
+/// Unkey, and make sure: the ASCII protocols don't acknowledge a command
+/// (a busy radio answers `?;` and stays on the air), so read the TX state
+/// back, send the unkey again if it's still transmitting, and say so if it
+/// won't stop (the engine then keeps trying). A radio that can't report its
+/// TX state is taken at its word, as before.
+pub(crate) fn unkey_confirmed<D: Driver + ?Sized>(d: &mut D, send: impl Fn(&mut D) -> Result<()>) -> Result<()> {
+    for _ in 0..3 {
+        send(d)?;
+        std::thread::sleep(Duration::from_millis(80));
+        match d.ptt() {
+            Ok(false) | Err(_) => return Ok(()),
+            Ok(true) => continue,
+        }
+    }
+    bail!("the radio is still transmitting after three unkeys")
 }
 
 /// One radio. Levels, functions and VFO operations use Hamlib's names and
@@ -543,6 +572,9 @@ pub fn connect(cfg: &CatConfig) -> Result<Box<dyn Driver>> {
     } else {
         vec![family]
     };
+    // Only a port the platform places as a Yaesu's CAT port (never one
+    // chosen blind: the other port of the pair keys the radio on RTS).
+    let yaesu_cat = !is_tcp(&port) && !is_usb_host(&port) && crate::rigsetup::is_yaesu_cat_port(&port);
     let mut last = anyhow!("the radio on {port} didn't answer");
     for &baud in &bauds {
         for &f in &families {
@@ -550,10 +582,10 @@ pub fn connect(cfg: &CatConfig) -> Result<Box<dyn Driver>> {
             // retry for a moment, never minutes (each TCP try is itself
             // bounded by TCP_CONNECT_TIMEOUT).
             let first = Instant::now();
-            let mut w = open_wire(&port, baud);
+            let mut w = open_wire_with(&port, baud, yaesu_cat);
             while w.is_err() && first.elapsed() < OPEN_RETRY {
                 std::thread::sleep(Duration::from_millis(200));
-                w = open_wire(&port, baud);
+                w = open_wire_with(&port, baud, yaesu_cat);
             }
             let w = w?;
             let tried = match f {
@@ -593,7 +625,17 @@ pub fn connect(cfg: &CatConfig) -> Result<Box<dyn Driver>> {
 
 /// Ask `ID;` and build the matching ASCII driver.
 fn probe_ascii(mut w: Box<dyn Wire>, hint: Family, max_w: f32) -> Result<Box<dyn Driver>> {
-    let id = ascii_query(w.as_mut(), "ID;", "ID")?;
+    // A bare ';' first ends whatever an earlier probe left in the radio's
+    // command buffer (the Icom probe's CI-V bytes have no ';'): otherwise
+    // the radio reads "<those bytes>ID;" as one command and answers '?'.
+    // And a '?' once more is worth a second try.
+    let _ = w.write_all(b";");
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    let id = match ascii_query(w.as_mut(), "ID;", "ID") {
+        // It answered '?': something is listening; ask once more.
+        Err(e) if e.to_string().contains("doesn't support") => ascii_query(w.as_mut(), "ID;", "ID")?,
+        r => r?,
+    };
     let digits = id[2..].trim().to_string();
     if digits.len() >= 4 {
         Ok(Box::new(yaesu::Yaesu::new(w, &digits, max_w)?))
@@ -708,6 +750,7 @@ mod tests {
                     manufacturer: "Icom Inc.".into(),
                     product: "IC-705".into(),
                     serial: "IC-705 12001234".into(),
+                    interface: None,
                 }]
             }
             fn open(&self, path: &str, _baud: u32) -> Result<Box<dyn Wire>> {

@@ -21,6 +21,8 @@ pub struct DepotTab {
     to: String,
     via: String,
     text: String,
+    /// Why the last Post didn't go (the text is kept).
+    post_error: Option<String>,
 }
 
 /// "2026-11-10 21:04Z" from unix seconds.
@@ -98,15 +100,29 @@ impl DepotTab {
             ui.horizontal(|ui| {
                 let ok = !self.to.trim().is_empty() && !self.text.trim().is_empty();
                 if ui.add_enabled(ok, egui::Button::new(RichText::new("📮  Post").strong()).fill(BRASS.linear_multiply(0.5))).help(&help::D_POST).clicked() {
-                    send.push(Cmd::DepotPost { to: self.to.trim().to_string(), via: Some(self.via.trim().to_string()), text: self.text.trim().to_string() });
-                    self.text.clear();
-                    self.tab = Box_::Departures;
+                    // The Depot refuses an address that isn't a callsign:
+                    // check first, so the message isn't cleared for nothing.
+                    let (to, via) = (self.to.trim().to_uppercase(), self.via.trim().to_uppercase());
+                    if !whistlestop::protocol::valid_call(&to) || !(via.is_empty() || whistlestop::protocol::valid_call(&via)) {
+                        self.post_error = Some(format!(
+                            "{:?} isn't a callsign (1–12 letters, digits, / or -): nothing posted",
+                            if whistlestop::protocol::valid_call(&to) { &via } else { &to }
+                        ));
+                    } else {
+                        self.post_error = None;
+                        send.push(Cmd::DepotPost { to, via: Some(via), text: self.text.trim().to_string() });
+                        self.text.clear();
+                        self.tab = Box_::Departures;
+                    }
                 }
                 ui.add_sized(
                     egui::vec2(90.0, ui.spacing().interact_size.y),
                     egui::Label::new(RichText::new(format!("{:>5} bytes", self.text.len())).small().monospace().color(DIM)),
                 );
             });
+            if let Some(e) = &self.post_error {
+                ui.label(RichText::new(e).small().color(super::RED));
+            }
         });
         ui.add_space(8.0);
         // Boxes.

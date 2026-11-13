@@ -206,6 +206,11 @@ pub const GUIDE_BTN: Topic = (
     "Opens the full manual in its own window, so you can keep it beside the main one. Contents and search on the left. Click again (or close its window) to put it away.",
     "Help mode and the Guide",
 );
+pub const L_CANCEL: Topic = (
+    "Cancel the call",
+    "Stops the call going out (Mercury gives up calling). Shown while a call is on its way; Connect, Call CQ, Search and the radio's dial wait until it links or is cancelled.",
+    "Chat",
+);
 pub const L_CONNECT: Topic =
     ("Connect", "Call a station by callsign. Mercury places the call; when it answers, the link header shows their name, grid and signal report. A CQ you're calling stops first. Not while you're at a Roundtable (Leave first).", "Chat");
 pub const L_DISCONNECT: Topic = ("Disconnect (73)", "Says goodbye, lets Mercury deliver anything still queued, then hangs up.", "Chat");

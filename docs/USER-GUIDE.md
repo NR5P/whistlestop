@@ -51,11 +51,13 @@ Only one program can open the radio's CAT (serial/USB) port. So one program owns
 - Install Hamlib once (macOS: `brew install hamlib`; Linux: your distribution's `hamlib` or `libhamlib-utils` package; Windows: the installer from hamlib.github.io, which Whistlestop finds in Program Files).
 - Press **🔍 Detect radios**. Whistlestop looks at the USB devices your computer already knows about and recognises:
   - Icom radios by name (an IC-7300 names itself in its USB serial number), plus the IC-705 and IC-905 by Icom's own USB IDs;
-  - Yaesu radios by their two-port USB chip (CAT is on the first port);
+  - Yaesu radios by their two-port USB chip (CAT is on the first, "Enhanced" port; the other is never offered: it keys the radio). Where the system says which USB interface a port is (Linux, Windows, recent macOS), that decides it; otherwise the two ports' shared USB serial number does;
   - Kenwood, Elecraft, QRP Labs (QMX/QDX, which speak Kenwood TS-480), Xiegu and others by their USB names.
-- Press **Use** beside your radio, or choose **Model**, **Port** and **Speed** yourself. Leaving them on **Automatic** detects them every time Whistlestop starts.
+- Press **Use** beside your radio, or choose **Model**, **Port** and **Speed** yourself. Leaving them on **Automatic** detects them every time Whistlestop starts. Model and port always come from the same radio: with a model chosen and the port on Automatic, it's the port of the radio of that model (or of the only radio there is); with a port chosen and the model on Automatic, it's the model of the radio on that port. If that can't be told, Whistlestop asks you to choose instead of guessing.
+- On Linux, ports are kept by their stable `/dev/serial/by-id/…` names, so two USB devices swapping `ttyUSB0`/`ttyUSB1` after a reboot can't send CAT to the wrong one.
 - **Detection never opens a port.** Opening a serial port raises its RTS and DTR lines, and on some radios that keys the transmitter. When Whistlestop starts rigctld, it holds RTS and DTR off.
-- rigctld listens on `127.0.0.1:4532` (change **rigctld port** if something else uses it). Point Mercury there.
+- rigctld listens on `127.0.0.1:4532` (change **rigctld port** if something else uses it). Point Mercury there. If something already answers on that port (another rigctld, RigHelm's server), Whistlestop says so and doesn't start a second one beside it. If rigctld stops straight away (a wrong or busy port), the Log says why, from its own messages (kept in `rigctld.log` beside the settings).
+- A rigctld left running by a Whistlestop that ended without quitting (a crash, a force-quit) is stopped the next time Whistlestop starts one.
 
 **Use a running rigctld / RigHelm**. If something already owns the radio:
 
@@ -217,13 +219,13 @@ With an RTL-SDR running, tick **Wide search (SDR)** in the Search card. The SDR'
 
 ### Heard
 
-The **Heard** card lists recent CQs (from Mercury's CQFRAME decodes), Roundtable calls, and SDR whistle hits, newest first. Buttons: **Answer** (connect), **Join** (a Roundtable), **Lock on** (an SDR hit).
+The **Heard** card lists recent CQs (from Mercury's CQFRAME decodes), Roundtable calls, and SDR whistle hits, newest first. Buttons: **Answer** (connect), **Join** (a Roundtable), **Lock on** (an SDR hit). Answer and Join first tune the radio to where the station was heard (a search may have moved on since). None of them is offered during a link or a call, or at a Roundtable.
 
 ## Chat
 
 Chat is a 1:1 conversation over Mercury's ARQ, which retransmits until everything arrives intact.
 
-- **Connecting**: answer a CQ, or type a callsign in the box at the top of the Chat tab and press **Connect**. "Calling …" shows while Mercury places the call. A CQ you're calling stops first. Connect is refused while you're already linked or calling, while you're at a Roundtable (Leave first: a 1:1 link and a Roundtable don't mix), and until your own callsign is set (Settings → Station): without one Whistlestop sends nothing at all, and says so in the Log.
+- **Connecting**: answer a CQ, or type a callsign in the box at the top of the Chat tab and press **Connect**. "Calling …" shows while Mercury places the call, with **Cancel the call**; meanwhile Connect, Call CQ, Search, the dial, the radio's mode and the tune carrier wait (Whistlestop refuses them until the call links or is cancelled). A CQ you're calling stops first. Connect is refused while you're already linked or calling, while you're at a Roundtable (Leave first: a 1:1 link and a Roundtable don't mix), and until your own callsign is set (Settings → Station): without one Whistlestop sends nothing at all, and says so in the Log.
 - **History**: the Chat tab keeps the newest **500** lines and the Files tab the newest **200** finished transfers (transfers still going are never dropped), so an unattended station running for days stays light. Depot mail is kept in full.
 - **The link header** shows the other station's call, name and grid (from their HELLO), the agreed bandwidth, how they hear you ("hears you +7 dB", from their reports), the time since linking, and **Disconnect (73)**.
 - **Messages** show **"… sending"** until the other station's app confirms they arrived, then **"✓ delivered"**. There are no read receipts and no typing indicators: they would cost airtime.
@@ -356,7 +358,8 @@ Once linked, either station can ask to **move the link** to another frequency, t
 - The other station decides by **its own rules** (below) and answers.
 - If it agrees, both stations retune a moment later. The answer has crossed by then, and Mercury's ARQ resends anything lost in the gap. The link carries on at the new frequency.
 - The link card shows "on … with …, back to … when the link ends". When the link ends, for any reason, **both stations go back** to where they were.
-- If it refuses, you see why ("I only QSY within 20m", "outside my digital segments"…).
+- If it refuses, you see why ("I only QSY within 20m", "outside my digital segments"…). If it doesn't answer within **90 s**, the request is dropped ("No answer to the QSY request…") and you can ask again.
+- The box takes kHz (14106.5) or MHz (14.1065), like the Tune box.
 - Whatever the rules, the **whole signal** must fit inside an amateur band: USB puts it 300–2700 Hz above the dial, so a dial within 2.7 kHz of a band's top edge is refused. While you're **Away** with **Automatic only in the automatic-control segments** on, a QSY must also stay inside those segments.
 
 **Your rules** (Settings → QSY requests, **off by default**):
@@ -569,7 +572,7 @@ The top bar's S-meter and frequency display follow the radio, including changes 
 
 ### The Radio Controls window
 
-**🎛 Radio controls** opens a separate, movable window with everything your radio offers through Hamlib. Close it when you're done, so the main screen stays uncluttered. Whistlestop asks the radio for its capabilities when it connects and **shows only the controls your radio reports**, so there are no buttons that do nothing. Values are read from the radio about every 1.5 s while the window is open.
+**🎛 Radio controls** opens a separate, movable window with everything your radio offers through Hamlib. Close it when you're done, so the main screen stays uncluttered. Whistlestop asks the radio for its capabilities when it connects and **shows only the controls your radio reports**, so there are no buttons that do nothing. Values are read from the radio about every 1.5 s while the window is open. During a link or a call, the controls that move what the radio hears or sends on (VFO A/B, swap, split, RIT/XIT) are refused ("not while linked…"): the link would be lost.
 
 - **Transmit meters**: **SWR**, **ALC** and **Power out**, read while transmitting, plus the SWR of the last transmission. See "Antenna tuner and SWR".
 - **Antenna tuner**: **ATU** (tuner in or out), **⟳ Tune now**, the Mercury **Tune carrier**, and **Auto-tune when SWR is above …** with its limit.
@@ -586,7 +589,7 @@ With **Settings → Radio connection → Direct CAT (built in)**, Whistlestop co
 | Protocol | Radios |
 |---|---|
 | **Icom CI-V** | IC-7300, IC-7300MK2, IC-705, IC-7610, IC-9700, IC-7100, IC-905, IC-7851, IC-7600, IC-7200, IC-7410, IC-9100, older CI-V radios; **Xiegu** G90, X6100, X5105 (they speak CI-V) |
-| **Kenwood** | TS-590S/SG, TS-890S, TS-990S, TS-480, TS-2000; **QRP Labs** QMX/QDX, **truSDX**, **FlexRadio** CAT ports (they speak Kenwood) |
+| **Kenwood** | TS-590S/SG, TS-890S, TS-480, TS-2000 (the TS-990S only through Hamlib: see below); **QRP Labs** QMX/QDX, **truSDX**, **FlexRadio** CAT ports (they speak Kenwood) |
 | **Elecraft** | K3/K3S, K4, KX2, KX3 |
 | **Yaesu** | FT-991/A, FT-891, FT-710, FTDX10, FTDX101D/MP, FT-950, FTDX3000, FTDX1200, FT-2000, FT-450 |
 | **Yaesu (older)** | FT-817, FT-818, FT-857, FT-897 |
@@ -599,12 +602,13 @@ With **Settings → Radio connection → Direct CAT (built in)**, Whistlestop co
 - **CI-V address**: **Ask the radio** finds it with a broadcast, even if you've changed it from the factory address. Turn it off to type an address in hex.
 - **Full power**: the radio's maximum output, so the power slider is right (Kenwood, Elecraft and Yaesu set power in watts).
 - **or network address**: `host:port` reaches a radio through a serial-over-network bridge (ser2net and similar) or a FlexRadio CAT port. A bridge that doesn't answer is given up on after about 3 s (per address the name resolves to), and a port that won't open is retried for 2 s, so a switched-off bridge never holds Whistlestop up for long.
-- The port is opened with **RTS and DTR held low**, because on many radios those lines key the transmitter.
+- The port is opened with **RTS and DTR held low**, because on many radios those lines key the transmitter. One exception: a **Yaesu**'s own CAT port (the first of the two ports its USB cable shows, recognised by its USB interface number) is opened with **RTS high** and 2 stop bits, because with the radio's **CAT RTS** menu on (often the factory setting) it doesn't answer otherwise. The other port of the pair, which keys the transmitter on RTS, is never used for CAT; a port Whistlestop can't place (chosen by hand on a platform that doesn't report USB interfaces) keeps RTS low, so with it set the radio's CAT RTS to DISABLE.
 
 **Sharing with Mercury.** Only one program can open the serial port, so Whistlestop serves the rigctld protocol on **Share with Mercury on port** (default 4532). Set Mercury to **Hamlib model 2 (NET rigctl)** at `127.0.0.1:4532` and it keys the radio through Whistlestop. Loggers and other programs that speak rigctld can use it too. Turn sharing off only if Mercury keys the radio another way (VOX, or its own PTT port). If a program keys the radio through this port and then disconnects or crashes without unkeying, Whistlestop unkeys the radio for it. Quitting Whistlestop also waits (up to 3 s) until the radio is unkeyed.
 
 **Never left transmitting.** Whistlestop keeps the radio from staying keyed when something goes wrong:
 - If the radio's sound output stops taking the whistle (unplugged, or its stream failed), the whistle gives up 3 s after its own length: the radio is unkeyed, the CQ stops, and the Log says "⚠ The whistle didn't finish playing …".
+- Over direct CAT, an unkey is checked: Kenwood, Elecraft and Yaesu radios don't acknowledge commands, so Whistlestop reads the TX state back, sends the unkey again (up to 3 times) if the radio is still transmitting, and reports a failure if it won't stop.
 - If an unkey fails (CAT upset by RF, rigctld not answering), Whistlestop keeps trying on every radio poll (0.7 s) until it goes through ("⚠ Unkeying the radio failed …; trying again", then "Radio unkeyed").
 - The TX lamp shows what the radio reports, or what Whistlestop or Mercury keyed, so a transmission made another way (your mic, the antenna tuner) clears when it ends.
 - On the shared port, a PTT command needs its state as a number (`T 1`, `T 0`, or `T VFOA 0` in rigctld's VFO mode); anything else is refused, never taken as key up.
@@ -613,7 +617,9 @@ With **Settings → Radio connection → Direct CAT (built in)**, Whistlestop co
 
 **FT-817 family PTT.** Whistlestop checks that the radio did key or unkey, from its acknowledgement or, failing that, its TX status; if it can't confirm, it reports an error instead of assuming the radio is receiving. The PTT readout comes from the radio's own TX status.
 
-**Kenwood TS-990.** Mode is read and set with the TS-990's own `OM` command (main band), including its data modes (USB-D, LSB-D, FM-D).
+**Kenwood TS-890S.** Mode is read and set with its own `OM` command (main band), including its data modes (USB-D, LSB-D, FM-D). **TS-990S**: it has no `IF` command and keys differently, so direct CAT refuses it with a note; use Hamlib (Settings → Radio → Managed rigctld).
+
+**Per-model details.** The S-meter is read on each model's own scale (TS-2000 0–30, TS-480 0–20, TS-590 0–30, TS-890 0–70 dots; Elecraft K3/KX 0–15, or 0–21 in its extended K31 mode). Yaesu squelch, mic gain and RF gain use each model's range (e.g. squelch 0–255 on the FTDX3000, FT-950, FTDX1200, FTDX5000, FT-2000, FTDX10 and FT-710; RF gain 0–30 on the FT-891). Split on Yaesu radios uses `ST` on the FTDX101 and FT-891 and the transmit-VFO command `FT` on the others, and is read back after setting; the FT-991/991A and FT-891 have no VFO select. The Elecraft K3/KX always receives on VFO A: choosing VFO B is refused (use split to transmit on B).
 
 **What each protocol controls.** Frequency, mode (including the radio's data mode: Icom DATA, Kenwood DA, Elecraft DATA A, Yaesu DATA-U, FT-817 DIG), PTT and the S-meter work on every radio. The Radio Controls window offers what the radio supports:
 
@@ -678,7 +684,7 @@ They're stored in the settings file (`segments`), so you can change or add them.
 
 ## Settings reference
 
-Settings are saved to `~/Library/Application Support/Whistlestop/whistlestop.toml` (macOS). **Save & connect** applies them and reconnects. Closing the Settings window without it throws your edits away. If the settings file has a value Whistlestop can't read (edited by hand, say), only that setting falls back to its default: the rest are kept, and the Log names each one ("⚠ Settings file: …"). A value that's out of range (a negative listen time, a whistle of hours, a port of 0…) is set to the nearest sensible value, and the Log says so ("⚠ Settings: …"); the same goes for settings sent by a remote operator. A callsign is trimmed and upper-cased, and characters other than letters, digits, `/` and `-` are removed. A file that can't be read at all is kept as `whistlestop.toml.bad` and the default settings are used. Settings are written to a temporary file first and then moved into place, so a crash mid-save never leaves a cut-short file.
+Settings are saved to `~/Library/Application Support/Whistlestop/whistlestop.toml` (macOS). **Save & connect** applies them and reconnects. Closing the Settings window without it throws your edits away. If the settings file has a value Whistlestop can't read (edited by hand, say), only that setting falls back to its default: the rest are kept, and the Log names each one ("⚠ Settings file: …"). A value that's out of range (a negative listen time, a whistle of hours, a port of 0…) is set to the nearest sensible value, and the Log says so ("⚠ Settings: …"); the same goes for settings sent by a remote operator. A callsign is trimmed and upper-cased, and characters other than letters, digits, `/` and `-` are removed. A file that can't be read at all is kept as `whistlestop.toml.bad` and the default settings are used. A file that's there but can't be opened (its permissions, or another program holding it) is left alone: the default settings are used for this session and nothing is saved over it until it can be opened again. Settings are written to a temporary file first and then moved into place, so a crash mid-save never leaves a cut-short file.
 
 | Setting | What it does | Default |
 |---|---|---|

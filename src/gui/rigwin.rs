@@ -189,7 +189,7 @@ impl RigWindow {
                             {
                                 cfg_changed = true;
                             }
-                            if ui.add(egui::Slider::new(&mut cfg.swr_limit, 1.3..=3.0).fixed_decimals(1).suffix(" : 1")).help(&help::RC_SWR_LIMIT).changed() {
+                            if ui.add(egui::Slider::new(&mut cfg.swr_limit, 1.3..=3.0).clamping(egui::SliderClamping::Never).fixed_decimals(1).suffix(" : 1")).help(&help::RC_SWR_LIMIT).changed() {
                                 cfg_changed = true;
                             }
                         });

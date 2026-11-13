@@ -2,7 +2,7 @@
 //! FTDX101, FT-950, FTDX3000...) and the older 5-byte binary protocol of the
 //! FT-817/818/857/897.
 
-use super::{Driver, Wire, ascii_query, ascii_set, cal, num, unsupported, words};
+use super::{Driver, Wire, ascii_query, ascii_set, cal, num, unkey_confirmed, unsupported, words};
 use crate::rig::RigCaps;
 use anyhow::{Result, anyhow, bail};
 use std::time::{Duration, Instant};
@@ -34,6 +34,8 @@ pub struct Yaesu {
     fw: usize,
     max_w: f32,
     vfo: String,
+    /// The radio's ID (`ID;`): command sets and level ranges differ.
+    id: String,
 }
 
 const SMETER: [(f32, f32); 3] = [(0.0, -54.0), (130.0, 0.0), (255.0, 60.0)];
@@ -61,6 +63,7 @@ impl Yaesu {
             fw: 9,
             max_w,
             vfo: "VFOA".into(),
+            id: id.to_string(),
         };
         let fa = y.q("FA;", "FA").map_err(|e| anyhow!("{}: {e}", y.name))?;
         y.fw = fa.len().saturating_sub(2).clamp(8, 9);
@@ -69,6 +72,24 @@ impl Yaesu {
 
     fn q(&mut self, cmd: &str, prefix: &str) -> Result<String> {
         ascii_query(self.w.as_mut(), cmd, prefix)
+    }
+
+    /// Full scale of SQ, MG and RG on this model (RigHelm's model tables).
+    fn ranges(&self) -> (f32, f32, f32) {
+        let sq = if matches!(self.id.as_str(), "0460" | "0310" | "0362" | "0583" | "0251" | "0761" | "0800") { 255.0 } else { 100.0 };
+        let mg = if matches!(self.id.as_str(), "0310" | "0362" | "0251" | "0241") { 255.0 } else { 100.0 };
+        let rg = if self.id == "0650" { 30.0 } else { 255.0 };
+        (sq, mg, rg)
+    }
+
+    /// Split is `ST` on the FTDX101 and FT-891; `FT` (TX VFO) elsewhere.
+    fn split_is_st(&self) -> bool {
+        matches!(self.id.as_str(), "0681" | "0682" | "0650")
+    }
+
+    /// `VS` (which VFO is in use): not on the FT-991/991A or FT-891.
+    fn has_vs(&self) -> bool {
+        !matches!(self.id.as_str(), "0570" | "0670" | "0650")
     }
 
     fn s(&mut self, cmd: &str) -> Result<()> {
@@ -157,7 +178,12 @@ impl Driver for Yaesu {
     }
 
     fn set_ptt(&mut self, on: bool) -> Result<()> {
-        self.s(if on { "TX1;" } else { "TX0;" })
+        if on {
+            return self.s("TX1;");
+        }
+        // An unkey the radio didn't take (busy, a CAT error) must not pass
+        // as done: confirm it's receiving, or say it isn't.
+        unkey_confirmed(self, |y| y.s("TX0;"))
     }
 
     fn get_level(&mut self, name: &str) -> Result<f32> {
@@ -167,9 +193,18 @@ impl Driver for Yaesu {
         };
         Ok(match name {
             "AF" => simple(self, "AG0;", "AG0", 255.0)?,
-            "RF" => simple(self, "RG0;", "RG0", 255.0)?,
-            "SQL" => simple(self, "SQ0;", "SQ0", 100.0)?,
-            "MICGAIN" => simple(self, "MG;", "MG", 100.0)?,
+            "RF" => {
+                let rg = self.ranges().2;
+                simple(self, "RG0;", "RG0", rg)?
+            }
+            "SQL" => {
+                let sq = self.ranges().0;
+                simple(self, "SQ0;", "SQ0", sq)?
+            }
+            "MICGAIN" => {
+                let mg = self.ranges().1;
+                simple(self, "MG;", "MG", mg)?
+            }
             "RFPOWER" => simple(self, "PC;", "PC", self.max_w.max(1.0))?,
             "STRENGTH" => {
                 let r = self.q("SM0;", "SM0")?;
@@ -192,11 +227,12 @@ impl Driver for Yaesu {
 
     fn set_level(&mut self, name: &str, v: f32) -> Result<()> {
         let n = |full: f32| (v.clamp(0.0, 1.0) * full).round() as u32;
+        let (sq, mg, rg) = self.ranges();
         match name {
             "AF" => self.s(&format!("AG0{:03};", n(255.0))),
-            "RF" => self.s(&format!("RG0{:03};", n(255.0))),
-            "SQL" => self.s(&format!("SQ0{:03};", n(100.0))),
-            "MICGAIN" => self.s(&format!("MG{:03};", n(100.0))),
+            "RF" => self.s(&format!("RG0{:03};", n(rg))),
+            "SQL" => self.s(&format!("SQ0{:03};", n(sq))),
+            "MICGAIN" => self.s(&format!("MG{:03};", n(mg))),
             // Three digits (see kenwood.rs): never more than 999.
             "RFPOWER" => self.s(&format!("PC{:03};", n(self.max_w).clamp(5, 999))),
             "PREAMP" => self.s(&format!(
@@ -264,6 +300,9 @@ impl Driver for Yaesu {
     }
 
     fn set_vfo(&mut self, vfo: &str) -> Result<()> {
+        if !self.has_vs() {
+            return Err(unsupported("VFO select"));
+        }
         self.s(&format!("VS{};", (vfo == "VFOB") as u8))?;
         self.vfo = if vfo == "VFOB" {
             "VFOB".into()
@@ -274,12 +313,29 @@ impl Driver for Yaesu {
     }
 
     fn split(&mut self) -> Result<bool> {
-        let r = self.q("ST;", "ST")?;
-        Ok(r.chars().nth(2).is_some_and(|c| c != '0'))
+        if self.split_is_st() {
+            let r = self.q("ST;", "ST")?;
+            Ok(r.chars().nth(2).is_some_and(|c| c != '0'))
+        } else {
+            // FT: which VFO transmits (0 A, 1 B): B is split.
+            let r = self.q("FT;", "FT")?;
+            Ok(r.chars().nth(2) == Some('1'))
+        }
     }
 
     fn set_split(&mut self, on: bool) -> Result<()> {
-        self.s(&format!("ST{};", on as u8))
+        if self.split_is_st() {
+            self.s(&format!("ST{};", on as u8))?;
+        } else {
+            // FT2: transmit on A, FT3: on B.
+            self.s(if on { "FT3;" } else { "FT2;" })?;
+        }
+        // Read back: a radio that refused it (`?;`) mustn't pass as set.
+        match self.split() {
+            Ok(now) if now == on => Ok(()),
+            Ok(_) => Err(anyhow!("{}: the radio didn't change split", self.name)),
+            Err(e) => Err(e),
+        }
     }
 
     fn offset(&mut self, xit: bool) -> Result<i32> {
@@ -528,6 +584,80 @@ impl Driver for Ft817 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A radio scripted by a closure: command (without ';') → reply.
+    struct Script<F: FnMut(&str) -> String + Send> {
+        f: F,
+        inb: Vec<u8>,
+        out: Vec<u8>,
+    }
+    impl<F: FnMut(&str) -> String + Send> Wire for Script<F> {
+        fn write_all(&mut self, b: &[u8]) -> std::io::Result<()> {
+            self.inb.extend_from_slice(b);
+            while let Some(i) = self.inb.iter().position(|&c| c == b';') {
+                let c: Vec<u8> = self.inb.drain(..=i).collect();
+                let cmd = String::from_utf8_lossy(&c[..c.len() - 1]).to_string();
+                let r = (self.f)(&cmd);
+                self.out.extend(r.as_bytes());
+            }
+            Ok(())
+        }
+        fn read_some(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            let n = buf.len().min(self.out.len());
+            buf[..n].copy_from_slice(&self.out[..n]);
+            self.out.drain(..n);
+            Ok(n)
+        }
+        fn clear_input(&mut self) {
+            self.out.clear();
+        }
+    }
+
+    /// An FTDX3000 as RigHelm's tables have it: split is FT (set 2/3,
+    /// read 0/1), no ST; squelch 0-255. Commands seen go to `log`.
+    fn ftdx3000(log: std::sync::Arc<std::sync::Mutex<Vec<String>>>) -> Yaesu {
+        let mut ft = '0';
+        let f = move |c: &str| -> String {
+            log.lock().unwrap().push(c.to_string());
+            match c {
+                "FA" => "FA14074000;".into(),
+                "FT" => format!("FT{ft};"),
+                "FT2" => {
+                    ft = '0';
+                    String::new()
+                }
+                "FT3" => {
+                    ft = '1';
+                    String::new()
+                }
+                "TX" => "TX0;".into(),
+                "TX0" => String::new(),
+                c if c.starts_with("SQ0") && c.len() == 6 => String::new(),
+                _ => "?;".into(),
+            }
+        };
+        Yaesu::new(Box::new(Script { f, inb: vec![], out: vec![] }), "0460", 100.0).unwrap()
+    }
+
+    #[test]
+    fn split_and_levels_follow_the_model() {
+        let log = std::sync::Arc::new(std::sync::Mutex::new(vec![]));
+        let mut y = ftdx3000(log.clone());
+        y.set_split(true).unwrap();
+        assert!(y.split().unwrap());
+        y.set_split(false).unwrap();
+        assert!(!y.split().unwrap());
+        y.set_level("SQL", 1.0).unwrap();
+        let l = log.lock().unwrap().clone();
+        assert!(l.contains(&"FT3".to_string()) && l.contains(&"FT2".to_string()), "{l:?}");
+        assert!(!l.iter().any(|c| c.starts_with("ST")), "{l:?}");
+        assert!(l.contains(&"SQ0255".to_string()), "full squelch is 255 here: {l:?}");
+        y.set_ptt(false).unwrap();
+        // The FT-991A has no VS.
+        let f = |c: &str| -> String { if c == "FA" { "FA014074000;".into() } else { "?;".into() } };
+        let mut y = Yaesu::new(Box::new(Script { f, inb: vec![], out: vec![] }), "0670", 100.0).unwrap();
+        assert!(y.set_vfo("VFOB").is_err());
+    }
 
     #[test]
     fn ft817_bcd() {

@@ -90,6 +90,12 @@ fn main() -> anyhow::Result<()> {
         }
         Command::CqDemo { dir, whistle: wsecs } => cq_demo(&dir, wsecs),
         Command::IconPng { path, size, square } => {
+            if !(16..=4096).contains(&size) {
+                anyhow::bail!("--size must be 16 to 4096 pixels (got {size})");
+            }
+            if square.is_some_and(|s| !(s.is_finite() && s > 0.0 && s <= 4.0)) {
+                anyhow::bail!("--square must be a number above 0, at most 4");
+            }
             let rgba = match square {
                 Some(span) => gui::icon::icon_rgba_square(size, span),
                 None => gui::icon::icon_rgba(size),

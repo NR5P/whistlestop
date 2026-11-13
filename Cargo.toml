@@ -49,7 +49,7 @@ zip = { version = "9.5.1", default-features = false, features = ["deflate"] }
 # use a TCP bridge.
 [target.'cfg(not(any(target_os = "ios", target_os = "android")))'.dependencies]
 rtlsdr-nusb = "0.3.0"
-serialport = "4.10.1"
+serialport = { version = "4.10.1", features = ["usbportinfo-interface"] }
 
 [dev-dependencies]
 egui_kittest = { version = "0.37", features = ["eframe"] }

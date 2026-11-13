@@ -723,6 +723,7 @@ mod usb {
                         manufacturer: f.get(3).unwrap_or(&"").to_string(),
                         product: f.get(4).unwrap_or(&"").to_string(),
                         serial: f.get(5).unwrap_or(&"").to_string(),
+                        interface: None,
                     })
                 })
                 .collect()

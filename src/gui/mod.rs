@@ -205,7 +205,8 @@ pub struct App {
     toast: Option<(Instant, String)>,
     plan_bytes: Option<(String, u64)>,
     logo: Option<egui::TextureHandle>,
-    last_err: Option<String>,
+    /// Log lines already looked at for errors to toast (`State::log_seq`).
+    log_seen: Option<u64>,
     guide: guide::Guide,
     /// The Guide's own window is open.
     guide_open: bool,
@@ -279,7 +280,7 @@ impl App {
             toast: None,
             plan_bytes: None,
             logo: None,
-            last_err: None,
+            log_seen: None,
             guide: guide::Guide::default(),
             guide_open: false,
             depot_tab: depot::DepotTab::default(),
@@ -378,6 +379,10 @@ impl App {
                 self.rm.error = None;
                 self.rm.open = false;
                 self.client = Some(c);
+                // Settings drafted from this computer's values must not be
+                // saved onto the radio computer.
+                self.settings_draft = None;
+                self.settings_open = false;
             }
             Err(e) => self.rm.error = Some(format!("{e:#}")),
         }
@@ -386,6 +391,9 @@ impl App {
     fn disconnect_remote(&mut self, why: &str) {
         let Some(c) = self.client.take() else { return };
         drop(c);
+        // …nor the radio computer's onto this one.
+        self.settings_draft = None;
+        self.settings_open = false;
         if let Some(h) = self.local_h.take() {
             self.h = h;
         }
@@ -731,13 +739,16 @@ impl App {
                     }
                 });
             });
-            ui.horizontal(|ui| {
-                ui.label(RichText::new("Mode").color(DIM));
-                for m in ["PKTUSB", "USB", "LSB"] {
-                    if ui.selectable_label(s.rig.mode == m, m).help(&help::R_MODE).clicked() {
-                        self.send(Cmd::SetMode(m.into()));
+            // Like the dial: not during a link or a call.
+            ui.add_enabled_ui(tune_ok, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("Mode").color(DIM));
+                    for m in ["PKTUSB", "USB", "LSB"] {
+                        if ui.selectable_label(s.rig.mode == m, m).help(&help::R_MODE).clicked() {
+                            self.send(Cmd::SetMode(m.into()));
+                        }
                     }
-                }
+                });
             });
             ui.horizontal(|ui| {
                 ui.label(RichText::new("Power").color(DIM));
@@ -769,7 +780,12 @@ impl App {
                 }
             });
             ui.horizontal(|ui| {
-                if ui.button("Tune carrier").on_hover_text("Mercury sends a 1 kHz tone for your antenna tuner (60 s max)").help(&help::R_TUNE).clicked() {
+                if ui
+                    .add_enabled(tune_ok, egui::Button::new("Tune carrier"))
+                    .on_hover_text("Mercury sends a 1 kHz tone for your antenna tuner (60 s max)")
+                    .help(&help::R_TUNE)
+                    .clicked()
+                {
                     self.send(Cmd::Tune(true));
                 }
                 if ui.button("Stop").help(&help::R_TUNE).clicked() {
@@ -849,7 +865,7 @@ impl App {
             }
             ui.horizontal(|ui| {
                 ui.label(RichText::new("Whistle").color(DIM));
-                if ui.add(egui::Slider::new(&mut self.cfg.whistle_s, 4.0..=60.0).suffix(" s").integer()).help(&help::CQ_WHISTLE).changed() {
+                if ui.add(egui::Slider::new(&mut self.cfg.whistle_s, 4.0..=60.0).clamping(egui::SliderClamping::Never).suffix(" s").integer()).help(&help::CQ_WHISTLE).changed() {
                     self.save_cfg();
                 }
             });
@@ -858,7 +874,7 @@ impl App {
             let away_from_table = s.table.as_ref().is_some_and(|t| {
                 !(self.cq_table && t.host && t.name.eq_ignore_ascii_case(self.cq_table_name.trim()))
             });
-            let dis = s.link.is_some() || !s.mercury_ok || away_from_table;
+            let dis = s.link.is_some() || s.calling.is_some() || !s.mercury_ok || away_from_table;
             ui.add_enabled_ui(!dis, |ui| {
                 let mut call = big_button(ui, "🚂  Call CQ", BRASS);
                 if away_from_table {
@@ -897,10 +913,14 @@ impl App {
                     .small()
                     .color(DIM),
             );
+            // The engine refuses a search at a table, during a link, a call
+            // or a CQ: so are the buttons.
             let at_table = s.table.is_some();
-            ui.add_enabled_ui(!at_table, |ui| {
+            let busy = s.link.is_some() || s.calling.is_some() || s.cq.active;
+            ui.add_enabled_ui(!at_table && !busy, |ui| {
             ui.horizontal(|ui| {
-                if ui.button("Current band").on_disabled_hover_text("You're at a Roundtable: leave it first").help(&help::S_CURRENT).clicked() {
+                let why = if at_table { "You're at a Roundtable: leave it first" } else { "Not during a link, a call or a CQ" };
+                if ui.button("Current band").on_disabled_hover_text(why).help(&help::S_CURRENT).clicked() {
                     self.send(Cmd::StartSearch(SearchScope::CurrentBand));
                 }
                 if ui.button("All bands").help(&help::S_ALL).clicked() {
@@ -979,7 +999,8 @@ impl App {
                             } else {
                                 ui.label(RichText::new(format!("📬 {} has mail for you", a.call)).strong().color(TEAL)).help(&help::ALERT_THEIRS);
                             }
-                            if s.link.is_none() {
+                            // A call: not during a link or call, nor at a table.
+                            if s.link.is_none() && s.calling.is_none() && s.table.is_none() {
                                 let label = if a.ours { "Deliver now" } else { "Collect" };
                                 if ui.small_button(label).help(if a.ours { &help::ALERT_OURS } else { &help::ALERT_THEIRS }).clicked() {
                                     self.send(Cmd::DepotConnect(a.call.clone()));
@@ -1006,6 +1027,8 @@ impl App {
                     ui.label(RichText::new(format!("{score:.2} · {age:.0}s")).small().color(DIM));
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         if s.link.is_none()
+                            && s.calling.is_none()
+                            && s.table.is_none()
                             && !s.cq.active
                             && ui.small_button("Lock on").on_hover_text("Tune the radio there and fine-lock on its audio").help(&help::H_LOCK).clicked()
                         {
@@ -1023,12 +1046,17 @@ impl App {
                     ui.label(RichText::new(&h.call).strong().color(TEXT));
                     ui.label(RichText::new(&h.what).small().color(DIM));
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        // To where the station was heard first (a search may
+                        // have moved on since), like the phones.
+                        let free = s.link.is_none() && s.calling.is_none() && s.table.is_none();
                         if let Some(t) = &h.table {
-                            if s.link.is_none() && ui.small_button("Join").help(&help::H_JOIN).clicked() {
+                            if free && ui.small_button("Join").help(&help::H_JOIN).clicked() {
+                                self.send(Cmd::SetFreq(h.dial_hz));
                                 self.send(Cmd::JoinTable(t.clone()));
                                 self.tab = Tab::Roundtable;
                             }
-                        } else if s.link.is_none() && s.table.is_none() && ui.small_button("Answer").help(&help::H_ANSWER).clicked() {
+                        } else if free && ui.small_button("Answer").help(&help::H_ANSWER).clicked() {
+                            self.send(Cmd::SetFreq(h.dial_hz));
                             self.send(Cmd::Connect(h.call.clone()));
                             self.tab = Tab::Chat;
                         }
@@ -1052,7 +1080,13 @@ impl App {
                     _ => 0,
                 };
                 let txt = if badge > 0 { format!("{label}  ({badge})") } else { label.to_string() };
-                let b = egui::Button::new(RichText::new(txt).size(14.5).color(if on { BG } else { TEXT })).fill(if on { BRASS } else { CARD });
+                let mut b = egui::Button::new(RichText::new(txt).size(14.5).color(if on { BG } else { TEXT })).fill(if on { BRASS } else { CARD });
+                // Room for a count up to 99, so one arriving or being read
+                // doesn't push the tabs after it sideways.
+                if matches!(t, Tab::Files | Tab::Depot) {
+                    let w = ui.fonts_mut(|f| f.layout_no_wrap(format!("{label}  (99)"), FontId::proportional(14.5), TEXT).size().x);
+                    b = b.min_size(vec2(w + 2.0 * ui.spacing().button_padding.x, 0.0));
+                }
                 if ui.add(b).help(if t == Tab::Depot { &help::DEPOT_TAB } else { &help::TABS }).clicked() {
                     self.tab = t;
                 }
@@ -1138,12 +1172,24 @@ impl App {
                         "Not linked".into()
                     };
                     ui.label(RichText::new(status).size(16.0).color(DIM));
+                    // A call going out: it can be cancelled (and nothing
+                    // else called meanwhile).
+                    if s.calling.is_some() {
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            if ui.button("Cancel the call").help(&help::L_CANCEL).clicked() {
+                                self.send(Cmd::Disconnect);
+                            }
+                        });
+                        return;
+                    }
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        let go = ui
-                            .add_enabled(s.mercury_ok && s.table.is_none(), egui::Button::new("Connect").fill(TEAL.linear_multiply(0.35)))
-                            .help(&help::L_CONNECT)
-                            .on_disabled_hover_text("Leave the Roundtable first: a 1:1 link and a Roundtable don't mix")
-                            .clicked();
+                        let mut b = ui.add_enabled(s.mercury_ok && s.table.is_none(), egui::Button::new("Connect").fill(TEAL.linear_multiply(0.35)));
+                        if s.table.is_some() {
+                            b = b.on_disabled_hover_text("Leave the Roundtable first: a 1:1 link and a Roundtable don't mix");
+                        } else if !s.mercury_ok {
+                            b = b.on_disabled_hover_text("Mercury isn't connected (see the Modem pill)");
+                        }
+                        let go = b.help(&help::L_CONNECT).clicked();
                         let r = ui.add(egui::TextEdit::singleline(&mut self.connect_to).hint_text("Callsign").desired_width(120.0)).help(&help::L_CONNECT);
                         if s.table.is_none() && (go || (r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)))) && !self.connect_to.trim().is_empty() {
                             self.send(Cmd::Connect(self.connect_to.trim().to_string()));
@@ -1159,8 +1205,8 @@ impl App {
                     let ask = ui.add_enabled(s.qsy_note.is_none(), egui::Button::new("Ask")).help(&help::L_QSY).clicked()
                         || (r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)));
                     if ask && !self.qsy_khz.trim().is_empty() {
-                        if let Ok(k) = self.qsy_khz.trim().replace(',', ".").parse::<f64>() {
-                            let hz = if k > 100_000.0 { k } else { k * 1000.0 };
+                        // Like the Tune box: kHz, or MHz ("14.1065").
+                        if let Some(hz) = parse_freq(&self.qsy_khz) {
                             self.send(Cmd::Qsy(hz));
                             self.qsy_khz.clear();
                         } else {
@@ -1245,9 +1291,18 @@ impl App {
                     .margin(Margin::symmetric(10, 8)),
             );
             let r = r.help(&help::C_INPUT);
-            let send = ui.add_sized([80.0, 34.0], egui::Button::new(RichText::new("Send").strong()).fill(BRASS.linear_multiply(0.5))).help(&help::C_INPUT).clicked()
+            // Only while linked: the engine refuses it otherwise, and what
+            // you typed would be gone.
+            let linked = s.link.is_some();
+            let send = ui
+                .add_enabled_ui(linked, |ui| {
+                    ui.add_sized([80.0, 34.0], egui::Button::new(RichText::new("Send").strong()).fill(BRASS.linear_multiply(0.5)))
+                })
+                .inner
+                .help(&help::C_INPUT)
+                .clicked()
                 || (r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)));
-            if send && !self.chat_input.trim().is_empty() {
+            if send && linked && !self.chat_input.trim().is_empty() {
                 self.send(Cmd::Chat(self.chat_input.trim().to_string()));
                 self.chat_input.clear();
                 r.request_focus();
@@ -1584,7 +1639,8 @@ impl App {
 
     fn waterfalls(&mut self, ui: &mut Ui, s: &mut State) {
         let ctx = ui.ctx().clone();
-        for row in s.audio_rows.drain(..) {
+        // (A remote radio computer's rows: anything too short to draw is skipped.)
+        for row in s.audio_rows.drain(..).filter(|r| r.len() >= 2) {
             // 256 bins over 0..4 kHz -> 512 columns over 0..3 kHz.
             let cols: Vec<f32> = (0..512)
                 .map(|c| {
@@ -2156,16 +2212,16 @@ impl App {
                     card(ui, "Search & CQ", |ui| {
                         egui::Grid::new("sc").num_columns(2).spacing(vec2(10.0, 8.0)).show(ui, |ui| {
                             ui.label("Dwell per channel");
-                            ui.add(egui::Slider::new(&mut c.dwell_s, 0.3..=4.0).suffix(" s")).help(&help::ST_DWELL);
+                            ui.add(egui::Slider::new(&mut c.dwell_s, 0.3..=4.0).clamping(egui::SliderClamping::Never).suffix(" s")).help(&help::ST_DWELL);
                             ui.end_row();
                             ui.label("Channel step");
-                            ui.add(egui::Slider::new(&mut c.step_hz, 400.0..=2000.0).suffix(" Hz")).help(&help::ST_STEP);
+                            ui.add(egui::Slider::new(&mut c.step_hz, 400.0..=2000.0).clamping(egui::SliderClamping::Never).suffix(" Hz")).help(&help::ST_STEP);
                             ui.end_row();
                             ui.label("CQ cycles");
-                            ui.add(egui::Slider::new(&mut c.cq_cycles, 1..=20)).help(&help::ST_CYCLES);
+                            ui.add(egui::Slider::new(&mut c.cq_cycles, 1..=20).clamping(egui::SliderClamping::Never)).help(&help::ST_CYCLES);
                             ui.end_row();
                             ui.label("Listen after CQ");
-                            ui.add(egui::Slider::new(&mut c.cq_listen_s, 5.0..=60.0).suffix(" s")).help(&help::ST_LISTEN);
+                            ui.add(egui::Slider::new(&mut c.cq_listen_s, 5.0..=60.0).clamping(egui::SliderClamping::Never).suffix(" s")).help(&help::ST_LISTEN);
                             ui.end_row();
                         });
                         ui.checkbox(&mut c.whistle_watch, "Whistle watch while parked on a frequency").help(&help::ST_WATCH);
@@ -2301,7 +2357,7 @@ impl App {
                         });
                         ui.horizontal(|ui| {
                             ui.label("Hang up quiet links after");
-                            ui.add(egui::Slider::new(&mut c.away_idle_s, 60.0..=900.0).suffix(" s").integer()).help(&help::ST_AWAY_IDLE);
+                            ui.add(egui::Slider::new(&mut c.away_idle_s, 60.0..=900.0).clamping(egui::SliderClamping::Never).suffix(" s").integer()).help(&help::ST_AWAY_IDLE);
                         });
                         ui.horizontal(|ui| {
                             ui.checkbox(&mut c.auto_accept_away, "Accept files by myself, each up to").help(&help::ST_AUTO_ACCEPT);
@@ -2366,10 +2422,10 @@ impl App {
                     ui.add_space(8.0);
                     ui.horizontal(|ui| {
                         let b = egui::Button::new(RichText::new(format!("I understand: set {}", want.label())).strong()).fill(RED.linear_multiply(0.4));
-                        if ui.add(b).clicked() {
+                        if ui.add(b).help(&help::ST_E2E).clicked() {
                             decided = Some(true);
                         }
-                        if ui.button("Cancel").clicked() {
+                        if ui.button("Cancel").help(&help::ST_E2E).clicked() {
                             decided = Some(false);
                         }
                     });
@@ -2397,6 +2453,11 @@ impl App {
                 new.sdr.wide_auto = self.cfg.sdr.wide_auto;
                 new.auto_tune = self.cfg.auto_tune;
                 new.swr_limit = self.cfg.swr_limit;
+                // The Remote window's (sharing this station on the LAN).
+                new.remote_serve = self.cfg.remote_serve;
+                new.remote_password = self.cfg.remote_password.clone();
+                new.remote_port = self.cfg.remote_port;
+                new.remote_addr = self.cfg.remote_addr.clone();
                 self.cfg = new;
             }
             if self.client.is_some() {
@@ -2450,6 +2511,12 @@ impl eframe::App for App {
             if g.0 != self.cfg_ver {
                 self.cfg_ver = g.0;
                 self.cfg = g.1;
+                // Settings open here were drafted from the old values:
+                // saving them would undo the remote operator's change.
+                if self.settings_draft.take().is_some() {
+                    self.settings_open = false;
+                    self.toast(String::from("Settings were changed by the remote operator: open Settings again to see them"));
+                }
             }
         }
         if self.rm.open {
@@ -2501,6 +2568,7 @@ impl eframe::App for App {
                 cq: g.cq.clone(),
                 table: g.table.clone(),
                 log: g.log.clone(),
+                log_seq: g.log_seq,
                 audio_rows: rows,
                 audio_seq: g.audio_seq,
                 listen_mode: g.listen_mode,
@@ -2536,10 +2604,10 @@ impl eframe::App for App {
                     ui.label(RichText::new("?  HELP MODE").strong().color(BRASS));
                     ui.label(RichText::new("Hover over anything for an explanation. The full manual: 📖 Guide (top right).").color(TEXT));
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        if ui.button("Turn off").clicked() {
+                        if ui.button("Turn off").help(&help::HELP_TOGGLE).clicked() {
                             help::set(false);
                         }
-                        if ui.button("Open the Guide").clicked() {
+                        if ui.button("Open the Guide").help(&help::GUIDE_BTN).clicked() {
                             self.guide_open = true;
                             self.guide.open("A tour of the screen");
                         }
@@ -2604,13 +2672,17 @@ impl eframe::App for App {
             }
         }
         // Errors from the engine show briefly as a toast too.
-        if let Some((_, l)) = snap.log.back()
-            && l.starts_with('⚠')
-            && self.last_err.as_deref() != Some(l.as_str())
-        {
-            self.last_err = Some(l.clone());
-            let l = l.clone();
-            self.toast(l);
+        // Every new one, even the same words as the last, and several in one
+        // frame (the newest shown, with how many more).
+        let fresh = match self.log_seen {
+            Some(seen) => (snap.log_seq.saturating_sub(seen) as usize).min(snap.log.len()),
+            None => snap.log.len().min(1),
+        };
+        self.log_seen = Some(snap.log_seq);
+        let errs: Vec<&String> = snap.log.iter().rev().take(fresh).map(|(_, l)| l).filter(|l| l.starts_with('⚠')).collect();
+        if let Some(newest) = errs.first() {
+            let t = if errs.len() > 1 { format!("{newest} (and {} more in the Log)", errs.len() - 1) } else { newest.to_string() };
+            self.toast(t);
         }
         ctx.request_repaint_after(Duration::from_millis(66));
     }

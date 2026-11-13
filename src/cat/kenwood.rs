@@ -2,9 +2,9 @@
 //! Elecraft (with its own extensions), QRP Labs QMX/QDX, truSDX and
 //! FlexRadio's CAT ports.
 
-use super::{Driver, Wire, ascii_query, ascii_set, cal, num, unsupported, words};
+use super::{Driver, Wire, ascii_query, ascii_set, cal, num, unkey_confirmed, unsupported, words};
 use crate::rig::RigCaps;
-use anyhow::{Result, anyhow};
+use anyhow::{Result, anyhow, bail};
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Variant {
@@ -21,10 +21,22 @@ pub struct Kenwood {
     v: Variant,
     name: String,
     max_w: f32,
-    /// TS-990: the mode is `OM0` (main band), with the data modes as modes
+    /// TS-890: the mode is `OM0` (main band), with the data modes as modes
     /// of their own, rather than MD plus DA.
     om: bool,
+    /// S-meter dots → dB over S9, for this model (RigHelm's / Hamlib's).
+    sm: &'static [(f32, f32)],
 }
+
+// S-meter scales.
+const SM_K30: &[(f32, f32)] = &[(0.0, -54.0), (6.0, 0.0), (9.0, 20.0), (12.0, 40.0), (15.0, 60.0)];
+const SM_K31: &[(f32, f32)] = &[(0.0, -54.0), (9.0, 0.0), (13.0, 20.0), (17.0, 40.0), (21.0, 60.0)];
+const SM_TS590: &[(f32, f32)] = &[(0.0, -54.0), (15.0, 0.0), (30.0, 60.0)];
+const SM_TS2000: &[(f32, f32)] = &[(0.0, -54.0), (3.0, -48.0), (6.0, -36.0), (9.0, -24.0), (12.0, -12.0), (15.0, 0.0), (30.0, 60.0)];
+const SM_TS480: &[(f32, f32)] =
+    &[(0.0, -60.0), (3.0, -48.0), (5.0, -36.0), (7.0, -24.0), (9.0, -12.0), (11.0, 0.0), (14.0, 20.0), (17.0, 40.0), (20.0, 60.0)];
+const SM_TS890: &[(f32, f32)] = &[(0.0, -54.0), (35.0, 0.0), (47.0, 20.0), (58.0, 40.0), (70.0, 60.0)];
+const SM_PLAIN: &[(f32, f32)] = &[(0.0, -54.0), (9.0, 0.0), (15.0, 60.0)];
 
 pub fn model_name(id: &str) -> &'static str {
     match id {
@@ -33,8 +45,8 @@ pub fn model_name(id: &str) -> &'static str {
         "020" => "TS-480 (or QMX/QDX/truSDX)",
         "021" => "TS-590S",
         "023" => "TS-590SG",
-        "024" => "TS-990S",
-        "025" => "TS-890S",
+        "022" => "TS-990S",
+        "024" => "TS-890S",
         _ => "radio",
     }
 }
@@ -55,20 +67,42 @@ impl Kenwood {
                 },
             )
         } else {
-            let v = if matches!(id, "021" | "023" | "024" | "025") {
+            // The TS-990S (ID022) has no IF; and its own TX/RX commands:
+            // half-working over direct CAT (no TX state to read) would be
+            // worse than not at all.
+            if id == "022" {
+                bail!("the Kenwood TS-990S isn't supported over direct CAT yet: use Hamlib (Settings → Radio → Managed rigctld)");
+            }
+            let v = if matches!(id, "021" | "023" | "024") {
                 Variant::Kenwood
             } else {
                 Variant::Plain
             };
             (v, format!("Kenwood {}", model_name(id)))
         };
+        // The TS-890S (ID024) sets modes with OM.
         let om = !elecraft && id == "024";
+        let sm = if elecraft {
+            // The K3/KX meter is 0-15 unless extended mode K31 is on
+            // (another program may have set it); the K4 reads like K31.
+            let k31 = name.contains("K4") || ascii_query(w.as_mut(), "K3;", "K3").is_ok_and(|r| r.ends_with('1'));
+            if k31 { SM_K31 } else { SM_K30 }
+        } else {
+            match id {
+                "019" => SM_TS2000,
+                "020" => SM_TS480,
+                "021" | "023" => SM_TS590,
+                "024" => SM_TS890,
+                _ => SM_PLAIN,
+            }
+        };
         let mut k = Kenwood {
             w,
             v,
             name,
             max_w,
             om,
+            sm,
         };
         k.freq().map_err(|e| anyhow!("{}: {e}", k.name))?;
         Ok(k)
@@ -293,11 +327,12 @@ impl Driver for Kenwood {
 
     fn set_ptt(&mut self, on: bool) -> Result<()> {
         // TX1 on Kenwood transmits the USB/ACC audio (data), not the mic.
-        self.s(match (on, self.v) {
-            (true, Variant::Kenwood) => "TX1;",
-            (true, _) => "TX;",
-            (false, _) => "RX;",
-        })
+        match (on, self.v) {
+            (true, Variant::Kenwood) => self.s("TX1;"),
+            (true, _) => self.s("TX;"),
+            // Confirmed: see `unkey_confirmed`.
+            (false, _) => unkey_confirmed(self, |k| k.s("RX;")),
+        }
     }
 
     fn get_level(&mut self, name: &str) -> Result<f32> {
@@ -312,19 +347,10 @@ impl Driver for Kenwood {
                 num(&r, 2, Some(3))? as f32 / self.max_w.max(1.0)
             }
             "STRENGTH" => {
-                let (r, t): (String, &[(f32, f32)]) = match self.v {
-                    Variant::Elecraft => (
-                        self.q("SM;", "SM")?,
-                        &[(0.0, -54.0), (9.0, 0.0), (21.0, 60.0)],
-                    ),
-                    Variant::Kenwood => (
-                        self.q("SM0;", "SM0")?,
-                        &[(0.0, -54.0), (15.0, 0.0), (30.0, 60.0)],
-                    ),
-                    Variant::Plain => (
-                        self.q("SM0;", "SM0")?,
-                        &[(0.0, -54.0), (9.0, 0.0), (15.0, 60.0)],
-                    ),
+                let t = self.sm;
+                let r = match self.v {
+                    Variant::Elecraft => self.q("SM;", "SM")?,
+                    _ => self.q("SM0;", "SM0")?,
                 };
                 let skip = r.len().saturating_sub(4);
                 cal(t, num(&r, skip, None)? as f32)
@@ -421,6 +447,11 @@ impl Driver for Kenwood {
     }
 
     fn set_vfo(&mut self, vfo: &str) -> Result<()> {
+        // The K3/KX always receives on VFO A: FR1 is ignored and FT1 turns
+        // split on (transmitting on B), which isn't what was asked.
+        if self.v == Variant::Elecraft && !self.name.contains("K4") && vfo == "VFOB" {
+            return Err(anyhow!("{}: it always receives on VFO A (use split to transmit on B)", self.name));
+        }
         let n = (vfo == "VFOB") as u8;
         self.s(&format!("FR{n};"))?;
         self.s(&format!("FT{n};"))
@@ -480,7 +511,7 @@ mod tests {
     use super::*;
     use std::sync::{Arc, Mutex};
 
-    /// Just enough of a TS-990 for its mode: FA, and OM0 (no MD, no DA).
+    /// Just enough of a TS-890 for its mode: FA, and OM0 (no MD, no DA).
     struct Ts990 {
         mode: char,
         inb: Vec<u8>,
@@ -519,8 +550,76 @@ mod tests {
         }
     }
 
+    /// A radio scripted by a closure: command (without ';') → reply.
+    pub(crate) struct Script<F: FnMut(&str) -> String + Send> {
+        pub f: F,
+        pub inb: Vec<u8>,
+        pub out: Vec<u8>,
+    }
+    impl<F: FnMut(&str) -> String + Send> Wire for Script<F> {
+        fn write_all(&mut self, b: &[u8]) -> std::io::Result<()> {
+            self.inb.extend_from_slice(b);
+            while let Some(i) = self.inb.iter().position(|&c| c == b';') {
+                let c: Vec<u8> = self.inb.drain(..=i).collect();
+                let cmd = String::from_utf8_lossy(&c[..c.len() - 1]).to_string();
+                let r = (self.f)(&cmd);
+                self.out.extend(r.as_bytes());
+            }
+            Ok(())
+        }
+        fn read_some(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            let n = buf.len().min(self.out.len());
+            buf[..n].copy_from_slice(&self.out[..n]);
+            self.out.drain(..n);
+            Ok(n)
+        }
+        fn clear_input(&mut self) {
+            self.out.clear();
+        }
+    }
+
+    /// A TS-590 whose IF says it's transmitting: RX it ignores ('?', busy).
+    fn ts590(obeys_rx: bool) -> Kenwood {
+        let mut tx = true;
+        let f = move |c: &str| -> String {
+            match c {
+                "FA" => "FA00014074000;".into(),
+                "RX" if obeys_rx => {
+                    tx = false;
+                    String::new()
+                }
+                "IF" => format!("IF00014074000     +000000000{}2000000 ;", if tx { 1 } else { 0 }),
+                _ => "?;".into(),
+            }
+        };
+        Kenwood::new(Box::new(Script { f, inb: vec![], out: vec![] }), "023", false, 100.0).unwrap()
+    }
+
+    /// An unkey the radio didn't take is an error (the engine keeps
+    /// trying), not a success that leaves it on the air.
     #[test]
-    fn ts990_uses_om() {
+    fn a_refused_unkey_is_an_error() {
+        let mut d = ts590(false);
+        assert!(d.ptt().unwrap(), "scripted as transmitting");
+        assert!(d.set_ptt(false).is_err());
+        let mut d = ts590(true);
+        d.set_ptt(false).unwrap();
+        assert!(!d.ptt().unwrap());
+    }
+
+    /// ID022 is the TS-990S (not supported over direct CAT: no IF, own
+    /// TX/RX), ID024 the TS-890S.
+    #[test]
+    fn kenwood_ids() {
+        assert_eq!(model_name("022"), "TS-990S");
+        assert_eq!(model_name("024"), "TS-890S");
+        let f = |c: &str| -> String { if c == "FA" { "FA00014074000;".into() } else { "?;".into() } };
+        let e = Kenwood::new(Box::new(Script { f, inb: vec![], out: vec![] }), "022", false, 100.0).err().unwrap();
+        assert!(e.to_string().contains("TS-990S isn't supported over direct CAT"), "{e}");
+    }
+
+    #[test]
+    fn ts890_uses_om() {
         let log = Arc::new(Mutex::new(vec![]));
         let w = Ts990 {
             mode: '2',
@@ -529,7 +628,7 @@ mod tests {
             log: log.clone(),
         };
         let mut d = Kenwood::new(Box::new(w), "024", false, 200.0).unwrap();
-        assert!(d.describe().contains("TS-990"));
+        assert!(d.describe().contains("TS-890"));
         assert_eq!(d.mode().unwrap().0, "USB");
         for m in ["PKTUSB", "PKTLSB", "PKTFM", "LSB", "CW", "CWR", "AM", "FM", "RTTY", "USB"] {
             d.set_mode(m, 3000).unwrap();

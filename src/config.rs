@@ -148,6 +148,11 @@ pub struct Config {
     /// saved): the engine logs these when it starts with them.
     #[serde(skip)]
     pub load_problems: Vec<String>,
+    /// The settings file is there but couldn't be read (permissions, a
+    /// sharing violation): never saved over, so it isn't replaced by
+    /// defaults.
+    #[serde(skip)]
+    pub save_blocked: bool,
 }
 
 impl Default for Config {
@@ -219,6 +224,7 @@ impl Default for Config {
             remote_password: String::new(),
             remote_addr: String::new(),
             load_problems: vec![],
+            save_blocked: false,
         }
     }
 }
@@ -253,8 +259,11 @@ impl Config {
         let (mut c, problems) = match std::fs::read(&p) {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => (Config::default(), vec![]),
             Err(e) => (
-                Config::default(),
-                vec![format!("can't read {} ({e}); using the default settings", p.display())],
+                Config { save_blocked: true, ..Config::default() },
+                vec![format!(
+                    "can't read {} ({e}); using the default settings, and not saving over it (fix its permissions and restart)",
+                    p.display()
+                )],
             ),
             Ok(bytes) => match String::from_utf8(bytes) {
                 Err(_) => (Config::default(), vec![keep_bad_copy(&p, "isn't a text (UTF-8) file")]),
@@ -440,6 +449,9 @@ impl Config {
 
     pub fn save(&self) -> anyhow::Result<()> {
         let p = path();
+        if self.save_blocked {
+            anyhow::bail!("{} couldn't be read when Whistlestop started, so it isn't saved over (fix its permissions and restart)", p.display());
+        }
         std::fs::create_dir_all(p.parent().unwrap())?;
         let tmp = p.with_extension("toml.tmp");
         std::fs::write(&tmp, toml::to_string_pretty(self)?)?;

@@ -386,6 +386,10 @@ pub struct State {
     pub cq: CqView,
     pub table: Option<TableState>,
     pub log: VecDeque<(chrono_lite::Clock, String)>,
+    /// Log lines written so far (the log keeps only the last 500): how a
+    /// window tells which lines are new.
+    #[serde(default)]
+    pub log_seq: u64,
     /// Radio-audio waterfall rows (dB per bin, 0..4 kHz), newest last
     /// (the last 64; `audio_seq` counts every row ever added). Sent to a
     /// remote computer separately, only the new ones.
@@ -865,6 +869,9 @@ struct Station {
     qsy: Option<(f64, f64)>,
     /// Our QSY request awaiting an answer: (id, dial).
     qsy_out: Option<(u64, f64)>,
+    /// When our QSY request went out: unanswered for `QSY_ANSWER_S`, it's
+    /// dropped (Ask was off for the rest of the link).
+    qsy_asked: Option<Instant>,
     /// Agreed QSY: move to this dial once the answer has crossed.
     qsy_move: Option<(f64, Instant, bool)>,
     /// Tuned the antenna since arriving (once per QSY).
@@ -1115,6 +1122,7 @@ impl Station {
             auto_cooldown: HashMap::new(),
             qsy: None,
             qsy_out: None,
+            qsy_asked: None,
             qsy_move: None,
             qsy_tuned: false,
             qsy_tune_now: false,
@@ -1488,6 +1496,7 @@ impl Station {
     fn log(&self, msg: String) {
         let mut g = self.st.lock().unwrap();
         g.log.push_back((Clock::now(), msg));
+        g.log_seq += 1;
         while g.log.len() > 500 {
             g.log.pop_front();
         }
@@ -1808,6 +1817,7 @@ impl Station {
                 self.set(|g| g.whistle = None);
             }
             Cmd::SetMode(m) => {
+                self.no_retune_while_linked()?;
                 if let Some(r) = self.rig.as_mut() {
                     r.set_mode(&m, 3000).await?;
                 }
@@ -1818,6 +1828,10 @@ impl Station {
                 }
             }
             Cmd::Tune(on) => {
+                // A tuning carrier (up to 60 s) on top of a link or a call.
+                if on {
+                    self.no_retune_while_linked()?;
+                }
                 if let Some(t) = self.tnc.as_mut() {
                     t.command(if on { "TUNE -15" } else { "TUNE OFF" }).await?;
                 }
@@ -1979,24 +1993,32 @@ impl Station {
                 });
             }
             Cmd::RigOp(op) => {
+                // Moves what the radio hears or sends on: not mid-link.
+                self.no_retune_while_linked()?;
                 if let Some(r) = self.rig.as_mut() {
                     r.vfo_op(&op).await?;
                 }
                 self.last_ext_poll = Instant::now() - Duration::from_secs(10);
             }
             Cmd::RigVfo(v) => {
+                // Moves what the radio hears or sends on: not mid-link.
+                self.no_retune_while_linked()?;
                 if let Some(r) = self.rig.as_mut() {
                     r.set_vfo(&v).await?;
                 }
                 self.set(|g| g.rig_ext.vfo = v);
             }
             Cmd::RigSplit(on) => {
+                // Moves what the radio hears or sends on: not mid-link.
+                self.no_retune_while_linked()?;
                 if let Some(r) = self.rig.as_mut() {
                     r.set_split(on).await?;
                 }
                 self.set(|g| g.rig_ext.split = on);
             }
             Cmd::RigOffset { xit, hz } => {
+                // Moves what the radio hears or sends on: not mid-link.
+                self.no_retune_while_linked()?;
                 if let Some(r) = self.rig.as_mut() {
                     r.set_offset(xit, hz).await?;
                 }
@@ -2108,6 +2130,7 @@ impl Station {
                 }
                 let id = crate::depot::new_id();
                 self.qsy_out = Some((id, hz));
+                self.qsy_asked = Some(Instant::now());
                 self.hi_queue.push_back(Link::Qsy {
                     id,
                     dial_hz: hz.round() as u64,
@@ -2612,6 +2635,12 @@ impl Station {
         }
         if self.peer.is_some() {
             anyhow::bail!("already linked; disconnect first");
+        }
+        // A whistle keyed over Mercury's CONNECT bursts helps nobody.
+        if self.answer_at.is_none()
+            && let Some(c) = self.st.lock().unwrap().calling.clone()
+        {
+            anyhow::bail!("calling {c}: wait for the link, or cancel the call, then call CQ");
         }
         // At a table, only a CQ for that same table (as its host): calling
         // it again keeps who's there and what was said.
@@ -5493,6 +5522,16 @@ impl Station {
     }
 
     async fn step_qsy(&mut self) -> anyhow::Result<()> {
+        if self.qsy_out.is_some()
+            && self.qsy_asked.is_some_and(|t| t.elapsed() > Duration::from_secs(QSY_ANSWER_S))
+        {
+            self.qsy_out = None;
+            self.qsy_asked = None;
+            self.set(|g| g.qsy_note = None);
+            self.system_line(format!(
+                "↔ No answer to the QSY request in {QSY_ANSWER_S} s: staying here (you can ask again)"
+            ));
+        }
         if let Some(at) = self.bye_at {
             if self.peer.is_none() {
                 self.bye_at = None;
@@ -6312,6 +6351,9 @@ pub const RECHECK_HZ: f64 = 25.0;
 /// (Mercury's data port can beat its control port by a moment).
 pub const EARLY_MAX_S: u64 = 3;
 
+/// A QSY request with no answer in this long is dropped.
+pub const QSY_ANSWER_S: u64 = 90;
+
 /// Library files sent to one station at the same time, at most.
 pub const MAX_LIBRARY_OUT: usize = 3;
 
@@ -6904,6 +6946,60 @@ mod tests {
         assert!((nearest_alias(-1040.0, -1050.0 + p, p) + 1050.0).abs() < 1e-6);
         assert!((nearest_alias(12.0, 10.0, p) - 10.0).abs() < 1e-6, "near ones stay");
         assert!((nearest_alias(-480.0, 520.0 - p, p) - (520.0 - p)).abs() < 1e-6);
+    }
+
+    /// During a link: no VFO, split, RIT/XIT, mode or tune carrier (they
+    /// move what the radio hears or sends on); and no CQ while a call is
+    /// going out.
+    #[test]
+    fn radio_controls_wait_for_the_link() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let f = rt.block_on(crate::fake_mercury::FakeMercury::start(FakeOptions::default())).unwrap();
+        let h = spawn(|| {});
+        let mut cfg = Config {
+            callsign: "N0GUARD".into(),
+            demo: false,
+            rigctld: "none".into(),
+            mercury_port: f.port,
+            mercury_bcast_port: f.bcast_port,
+            ..Default::default()
+        };
+        cfg.sdr.enabled = false;
+        cfg.sdr.wide_search = false;
+        h.send(Cmd::Start(cfg));
+        let t = Instant::now();
+        while !h.state.lock().unwrap().mercury_ok {
+            assert!(t.elapsed() < Duration::from_secs(10), "no Mercury");
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        h.send(Cmd::Connect("K7BOT".into()));
+        h.send(Cmd::CallCq { table: None });
+        for c in [
+            Cmd::RigVfo("VFOB".into()),
+            Cmd::RigSplit(true),
+            Cmd::RigOffset { xit: false, hz: 500 },
+            Cmd::RigOp("XCHG".into()),
+            Cmd::SetMode("LSB".into()),
+            Cmd::Tune(true),
+        ] {
+            h.send(c);
+        }
+        let t = Instant::now();
+        loop {
+            {
+                let g = h.state.lock().unwrap();
+                let refused = g.log.iter().filter(|l| l.1.contains("not while linked")).count();
+                let cq = g.log.iter().any(|l| l.1.contains("calling K7BOT: wait for the link"));
+                if refused >= 6 && cq {
+                    assert!(!g.cq.active, "CQ started over the call");
+                    break;
+                }
+            }
+            assert!(t.elapsed() < Duration::from_secs(5), "{:#?}", h.state.lock().unwrap().log);
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        h.send(Cmd::Stop);
+        drop(rt);
     }
 
     /// At a Roundtable, an SDR "Lock on" would retune the radio off the

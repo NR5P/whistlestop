@@ -619,6 +619,7 @@ fn log(st: &SharedState, line: String) {
     let mut g = st.lock().unwrap();
     g.log
         .push_back((crate::engine::chrono_lite::Clock::now(), line));
+    g.log_seq += 1;
 }
 
 fn pump_audio(stop: &AtomicBool, listeners: &Listeners, tap: &PcmTap) {
