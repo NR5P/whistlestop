@@ -282,6 +282,16 @@ const OWN_TAIL: Duration = Duration::from_millis(1500);
 /// ... and it is set aside for at most this long after key-up: if it is
 /// still busy then, someone really is on the frequency.
 const OWN_TAIL_HOLD: Duration = Duration::from_secs(3);
+/// A BUSY while the radio's receive audio has been near-silent this long
+/// (`whistle::is_silent`, under -100 dBFS) is the sound card's own faint
+/// tones, not a station: a receiver sending no audio hears no one. On a
+/// dummy load an FTDX3000's USB audio is -130 to -146 dBFS, its codec's
+/// tones stand 17 dB over that, and Mercury held every CQ for the full
+/// BUSY_WAIT_MAX.
+const SILENT_NOT_BUSY: Duration = Duration::from_secs(2);
+/// After "the radio's audio is almost silent", it is said to be back only
+/// once it has stayed back this long.
+const RX_BACK_AFTER: Duration = Duration::from_secs(5);
 /// How long an automatic deliver/collect call waits for a clear channel
 /// (past BUSY_WAIT_MAX, so a stuck detector still lets it go).
 const AUTO_PENDING_MAX: Duration = Duration::from_secs(90);
@@ -634,8 +644,11 @@ fn tx_swr(reads: &[f32]) -> Option<f32> {
 
 /// See `Engine::busy_now`: a BUSY that came on within `OWN_TAIL` of our own
 /// key-up is set aside until `OWN_TAIL_HOLD` after it.
-fn busy_counts(busy: bool, from: Option<Instant>, own_end: Option<Instant>, now: Instant) -> bool {
+fn busy_counts(busy: bool, from: Option<Instant>, own_end: Option<Instant>, silent_since: Option<Instant>, now: Instant) -> bool {
     if !busy {
+        return false;
+    }
+    if silent_since.is_some_and(|t| now.saturating_duration_since(t) >= SILENT_NOT_BUSY) {
         return false;
     }
     match (from, own_end) {
@@ -783,6 +796,8 @@ struct Station {
     sdr_said: Option<String>,
     /// The radio's receive audio near-silent since then (see tick).
     rx_silent_since: Option<Instant>,
+    /// Since when the audio has been back after a silence was reported.
+    rx_loud_since: Option<Instant>,
     /// "Almost silent" is in the Log (until the audio comes back).
     rx_silent_said: bool,
     vfo: Arc<Mutex<f64>>,
@@ -1114,6 +1129,7 @@ impl Station {
             sdr_stop: Arc::new(AtomicBool::new(false)),
             sdr_said: None,
             rx_silent_since: None,
+            rx_loud_since: None,
             rx_silent_said: false,
             vfo: vfo.clone(),
             sdr_span: Arc::new(Mutex::new(cfg.sdr.span_hz)),
@@ -1606,6 +1622,7 @@ impl Station {
         }
         let db = 10.0 * (x.iter().map(|v| v * v).sum::<f64>() / x.len() as f64).max(1e-30).log10();
         if crate::whistle::is_silent(&x) {
+            self.rx_loud_since = None;
             let since = *self.rx_silent_since.get_or_insert_with(Instant::now);
             if !self.rx_silent_said && since.elapsed() >= Duration::from_secs(10) {
                 self.rx_silent_said = true;
@@ -1613,12 +1630,19 @@ impl Station {
                     "⚠ The radio's audio is almost silent ({db:.0} dBFS): it isn't sending receive audio. Check the radio's USB/data output level (a menu setting on many radios) and the recording level in your sound settings. Until then Mercury can't decode and whistles can't be heard"
                 ));
             }
-        } else {
-            self.rx_silent_since = None;
-            if self.rx_silent_said {
+        } else if self.rx_silent_said {
+            // Back only once it stays back: on a dummy load another
+            // station's frames come and go, and the Log said "almost
+            // silent" and "back" every few seconds.
+            let loud = *self.rx_loud_since.get_or_insert_with(Instant::now);
+            if loud.elapsed() >= RX_BACK_AFTER {
                 self.rx_silent_said = false;
+                self.rx_silent_since = None;
+                self.rx_loud_since = None;
                 self.log(format!("Radio audio: back ({db:.0} dBFS)"));
             }
+        } else {
+            self.rx_silent_since = None;
         }
     }
 
@@ -5998,6 +6022,11 @@ impl Station {
                 (self.mercury_buffer == 0 && at.elapsed() > Duration::from_secs(2))
                     || at.elapsed() > Duration::from_secs(6)
             };
+            // Not while our own radio is keyed: an FTDX3000 ignores a new
+            // frequency while it transmits (the move was logged, the radio
+            // stayed put and the link was lost). Up to 15 s, then anyway.
+            let keyed = self.st.lock().unwrap().tx;
+            let due = due && (!keyed || at.elapsed() > Duration::from_secs(15));
             if self.peer.is_none() {
                 self.qsy_move = None;
             } else if due {
@@ -6098,7 +6127,7 @@ impl Station {
     /// just after our own key-up and that was moments ago: then it is our
     /// own transmission's tail (`OWN_TAIL`).
     fn busy_now(&self) -> bool {
-        busy_counts(self.chan_busy, self.busy_from, self.own_tx_end, Instant::now())
+        busy_counts(self.chan_busy, self.busy_from, self.own_tx_end, self.rx_silent_since, Instant::now())
     }
 
     /// May an unattended transmission go now? Not while the channel is busy,
@@ -7001,15 +7030,32 @@ mod tests {
         let end = Instant::now();
         let ms = |n: u64| end + Duration::from_millis(n);
         // The QMX's ding: BUSY 0.6 s after our key-up, asked at 1 s and 2.9 s.
-        assert!(!busy_counts(true, Some(ms(600)), Some(end), ms(1000)));
-        assert!(!busy_counts(true, Some(ms(600)), Some(end), ms(2900)));
+        assert!(!busy_counts(true, Some(ms(600)), Some(end), None, ms(1000)));
+        assert!(!busy_counts(true, Some(ms(600)), Some(end), None, ms(2900)));
         // Still busy 3 s after key-up: someone really is there.
-        assert!(busy_counts(true, Some(ms(600)), Some(end), ms(3100)));
+        assert!(busy_counts(true, Some(ms(600)), Some(end), None, ms(3100)));
         // A BUSY that starts later than the tail is another station at once.
-        assert!(busy_counts(true, Some(ms(2000)), Some(end), ms(2100)));
+        assert!(busy_counts(true, Some(ms(2000)), Some(end), None, ms(2100)));
         // Never keyed: counts.
-        assert!(busy_counts(true, Some(ms(100)), None, ms(200)));
-        assert!(!busy_counts(false, Some(ms(100)), Some(end), ms(200)));
+        assert!(busy_counts(true, Some(ms(100)), None, None, ms(200)));
+        assert!(!busy_counts(false, Some(ms(100)), Some(end), None, ms(200)));
+    }
+
+    /// A radio sending near-silent audio (on a dummy load, an FTDX3000 at
+    /// -130 to -146 dBFS) hears no one: a BUSY then is its sound card's own
+    /// faint tones, once the silence has lasted 2 s; a station that comes on
+    /// ends the silence and counts at once.
+    #[test]
+    fn silent_audio_is_not_a_busy_channel() {
+        let t0 = Instant::now();
+        let s = |n: u64| t0 + Duration::from_secs(n);
+        assert!(!busy_counts(true, Some(s(1)), None, Some(t0), s(5)));
+        assert!(!busy_counts(true, Some(s(1)), None, Some(t0), s(2)));
+        // Only just silent: could be a gap between someone's overs.
+        assert!(busy_counts(true, Some(s(1)), None, Some(s(4)), s(5)));
+        // Not silent: busy as ever.
+        assert!(busy_counts(true, Some(s(1)), None, None, s(5)));
+        assert!(!busy_counts(false, None, None, None, s(5)));
     }
 
     /// The search tests run a simulated band in real time and time a
