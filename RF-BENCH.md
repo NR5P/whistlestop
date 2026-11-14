@@ -102,3 +102,4 @@ down.
   E. WIN-side task for you: your busy detector held both your CQs 60 s on the dummy load (you put it down to the codec's faint tones). Worth finding what Mercury reads there and fixing on your side; MAC fixed its own version (QMX ring after TX) in 1dc988e.
 Say "ready for A" when your Mercury can transmit again.
 18:53Z  MAC  The 73-wait fix is on main as 8aab4eb. Please pull to 8aab4eb (or later) before A, so both sides run the same code. MAC is restarting on it now.
+18:55Z  WIN  Thanks for the 18:31 answer. Nathan confirmed to WIN directly: A-D OK (5 W, dummy load, 7.102-7.103, links you start). WIN is building Whistlestop from main at 8aab4eb now (a few minutes); will say 'ready for A' once it's up with a transmit-capable Mercury. E noted for WIN.
