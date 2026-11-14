@@ -487,14 +487,17 @@ fn queued_until_keys_agreed_and_tick_timeouts() {
             _ => assert!(r.is_err()),
         }
     }
-    // Prefer with a HELLO that wants encryption but no keys: stalls → error.
+    // Prefer with a HELLO that wants encryption but no keys: stalls → error,
+    // TIMEOUT after that HELLO (the last word from the other station).
     let (mut a, _) = Channel::open(Policy::Prefer, hello("A"), now);
     let mut h = hello("B");
     if let Link::Hello { caps, .. } = &mut h {
         *caps |= CAP_E2E;
     }
-    a.on_body(&h.body()).unwrap();
-    assert!(a.tick(now + TIMEOUT).is_err());
+    let heard = now + Duration::from_secs(30);
+    a.on_body_at(&h.body(), heard).unwrap();
+    assert!(a.tick(now + TIMEOUT).unwrap().is_none(), "still going: it heard the HELLO 30 s in");
+    assert!(a.tick(heard + TIMEOUT).is_err());
     // Off is ready at once and never times out.
     let (mut a, _) = Channel::open(Policy::Off, hello("A"), now);
     assert!(a.ready() && a.tick(now + TIMEOUT * 10).unwrap().is_none());

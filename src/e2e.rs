@@ -39,8 +39,11 @@ pub const TAG_LEN: usize = 16;
 /// Air bytes SEALED adds to a packet: its type byte plus the tag (the
 /// length prefix grows by one more byte if the packet crosses 128 bytes).
 pub const SEALED_OVERHEAD: usize = 1 + TAG_LEN;
-/// How long to wait for the key exchange before giving up. HF links can be
-/// slow (about 140 bytes each way at 50 bps, plus ARQ turnarounds).
+/// How long the key exchange may go without a word from the other station
+/// before we give up. HF links can be slow (about 140 bytes each way at
+/// 50 bps, plus ARQ turnarounds): on the bench, over a -4 dB link in
+/// Mercury's slowest mode, the other HELLO took 81 s to arrive and its key
+/// another 39 s, so the clock restarts with each handshake packet heard.
 pub const TIMEOUT: Duration = Duration::from_secs(120);
 
 pub const LEGAL_WARNING: &str = "Encryption is NOT legal on amateur radio bands in the US \
@@ -302,6 +305,16 @@ impl Channel {
     /// Handle one packet body from the peer. An error means the link can't
     /// be trusted (or policy refuses it) and should be dropped.
     pub fn on_body(&mut self, body: &[u8]) -> Result<Step> {
+        self.on_body_at(body, Instant::now())
+    }
+
+    /// `on_body`, at a given time: anything heard while the key exchange is
+    /// still going restarts its `TIMEOUT`, so a slow exchange that keeps
+    /// making progress isn't cut off.
+    pub fn on_body_at(&mut self, body: &[u8], now: Instant) -> Result<Step> {
+        if !self.ready() {
+            self.deadline = self.deadline.max(now + TIMEOUT);
+        }
         let mut step = Step::default();
         let p = match Link::decode(body) {
             Ok(p) => p,
@@ -739,6 +752,40 @@ mod tests {
         assert!(a.tick(now + Duration::from_secs(10)).unwrap().is_none());
         assert!(a.tick(now + TIMEOUT).is_err());
         assert!(!a.ready());
+    }
+
+    #[test]
+    fn a_slow_handshake_that_keeps_going_is_not_cut_off() {
+        // As on the bench: the other HELLO arrives 81 s in, its key 120 s
+        // in. Counted from the start that would have stalled at 120 s.
+        let t0 = Instant::now();
+        let s = |n: u64| t0 + Duration::from_secs(n);
+        let (mut a, oa) = Channel::open(Policy::Prefer, hello("A"), t0);
+        let (mut b, ob) = Channel::open(Policy::Prefer, hello("B"), t0);
+        let (mut a_rx, mut b_rx) = (LinkDecoder::default(), LinkDecoder::default());
+        let mut to_b = oa.concat();
+        let mut to_a = Vec::new();
+        for body in a_rx.feed_bodies(&ob.concat()).unwrap() {
+            to_b.extend(a.on_body_at(&body, s(81)).unwrap().send.concat());
+        }
+        assert!(a.tick(s(119)).unwrap().is_none());
+        for body in b_rx.feed_bodies(&to_b).unwrap() {
+            to_a.extend(b.on_body_at(&body, s(81)).unwrap().send.concat());
+        }
+        // Still nothing complete at 125 s: the clock restarted at 81 s.
+        assert!(a.tick(s(125)).unwrap().is_none());
+        for body in a_rx.feed_bodies(&to_a).unwrap() {
+            a.on_body_at(&body, s(130)).unwrap();
+        }
+        assert!(a.ready(), "the handshake finished");
+        // But one that goes silent still ends TIMEOUT after the last word.
+        let (mut c, _) = Channel::open(Policy::Prefer, hello("C"), t0);
+        let (_, od) = Channel::open(Policy::Prefer, hello("D"), t0);
+        let mut c_rx = LinkDecoder::default();
+        for body in c_rx.feed_bodies(&od.concat()).unwrap() {
+            c.on_body_at(&body, s(81)).unwrap();
+        }
+        assert!(c.tick(s(81) + TIMEOUT).is_err(), "stalled after the last packet");
     }
 
     #[test]

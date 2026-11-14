@@ -528,6 +528,8 @@ Encryption protects **1:1 chat and files**. It is **off by default**. In **Setti
 - **Prefer**: encrypt when the other station also wants to; otherwise plain text, clearly marked "🔓 Not encrypted".
 - **Require**: encrypt or hang up. Never falls back to plain text. If the other station doesn't take part within 120 s, Whistlestop disconnects and says why; a station with encryption off is told in the goodbye that this one requires it. Nothing (chat, files, mail) is ever sent in plain text first.
 
+**Slow links.** Setting up encryption takes a few hundred bytes each way, so over a weak link in Mercury's slowest modes it can take a couple of minutes (on a −4 dB test link, over two). Whistlestop waits as long as the set-up keeps moving: it gives up only when nothing of it has arrived from the other station for **120 s**.
+
 If encryption fails during a link (a check fails, or the set-up never finishes), the link's header changes at once to **🔓 Not encrypted: encryption failed (…); disconnecting**, and Whistlestop hangs up. The other station is told why in a plain goodbye; its Log shows that reason as "the other station ended the link (unencrypted message, unverified): …", since a plain message can't be checked.
 
 Turning it on asks you to confirm the legal warning. The phone apps have the same three choices in **Settings → Encryption** and show the check code on the link (Chat tab and the Linked card).
