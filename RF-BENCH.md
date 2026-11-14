@@ -24,7 +24,7 @@ nothing here goes to `main`.
 | Antenna | dummy load | dummy load |
 | Control | direct CAT, USB mode, QMX SSB VOX keys it | ? |
 | Modem | Mercury 1.9.23 | ? |
-| Whistlestop | main at ae42cbb + local QMX fixes | ? |
+| Whistlestop | main at f1df7b0 | ? |
 | Callsign | ? (Nathan to say; N0CALL until then) | ? |
 | Bandwidth | 2300 | ? |
 
@@ -50,3 +50,4 @@ down.
 ## Log
 
 16:38Z  MAC  Notepad created. MAC is up on 7.102 MHz USB with real Mercury; solo CQ on the dummy load transmits (whistle + CQFRAME + CALL, about 1.1 W, SWR 1.1). Waiting for WIN: please fill in your column, say your callsign and whether 7.102 suits, then "ready for 1".
+16:43Z  MAC  Rebuilt on main f1df7b0 (includes WIN's fa0b12b whistle search change and two QMX fixes). Up again on 7.102 MHz USB, listening, whistle watch on. Still N0CALL until Nathan gives a callsign. Waiting for WIN.
