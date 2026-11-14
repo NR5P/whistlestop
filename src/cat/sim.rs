@@ -13,8 +13,9 @@ pub enum Kind {
     /// A QRP Labs QMX, answering as a real one (firmware 1_02_005) did on
     /// the bench: ID020, two VFOs with the dial on whichever FR names,
     /// `SM;` but not `SM0;`, SWR and power only while transmitting, and
-    /// `?;` to everything it doesn't have. `ssb_tx` false is that
-    /// firmware's fault: TX; is ignored in LSB and USB.
+    /// `?;` to everything it doesn't have. `ssb_tx` false is how it was in
+    /// LSB and USB with no audio arriving: TX; is ignored (its SSB VOX keys
+    /// it when the audio starts).
     Qmx { ssb_tx: bool },
     Elecraft,
     /// Yaesu with this ID (e.g. "0670" FT-991A).
@@ -493,12 +494,14 @@ mod tests {
     }
 
     #[test]
-    fn qmx_that_ignores_tx_in_ssb_says_so() {
+    fn qmx_in_ssb_keys_on_its_audio_not_on_tx() {
+        // No audio yet, so TX; is ignored: not an error, the radio keys
+        // itself when the audio starts.
         let mut d = Kenwood::new(Box::new(SimRadio::new(Kind::Qmx { ssb_tx: false })), "020", false, 5.0).unwrap();
         d.set_mode("USB", 0).unwrap();
-        let e = d.set_ptt(true).unwrap_err().to_string();
-        assert!(e.contains("SSB VOX") && e.contains("firmware"), "{e}");
+        d.set_ptt(true).unwrap();
         assert!(!d.ptt().unwrap());
+        d.set_ptt(false).unwrap();
         // Its Digi mode does key over CAT.
         d.set_mode("RTTY", 0).unwrap();
         d.set_ptt(true).unwrap();

@@ -28,8 +28,8 @@ pub struct Kenwood {
     sm: &'static [(f32, f32)],
     /// A QRP Labs QMX (ID020 like a TS-480, but `VN;` names it): its own
     /// meters (`SM;` in dB, `SW;`, `PC;` as measured power), no RF gain,
-    /// squelch or power setting, and a transmit command that has to be
-    /// checked (early SSB firmware ignores it in USB/LSB).
+    /// squelch or power setting, and in USB/LSB a transmitter that follows
+    /// the audio (its SSB VOX) rather than the key command.
     qmx: bool,
 }
 
@@ -363,21 +363,27 @@ impl Driver for Kenwood {
         match (on, self.v) {
             (true, Variant::Kenwood) => self.s("TX1;"),
             (true, _) if self.qmx => {
-                // Checked: QMX firmware with early SSB support ignores TX;
-                // in USB and LSB, and a silent failure would look like a
-                // transmission that nobody hears.
-                for _ in 0..2 {
-                    self.s("TX;")?;
-                    std::thread::sleep(std::time::Duration::from_millis(60));
-                    if !matches!(self.ptt(), Ok(false)) {
-                        return Ok(());
-                    }
+                self.s("TX;")?;
+                std::thread::sleep(std::time::Duration::from_millis(60));
+                if !matches!(self.ptt(), Ok(false)) {
+                    return Ok(());
                 }
+                // In USB and LSB with its input on USB audio, a QMX
+                // (firmware 1_02_005, on the bench) takes a key command
+                // only while audio is arriving: one sent ahead of the
+                // audio, as ours is, is ignored, and its SSB VOX keys it
+                // the moment the audio starts. That is how it works, not
+                // a failure.
                 let ssb = matches!(self.q("MD;", "MD").ok().and_then(|r| r.chars().nth(2)), Some('1' | '2'));
                 if ssb {
-                    bail!("the QMX didn't go to transmit: in USB/LSB this firmware ignores the CAT transmit command. Update the QMX firmware, or turn on its SSB VOX (with Input = USB) so it keys on the audio");
+                    return Ok(());
                 }
-                bail!("the QMX didn't go to transmit")
+                self.s("TX;")?;
+                std::thread::sleep(std::time::Duration::from_millis(60));
+                if matches!(self.ptt(), Ok(false)) {
+                    bail!("the QMX didn't go to transmit");
+                }
+                Ok(())
             }
             (true, _) => self.s("TX;"),
             // Confirmed: see `unkey_confirmed`.
