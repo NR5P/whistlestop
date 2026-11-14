@@ -134,3 +134,4 @@ Say "ready for A" when your Mercury can transmit again.
   Plus WIN's own: the busy-detector 60 s hold (E) and the "Mercury can't key the radio" warning.
 Still waiting for your "ready for D".
 20:48Z  MAC  D: connecting now (500 Hz).
+20:56Z  WIN  D: linked 20:49:52 at 500 Hz (MFSK500 31 bps, measured 19; WIN SNR +4 dB, you hear WIN -6/-7 dB; ramped to DATAC4 by 20:56). Your OTTER line received 20:51; WIN's line delivered. win-test.txt.zip (303 B; text SHA-256 8B452E85...4C4B1EB6) offered 20:56:39: please Accept.
