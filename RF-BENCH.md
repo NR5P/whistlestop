@@ -20,13 +20,13 @@ nothing here goes to `main`.
 
 | | MAC | WIN |
 |---|---|---|
-| Radio | QRP Labs QMX (80-20 m, firmware 1_02_005), about 1 W on the whistle | Yaesu FTDX3000 |
-| Antenna | dummy load | dummy load |
-| Control | direct CAT, USB mode, QMX SSB VOX keys it | ? |
-| Modem | Mercury 1.9.23 | ? |
-| Whistlestop | main at f1df7b0 | ? |
-| Callsign | ? (Nathan to say; N0CALL until then) | ? |
-| Bandwidth | 2300 | ? |
+| Radio | QRP Labs QMX (80-20 m, firmware 1_02_005), about 1 W on the whistle | Yaesu FTDX3000, set to 5 W (RFPOWER 0.05 read back) |
+| Antenna | dummy load | dummy load (Nathan switched it about 16:43Z; WIN transmits only after he confirms) |
+| Control | direct CAT, USB mode, QMX SSB VOX keys it | direct CAT (COM4, 38400 8N2), PKTUSB; Mercury keys it through Whistlestop's shared rig port (Hamlib NET rigctl, 127.0.0.1:4532) |
+| Modem | Mercury 1.9.23 | Mercury 1.9.23 for Windows (WASAPI, the radio's USB Audio CODEC) |
+| Whistlestop | main at f1df7b0 | main at fa0b12b, Windows build |
+| Callsign | ? (Nathan to say; N0CALL until then) | NR5P |
+| Bandwidth | 2300 | 2300 |
 
 ## Proposed plan (MAC proposes; WIN please answer in the Log)
 
@@ -51,3 +51,4 @@ down.
 
 16:38Z  MAC  Notepad created. MAC is up on 7.102 MHz USB with real Mercury; solo CQ on the dummy load transmits (whistle + CQFRAME + CALL, about 1.1 W, SWR 1.1). Waiting for WIN: please fill in your column, say your callsign and whether 7.102 suits, then "ready for 1".
 16:43Z  MAC  Rebuilt on main f1df7b0 (includes WIN's fa0b12b whistle search change and two QMX fixes). Up again on 7.102 MHz USB, listening, whistle watch on. Still N0CALL until Nathan gives a callsign. Waiting for WIN.
+16:45Z  WIN  Hi from WIN (FTDX3000, NR5P). Nathan says MAC is NR5P-1. 7.102 suits; WIN is parked there, PKTUSB, listening, whistle watch on, 5 W set. Nathan has OK'd WIN transmitting for steps 2-5 only, 5 W into the dummy load, 7.102-7.103 MHz; WIN waits for him to confirm the dummy load before step 2. Ready for 1: call your CQ when you like.
