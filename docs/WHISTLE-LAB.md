@@ -113,6 +113,68 @@ Things the simulation didn't show and the bench did:
 - data bursts lighting every bin (fixed with per-frame whitening);
 - callers just past the passband edge (fixed by walking to them).
 
+## On a real receiver (2026-11-14)
+
+The thresholds above came from simulated bands. On a real radio (an
+FTDX3000 on an antenna, receive audio over USB) they failed: 14 two-minute
+recordings, one or two on each of the nine search segments in the evening,
+had the search stop for a "whistle" in **8–85 %** of half-second looks, and
+**21–52 %** even on dead bands (15, 12, 10 m) with nothing but receiver
+noise. On the air that meant "Locked on … Waiting for the CQ" for 45 s on
+empty channels.
+
+Why: real receiver noise isn't steady. A quiet 10 m band was full of clicks
+about 40 dB over the quiet floor in 30 % of frames, and busy bands had
+signals that came and went in part of the passband. The percentile
+levelling (each bin by its 75th percentile) let anything present less than
+a quarter of the time through at full size. Along the passband's edges,
+where the receiver's filter rolls the noise off and those bursts stand
+tallest, a whistle's track at ±750–1250 Hz added them up. Synthetic noise
+with the recordings' exact spectrum (phases randomised) scored like
+simulated noise again: the timing, not the spectrum, did it.
+
+The fix, **levelling by rank**: in each bin, every cell becomes the
+expected value of the same-ranked draw from a unit exponential (its Savage
+score) among that bin's cells in the look. Then each frame is centred on its
+mean. Steady noise is unchanged by that (it is exponential already), so a
+whistle loses nothing; a burst is now worth no more than the bin's loudest
+noise, and a click that lights every bin cancels out. The score is a true
+z-score at any look length, so one threshold serves 0.5–2 s.
+
+`recorded_calibration` (audio.rs, ignored: `WS_RX_DIR=<dir>`) runs the
+detector over every recording in looks of 0.5, 1.2 and 2 s, and over the
+same audio with whistles mixed in at −15 to −5 dB, 0–900 Hz off. After the
+first 14 (evening, 03:15–03:55 UTC) set the thresholds at 6.0, 12 more by
+day (14:38–15:10 UTC; 4 minutes each on the busier 40 and 20 m segments)
+stopped 2.7 % of the time there; 6.5 halves that for under a point of
+detection. All 26:
+
+| | old levelling, `found` 3.98 | by rank, `found` 6.5 |
+|---|---|---|
+| empty 0.5 s looks over the threshold | 8–85 % per band | **1.2 %** (1.1 % at 1.2 s, 0.9 % at 2 s) |
+| on the dead 10 m band (evening) | 52 % | 0 % |
+| on the busiest (7.1025 MHz, evening) | — | 7 % |
+| whistles found at their offset, −10 dB, 0.5 s | — | **92 %** (97 % in 1.2 s) |
+| the same, −5 dB | — | 99 % |
+| the same, −15 dB, 2 s | — | 78 % |
+
+`MAYBE` = 5.0 (listen to 2 s) catches 9 % of empty looks and half of all
+whistles at −15 dB. (One evening recording, 21.095 MHz, had almost no audio
+from the radio, −89 dBFS: whistles mixed into it at "−10 dB" are found only
+22 % of the time, and it is the "worst band" in the tool's output.)
+
+`whistlelab calibrate` (simulated busy band) agrees: 1 % of empty looks
+score 5.3–5.5, and at that rate whistles at −10 dB are found 74–77 % of the
+time in 0.5 s, 100 % in 2 s, as well as or better than before.
+
+Mercury's MFSK used to pass the scan at any strength; levelled by rank it
+passes in 7–60 % of looks and scores 12 at most, against 14–40 for a
+whistle from −5 dB up. So "the chirps line up, or the score is 14 or more"
+now confirms a whistle (`SURE_Z`), and a strong signal (`TrackHit::strength`
+from about 0 dB) that scores under 14 and doesn't line up is data. Real
+Mercury audio in every mode, −5 to +30 dB, gives no whistle reports, and
+every strong MFSK look the scan passes is known for data.
+
 ## Recommendation (as made before building)
 
 - **Whistle v2**: 1000 Hz wide (1000→2000→1000 Hz audio), 0.2 s each way, repeated. It is the best or tied-best design at every signal level here. It's half as wide as today's whistle, so it takes less of the channel from others, and it still resolves the offset by the up/down pair (±500 Hz unambiguous; the alias check covers the rest).

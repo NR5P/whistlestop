@@ -90,19 +90,25 @@ who hears it knows a Whistlestop station is calling.
   `LISTEN OFF` to hop channels (that flushes Mercury's decoders; see TNC.md
   "Scanning hosts").
 * **Scan detector** (`whistle::TrackDetector`): a 16 ms-frame spectrogram,
-  each bin whitened by its 75th percentile (anything present more than a
-  quarter of the time, such as carriers, RTTY, FT8 or a modem, is levelled
-  away) with single cells capped, then the cells along the UP/DOWN track
-  summed for every pattern timing and offset. It is non-coherent, so it
-  survives fading, and it needs only the energy the dwell holds, not a
-  whole chirp at the right moment. Its thresholds come from
-  `whistlelab calibrate`: 1 % of empty busy-band dwells score above
-  `found(0.5 s)` = 3.98 (`found(2 s)` = 1.99), and 15 % above `MAYBE` =
-  2.48. Each frame is also scaled by its median across the band, so a data
-  burst (which lights every bin at once) is levelled back to noise. A track
-  also needs enough cells over 3× the noise (3 σ more than
-  chance), so a loud signal crossing a wrong track at a few points can't
-  pass.
+  each bin levelled by rank: every cell becomes the expected value of the
+  same-ranked draw from a unit exponential among that bin's cells in the
+  look (anything present most of the time, such as carriers, RTTY, FT8 or
+  a modem, is levelled away, and a click or a burst counts no more than
+  the bin's loudest noise, however loud). Each frame is then centred on its
+  own mean, so a click or a data burst that lights every bin at once is
+  levelled back to noise. The cells along the UP/DOWN track are summed for
+  every pattern timing and offset. It is non-coherent, so it survives
+  fading, and it needs only the energy the dwell holds, not a whole chirp
+  at the right moment. Because the ranks follow the same law whatever the
+  noise does, the score is a true z-score at any look length: on 26
+  recordings of a real receiver across all nine search segments, evening
+  and day, about 1 % of looks score `found()` = 6.5 or more (0.5 to 2 s
+  alike) and 9 % `MAYBE` = 5.0, and whistles mixed into them are found at
+  −10 dB 92 % of the time in half a second (`recorded_calibration` in
+  audio.rs; WHISTLE-LAB.md). A
+  track also needs enough cells among each bin's loudest few (3 σ more
+  than chance), so a loud signal crossing a wrong track at a few points
+  can't pass.
 * **Fine lock** (`whistle::Detector`): coherent matched filters on the UP and
   DOWN chirps, after clipping strong narrow peaks in the spectrum. Within
   ±150 Hz of where the scan said, a lower threshold is safe

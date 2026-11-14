@@ -920,11 +920,11 @@ mod recorded_tests {
                     let w: Vec<f64> = y[i..(i + 16000).min(y.len())].iter().map(|v| *v as f64).collect();
                     let d = crate::whistle::Detector::new(crate::modes::Bandwidth::Hz2300.whistle_profile()).detect(&w);
                     eprintln!(
-                        "  {:6.1} s: z {:5.2} offset {:+6.0} fit {:.2} | coherent: {}",
+                        "  {:6.1} s: z {:5.2} offset {:+6.0} strength {:.1} | coherent: {}",
                         (blocks - 1) as f64 * 0.5,
                         h.z,
                         h.offset_hz,
-                        h.fit,
+                        h.strength,
                         d.map(|d| format!("{:+.0} Hz lined_up {} data {}", d.offset_hz, d.lined_up(), crate::whistle::looks_like_data(&h, Some(&d)))).unwrap_or("none".into())
                     );
                 }
@@ -933,81 +933,6 @@ mod recorded_tests {
         zs.sort_by(|a, b| b.partial_cmp(a).unwrap());
         let rms = (y.iter().map(|v| (*v as f64).powi(2)).sum::<f64>() / y.len() as f64).sqrt();
         eprintln!("{blocks} dwells, rms {:.1} dBFS, {hits} 'whistles found'; top scores {:?}", 20.0 * rms.log10(), &zs[..zs.len().min(8)]);
-    }
-}
-
-#[cfg(test)]
-mod recorded_mix_tests {
-    use super::*;
-    use crate::whistle::{PASSBAND, TrackDetector, ssb_channel, whistle};
-
-    /// Whistles mixed into a real band recording (`WS_RX_F32`, raw f32 at
-    /// 48 kHz) at several SNRs: how many 0.5 s dwells find them, and the
-    /// track fit of those that do, against the band's own false hits.
-    #[test]
-    #[ignore]
-    fn whistles_in_a_recorded_band() {
-        let Ok(path) = std::env::var("WS_RX_F32") else {
-            return;
-        };
-        let raw = std::fs::read(path).unwrap();
-        let x: Vec<f32> = raw.chunks_exact(4).map(|b| f32::from_le_bytes(b.try_into().unwrap())).collect();
-        let mut ds = Downsampler::new(48000);
-        let mut y = Vec::new();
-        ds.process(&x, &mut y);
-        let band: Vec<f64> = y.iter().map(|v| *v as f64).collect();
-        let p = crate::modes::Bandwidth::Hz2300.whistle_profile();
-        // The band's power in 2500 Hz: its whole passband, near enough.
-        let noise_p = band.iter().map(|v| v * v).sum::<f64>() / band.len() as f64;
-        let w: Vec<f64> = whistle(band.len() as f64 / 8000.0 + 1.0, &p).iter().map(|v| *v as f64).collect();
-        let sig_p0 = w.iter().map(|v| v * v).sum::<f64>() / w.len() as f64;
-        let secs: f64 = std::env::var("WS_BLOCK_S").ok().and_then(|v| v.parse().ok()).unwrap_or(0.5);
-        let n = (secs * 8000.0) as usize;
-        let found = TrackDetector::found(secs);
-        // The band alone, in blocks this long: its false hits' fits.
-        let mut falses = vec![];
-        let mut t0 = TrackDetector::new(p);
-        for b in band.chunks_exact(n) {
-            if let Some(h) = t0.scan(b)
-                && h.z >= found
-            {
-                falses.push(h.fit);
-            }
-        }
-        falses.sort_by(|a, b| b.partial_cmp(a).unwrap());
-        eprintln!("band alone, {secs} s blocks: {} of {} found a 'whistle'; highest fits {:?}", falses.len(), band.len() / n, &falses[..falses.len().min(6)]);
-        for snr in [-10.0, -5.0, 0.0, 5.0] {
-            let g = (noise_p * 10f64.powf(snr / 10.0) / sig_p0).sqrt();
-            let mut rows = vec![];
-            for (k, off) in [-900.0, -450.0, 0.0, 450.0, 900.0].into_iter().enumerate() {
-                let sh = ssb_channel(&w[..band.len()], off, crate::whistle::FS, (0.0, 4000.0));
-                let mix: Vec<f64> = band.iter().zip(&sh).map(|(b, s)| b + g * s).collect();
-                let mix = ssb_channel(&mix, 0.0, crate::whistle::FS, PASSBAND);
-                let mut t = TrackDetector::new(p);
-                // A different stretch of the band for each offset.
-                let per = 40usize.min(mix.len() / n / 5);
-                for b in mix.chunks_exact(n).skip(k * per).take(per) {
-                    if let Some(h) = t.scan(b)
-                        && h.z >= found
-                    {
-                        rows.push(((h.offset_hz - off).abs() < 60.0, h.fit));
-                    }
-                }
-            }
-            let right: Vec<f64> = rows.iter().filter(|r| r.0).map(|r| r.1).collect();
-            let wrong = rows.iter().filter(|r| !r.0).count();
-            let pct = |th: f64| 100.0 * right.iter().filter(|f| **f >= th).count() as f64 / right.len().max(1) as f64;
-            let mut sorted = right.clone();
-            sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
-            eprintln!(
-                "{snr:+4.0} dB: found at its offset {} times (elsewhere {wrong}); of those, fit >= 0.40: {:.0}%, >= 0.45: {:.0}%, >= 0.50: {:.0}%; lowest fits {:?}",
-                right.len(),
-                pct(0.40),
-                pct(0.45),
-                pct(0.50),
-                &sorted[..sorted.len().min(5)]
-            );
-        }
     }
 }
 
@@ -1083,5 +1008,98 @@ mod play_tests {
         let took = t.elapsed().as_secs_f64();
         assert!((3.5..6.0).contains(&took), "took {took:.1} s");
         assert!(o.queue.lock().unwrap().is_empty(), "the rest was dropped");
+    }
+}
+
+#[cfg(test)]
+mod recorded_calibration_tests {
+    use super::*;
+    use crate::whistle::{PASSBAND, TrackDetector, ssb_channel, whistle};
+
+    fn load(path: &std::path::Path) -> Vec<f64> {
+        let raw = std::fs::read(path).unwrap();
+        let x: Vec<f32> = raw.chunks_exact(4).map(|b| f32::from_le_bytes(b.try_into().unwrap())).collect();
+        let mut ds = Downsampler::new(48000);
+        let mut y = Vec::new();
+        ds.process(&x, &mut y);
+        y.iter().map(|v| *v as f64).collect()
+    }
+
+    /// The search's thresholds against real radio audio: every recording in
+    /// `WS_RX_DIR` (raw little-endian f32 at 48 kHz, as cpal gives it), in
+    /// looks of 0.5, 1.2 and 2 s: how often the band alone scores over each
+    /// threshold (a needless stop), and how often a whistle mixed in at
+    /// âˆ’15 to âˆ’5 dB and Â±0â€“900 Hz off is found at its offset.
+    /// `WS_RX_DIR=~/ws-recordings cargo test --release -- --ignored recorded_calibration --nocapture`
+    #[test]
+    #[ignore]
+    fn recorded_calibration() {
+        let Ok(dir) = std::env::var("WS_RX_DIR") else {
+            return;
+        };
+        let mut files: Vec<_> = std::fs::read_dir(dir).unwrap().filter_map(|e| e.ok().map(|e| e.path())).filter(|p| p.extension().is_some_and(|e| e == "f32")).collect();
+        files.sort();
+        let ths = [4.0, 4.5, 5.0, 5.5, 6.0, 6.5, 7.0];
+        let snrs = [-15.0, -10.0, -5.0];
+        let p = crate::modes::Bandwidth::Hz2300.whistle_profile();
+        // Per file: [secs][th] false counts, looks; [secs][snr][th] found counts, tries.
+        let per: Vec<_> = std::thread::scope(|s| {
+            let hs: Vec<_> = files.iter().map(|f| s.spawn(move || {
+                let band = load(f);
+                let noise_p = band.iter().map(|v| v * v).sum::<f64>() / band.len() as f64;
+                let w: Vec<f64> = whistle(band.len() as f64 / 8000.0 + 1.0, &p).iter().map(|v| *v as f64).collect();
+                let sig_p0 = w.iter().map(|v| v * v).sum::<f64>() / w.len() as f64;
+                let mut t = TrackDetector::new(p);
+                let mut out = vec![];
+                for secs in [0.5, 1.2, 2.0] {
+                    let n = (secs * 8000.0) as usize;
+                    let z0: Vec<f64> = band.chunks_exact(n).map(|b| t.scan(b).map(|h| h.z).unwrap_or(f64::MIN)).collect();
+                    let falses: Vec<usize> = ths.iter().map(|th| z0.iter().filter(|z| **z >= *th).count()).collect();
+                    let mut found = vec![];
+                    for snr in snrs {
+                        let g = (noise_p * 10f64.powf(snr / 10.0) / sig_p0).sqrt();
+                        let mut zs = vec![];
+                        for (k, off) in [-900.0, -450.0, 0.0, 450.0, 900.0].into_iter().enumerate() {
+                            let sh = ssb_channel(&w[..band.len()], off, crate::whistle::FS, (0.0, 4000.0));
+                            let mix: Vec<f64> = band.iter().zip(&sh).map(|(b, s)| b + g * s).collect();
+                            let mix = ssb_channel(&mix, 0.0, crate::whistle::FS, PASSBAND);
+                            let per = (mix.len() / n / 5).min(24);
+                            for b in mix.chunks_exact(n).skip(k * per).take(per) {
+                                zs.push(t.scan(b).filter(|h| (h.offset_hz - off).abs() < 60.0).map(|h| h.z).unwrap_or(f64::MIN));
+                            }
+                        }
+                        found.push((ths.iter().map(|th| zs.iter().filter(|z| **z >= *th).count()).collect::<Vec<_>>(), zs.len()));
+                    }
+                    out.push((falses, z0.len(), found));
+                }
+                (f.file_name().unwrap().to_string_lossy().to_string(), out)
+            })).collect();
+            hs.into_iter().map(|h| h.join().unwrap()).collect()
+        });
+        let pct = |a: usize, b: usize| 100.0 * a as f64 / b.max(1) as f64;
+        for (si, secs) in [0.5, 1.2, 2.0].into_iter().enumerate() {
+            eprintln!("\n{secs} s looks: % of looks over each threshold {ths:?}");
+            let mut tot = vec![0; ths.len()];
+            let mut looks = 0;
+            for (name, out) in &per {
+                let (f, n, _) = &out[si];
+                eprintln!("  {name:>34}: {}", f.iter().map(|c| format!("{:5.1}", pct(*c, *n))).collect::<Vec<_>>().join(" "));
+                tot.iter_mut().zip(f).for_each(|(t, c)| *t += c);
+                looks += n;
+            }
+            eprintln!("  {:>34}: {}", "BAND ALONE, ALL", tot.iter().map(|c| format!("{:5.1}", pct(*c, looks))).collect::<Vec<_>>().join(" "));
+            for (k, snr) in snrs.into_iter().enumerate() {
+                let mut tot = vec![0; ths.len()];
+                let mut tries = 0;
+                let mut worst = vec![100.0f64; ths.len()];
+                for (_, out) in &per {
+                    let (c, n) = &out[si].2[k];
+                    tot.iter_mut().zip(c).for_each(|(t, c)| *t += c);
+                    tries += n;
+                    worst.iter_mut().zip(c).for_each(|(w, c)| *w = w.min(pct(*c, *n)));
+                }
+                eprintln!("  {:>34}: {}   (worst band {})", format!("WHISTLE {snr:+} dB found"), tot.iter().map(|c| format!("{:5.1}", pct(*c, tries))).collect::<Vec<_>>().join(" "), worst.iter().map(|w| format!("{w:.0}")).collect::<Vec<_>>().join(" "));
+            }
+        }
     }
 }

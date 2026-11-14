@@ -194,31 +194,32 @@ impl Detection {
 /// Most the pairs of a `lined_up` detection may disagree by.
 pub const LINED_UP_HZ: f64 = 5.0;
 
-/// From this scan score up, a whistle's chirps line up in the matched
-/// filter (a whistle at −10 dB scores about 15–20 in 1.2–1.6 s).
-pub const LINE_UP_Z: f64 = 15.0;
+/// From this scan score up, the track is a whistle's own: nothing else
+/// reaches it (Mercury's MFSK, one tone hopping over the same band, scores
+/// 12 at most at any strength; the busiest look at real bands, 10.3),
+/// and a whistle from about −5 dB up does, even with a strong carrier in
+/// its sweep that blinds the matched filter.
+pub const SURE_Z: f64 = 14.0;
 
-/// A `TrackHit::fit` this good is a whistle's own track: Mercury's MFSK
-/// and MFSK500 reach 0.39 at most (its own signals, any strength); a strong
-/// whistle that the matched filter can't measure, 0.58 at least.
-pub const FIT_MIN: f64 = 0.5;
+/// From this `TrackHit::strength` up a signal is strong: Mercury's MFSK
+/// from about 0 dB (7–18 there), a whistle from about −2 dB (and every
+/// whistle that strong scores over `SURE_Z`; those under it, at −10 dB and
+/// below, have strength 5 at most).
+pub const STRONG: f64 = 8.0;
 
 /// A scan hit `h`, with the matched filter's `d` on the same audio: a
-/// signal this strong whose chirps don't line up and that doesn't own its
-/// track is data, not a whistle. Mercury's MFSK lights the whistle's band
-/// just as a whistle does and passes the scan detector at any strength.
-/// (A strong carrier inside the sweep can blind the matched filter to a
-/// strong whistle: its clipping stands down when the whistle fills the
-/// band. The fit still knows it.)
+/// strong signal whose chirps don't line up and that scores like a weak
+/// whistle at best is data, not a whistle: Mercury's MFSK lights the
+/// whistle's band and passes the scan detector now and then.
 pub fn looks_like_data(h: &TrackHit, d: Option<&Detection>) -> bool {
-    h.z >= LINE_UP_Z && !d.is_some_and(Detection::lined_up) && h.fit < FIT_MIN
+    h.strength >= STRONG && h.z < SURE_Z && !d.is_some_and(Detection::lined_up)
 }
 
 /// The whistle watch's test of one look (it needs the matched filter's
 /// offset anyway, so it can be stricter than `looks_like_data`): the
-/// chirps line up, or the scan's track is the signal's own.
+/// chirps line up, or the scan's track is surely a whistle's.
 pub fn watch_confirms(h: &TrackHit, d: &Detection) -> bool {
-    d.lined_up() || h.fit >= FIT_MIN
+    d.lined_up() || h.z >= SURE_Z
 }
 
 fn next_pow2(n: usize) -> usize {
@@ -457,22 +458,25 @@ impl Detector {
 /// What a scan dwell found: how sure, and roughly where.
 #[derive(Clone, Copy, Debug)]
 pub struct TrackHit {
-    /// Strength of the best match, as a z-score over the busy-band noise
-    /// floor (see `TrackDetector::found`).
+    /// Strength of the best match, as a z-score over the noise of this
+    /// very look (see `TrackDetector::found`): 6.5 marks a whistle,
+    /// 15–40 a clear one.
     pub z: f64,
     /// Coarse offset (Hz, audio higher than sent), good to about ±30 Hz and
     /// never ambiguous: the UP and DOWN legs only line up at the true one.
     pub offset_hz: f64,
-    /// Of the frames along the best track, the share whose strongest cell
-    /// (after levelling) is on it. A whistle owns its track: 0.75–1 from
-    /// −5 dB up, a carrier in the sweep or not (the levelling removes it).
-    /// Mercury's MFSK, one tone hopping over the same band, is on any
-    /// track only now and then: 0.2–0.4.
-    pub fit: f64,
+    /// How far the loudest signal in the passband stands over the noise,
+    /// whatever its shape: the median over the look's frames of each
+    /// frame's strongest cell, over that bin's own median (a steady
+    /// carrier doesn't count). About 4 with noise alone or a whistle at
+    /// −10 dB, 6 at −5 dB, 12–17 at 0 dB, 100 at +10 dB; Mercury's MFSK
+    /// much the same.
+    pub strength: f64,
 }
 
 /// The scanning detector: a short-frame spectrogram, each frequency bin
-/// whitened by its own median (so steady carriers vanish), then for every
+/// levelled by rank among its own cells (so steady carriers vanish, and a
+/// click or a burst counts no more than the loudest noise), then for every
 /// pattern timing and every offset within reach, the cells along the
 /// whistle's UP/DOWN track are added up. The best sum, as a z-score, says
 /// whether a whistle is there; its offset says where.
@@ -489,21 +493,23 @@ pub struct TrackDetector {
 }
 
 impl TrackDetector {
-    /// "Worth listening longer" after a 0.5 s dwell: 15 % of busy-band
-    /// dwells with no whistle score this high; 82–84 % of whistles at
-    /// −10 dB do (calibrated with `whistlelab calibrate`).
-    pub const MAYBE: f64 = 2.48;
+    /// "Worth listening longer" after a 0.5 s dwell: 9 % of half-second
+    /// looks at real bands score this high (26 recordings of an FTDX3000,
+    /// evening and day, across all nine search segments:
+    /// `recorded_calibration` in audio.rs), and half of all whistles at
+    /// −15 dB, which a 2 s listen then finds 78 % of the time.
+    pub const MAYBE: f64 = 5.0;
 
-    /// "Whistle found" for a block of `secs` seconds: 1 % of busy-band
-    /// dwells with no whistle score above it (3.98 at 0.5 s, 1.99 at 2 s;
-    /// longer blocks give steadier scores). Calibrated with
-    /// `whistlelab calibrate`.
-    pub fn found(secs: f64) -> f64 {
-        let r = (secs.clamp(0.5, 2.0) / 0.5).log2() / 2.0; // 0 at 0.5 s, 1 at 2 s
-        3.98 + (1.99 - 3.98) * r
+    /// "Whistle found", for a look of any length from 0.5 to 2 s: on those
+    /// recordings about 1 % of looks at the band alone score this high
+    /// (1.2 % of 0.5 s looks, 1.1 % at 1.2 s, 0.9 % at 2 s; the busiest
+    /// band, 40 m in the evening, 7 %), while whistles mixed into them are
+    /// found at their offset 92 % of the time at −10 dB in half a second
+    /// (97 % in 1.2 s) and 99 % at −5 dB. The levelling by rank makes the
+    /// score a true z-score at any length, so one threshold serves all.
+    pub fn found(_secs: f64) -> f64 {
+        6.5
     }
-    /// Largest value one whitened cell may add.
-    const CAP: f64 = 16.0;
 
     pub fn new(params: WhistleParams) -> Self {
         // ~16 ms frames: the chirp moves about one bin per frame.
@@ -560,27 +566,62 @@ impl TrackDetector {
         if nt < 5 {
             return None;
         }
-        // Whiten each bin by its 75th percentile (noise: ln 4 for a mean-1
-        // exponential). Anything in a bin more than a quarter of the time
-        // (carriers, RTTY, FT8, a modem) is levelled away; the whistle
-        // visits each bin only a few percent of the time. Then cap single
-        // cells, so a click or a burst can't fake a whole track.
+        // How strong the loudest signal is, whatever its shape: each frame's
+        // strongest cell over its bin's own median (so a steady carrier,
+        // levelled away, doesn't count), the median over frames.
+        let strength = {
+            let med: Vec<f64> = (0..nb)
+                .map(|b| {
+                    let mut col: Vec<f64> = rows.iter().map(|r| r[b]).collect();
+                    (median(&mut col) / std::f64::consts::LN_2).max(1e-30)
+                })
+                .collect();
+            let mut m: Vec<f64> = rows.iter().map(|r| r.iter().zip(&med).fold(0.0, |a: f64, (c, q)| a.max(c / q))).collect();
+            median(&mut m)
+        };
+        // Level each bin by rank: every cell becomes the expected value of
+        // the same-ranked draw from a unit exponential (the Savage score) among
+        // its bin's cells in this block. Steady noise looks like that anyway,
+        // so nothing is lost; but on a real receiver the noise isn't steady:
+        // clicks, static crashes and a data signal that comes and goes leave
+        // a bin loud a few percent of the time, and their size no longer
+        // matters, only that they were the loudest there. (Levelling by a
+        // percentile let them through: on a quiet 10 m band full of clicks
+        // half of all dwells found a "whistle" along the passband's edges.)
+        // Anything in a bin all the time (a carrier, FT8) is levelled away.
+        let scores: Vec<f64> = {
+            let mut v = vec![0.0; nt];
+            let mut acc = 0.0;
+            for r in 0..nt {
+                acc += 1.0 / (nt - r) as f64;
+                v[r] = acc;
+            }
+            v
+        };
+        let mut order: Vec<usize> = (0..nt).collect();
         for b in 0..nb {
-            let mut col: Vec<f64> = rows.iter().map(|r| r[b]).collect();
-            col.sort_by(|a, c| a.total_cmp(c));
-            let q = (col[(col.len() * 3) / 4] / 4f64.ln()).max(1e-30);
-            rows.iter_mut().for_each(|r| r[b] /= q);
+            order.sort_by(|&i, &j| rows[i][b].total_cmp(&rows[j][b]));
+            let col: Vec<f64> = order.iter().map(|&i| rows[i][b]).collect();
+            // Equal cells (digital silence) share their ranks' mean score.
+            let mut r = 0;
+            while r < nt {
+                let mut e = r + 1;
+                while e < nt && col[e] == col[r] {
+                    e += 1;
+                }
+                let m = scores[r..e].iter().sum::<f64>() / (e - r) as f64;
+                for &i in &order[r..e] {
+                    rows[i][b] = m;
+                }
+                r = e;
+            }
         }
-        // Then each frame by its own median across the band: a data burst
-        // (an OFDM modem, a CQFRAME) lights every bin at once and is levelled
+        // Then each frame about its own mean: a click or a data burst (an
+        // OFDM modem, a CQFRAME) lights every bin at once and is levelled
         // back to noise, while a whistle lights only one or two bins.
         for r in rows.iter_mut() {
-            let mut v = r.clone();
-            let m = median(&mut v) / std::f64::consts::LN_2;
-            if m > 1.0 {
-                r.iter_mut().for_each(|c| *c /= m);
-            }
-            r.iter_mut().for_each(|c| *c = c.min(Self::CAP));
+            let m = r.iter().sum::<f64>() / nb as f64;
+            r.iter_mut().for_each(|c| *c += 1.0 - m);
         }
         let pre: Vec<Vec<f64>> = rows
             .iter()
@@ -596,13 +637,14 @@ impl TrackDetector {
         let frame_s = l as f64 / fs;
         let period_frames = (self.params.period_s() / hop_s).round().max(1.0) as usize;
         let nd = (self.reach_hz / bw).ceil() as i64;
-        let e = (-Self::CAP).exp();
-        let (mu, var) = (1.0 - e, 1.0 - 2.0 * Self::CAP * e - e * e);
+        // Scores average 1; their spread, less what the frame's mean takes.
+        let mu = 1.0;
+        let var = (scores.iter().map(|v| (v - 1.0).powi(2)).sum::<f64>() / nt as f64) * (1.0 - 1.0 / nb as f64);
         // Cells along a real track are mostly a bit above the noise; a loud
         // signal crossing a wrong track makes only a few huge ones. So a
-        // track also needs enough cells over 3× the noise (a noise cell
-        // does that with probability e^-3).
-        let p0 = (-3.0f64).exp();
+        // track also needs enough cells scoring over 3 (the loudest few of
+        // each bin: about e^-3 of noise cells).
+        let p0 = scores.iter().filter(|v| **v > 3.0).count() as f64 / nt as f64;
         let z_at = |dt: usize, df: i64| -> Option<f64> {
             let (mut s, mut n, mut over) = (0.0, 0.0, 0.0);
             for (t, p) in pre.iter().enumerate() {
@@ -625,7 +667,11 @@ impl TrackDetector {
                 return None;
             }
             let z = (s - n * mu) / (n * var).sqrt();
-            let z_over = (over - n * p0) / (n * p0 * (1.0 - p0)).sqrt();
+            let z_over = if p0 > 0.0 {
+                (over - n * p0) / (n * p0 * (1.0 - p0)).sqrt()
+            } else {
+                f64::INFINITY
+            };
             Some(if z_over >= 3.0 { z } else { z.min(z_over) })
         };
         let mut best: Option<(TrackHit, usize, i64)> = None;
@@ -638,7 +684,7 @@ impl TrackDetector {
                         TrackHit {
                             z,
                             offset_hz: df as f64 * bw,
-                            fit: 0.0,
+                            strength,
                         },
                         dt,
                         df,
@@ -646,25 +692,8 @@ impl TrackDetector {
                 }
             }
         }
-        let fit_at = |dt: usize, df: i64| -> f64 {
-            let (mut n, mut on) = (0usize, 0usize);
-            for (t, r) in rows.iter().enumerate() {
-                let tc = (t + dt) as f64 * hop_s;
-                let (fa, fb) = (self.track(tc), self.track(tc + frame_s));
-                let blo = (fa.min(fb) / bw).round() as i64 + df - k0 as i64;
-                let bhi = (fa.max(fb) / bw).round() as i64 + df - k0 as i64;
-                if blo < 0 || bhi >= nb as i64 {
-                    continue;
-                }
-                n += 1;
-                let top = (0..nb).max_by(|&a, &b| r[a].total_cmp(&r[b])).unwrap_or(0) as i64;
-                on += usize::from((blo - 1..=bhi + 1).contains(&top));
-            }
-            on as f64 / n.max(1) as f64
-        };
         // Sub-bin offset from the neighbouring hypotheses (parabola).
         best.map(|(mut h, dt, df)| {
-            h.fit = fit_at(dt, df);
             if let (Some(a), Some(c)) = (z_at(dt, df - 1), z_at(dt, df + 1)) {
                 let d = a - 2.0 * h.z + c;
                 if d < 0.0 {
@@ -1007,7 +1036,8 @@ mod tests {
     fn mfsk_is_not_a_whistle() {
         // CHARLIE, parked on ALPHA's frequency, reported ALPHA and BRAVO's
         // MFSK link as whistles (bench, cq_pileup): MFSK passes the scan
-        // detector at any strength. The watch's look (1.6 s) and search's
+        // detector at any strength (with the percentile levelling it had
+        // then). The watch's look (1.6 s) and search's
         // (1.2 s), both whistle shapes, both MFSK geometries.
         let mut rng = StdRng::seed_from_u64(41);
         for p in [profile("wide"), profile("narrow")] {
@@ -1015,7 +1045,7 @@ mod tests {
             for n in [12_800, 9_600] {
                 let secs = n as f64 / FS as f64;
                 for (spacing, sym) in [(31.25, 320), (15.625, 640)] {
-                    let (mut looks, mut watch, mut data) = (0, 0, 0);
+                    let (mut looks, mut watch, mut strong, mut data) = (0, 0, 0, 0);
                     for snr in [35.0, 10.0, 0.0, -5.0] {
                         for _ in 0..25 {
                             let x = mfsk(n, spacing, sym, snr, &mut rng);
@@ -1025,13 +1055,22 @@ mod tests {
                             let det = d.detect(&x);
                             looks += 1;
                             watch += usize::from(det.as_ref().is_some_and(|det| watch_confirms(&h, det)));
-                            data += usize::from(looks_like_data(&h, det.as_ref()));
+                            if snr >= 0.0 {
+                                strong += 1;
+                                data += usize::from(looks_like_data(&h, det.as_ref()));
+                            }
                         }
                     }
-                    assert!(looks >= 80, "the scan passed only {looks} of 100 MFSK looks: test no longer needed?");
-                    assert!(watch * 100 <= 4 * looks, "f_lo {} {secs} s {spacing} Hz: watch took {watch} of {looks} MFSK looks for whistles", p.f_lo);
-                    let strong = 50; // 35, 10 and 0 dB
-                    assert!(data * 100 >= 90 * strong.min(looks), "f_lo {} {secs} s {spacing} Hz: only {data} MFSK looks known for data", p.f_lo);
+                    // Levelled by rank, MFSK passes the scan in 7–60 % of its
+                    // looks (with the percentile levelling, all of them).
+                    assert!(looks <= 75, "the scan passed {looks} of 100 MFSK looks");
+                    // (The matched filter lines up a few MFSK looks whatever the
+                    // scan does: no more than 4 of the 100.)
+                    assert!(watch <= 4, "f_lo {} {secs} s {spacing} Hz: watch took {watch} of 100 MFSK looks for whistles", p.f_lo);
+                    // A strong look the scan passes and that isn't known for
+                    // data would hold the search 45 s for a CQ: at most 4 of
+                    // the 75 (35, 10 and 0 dB).
+                    assert!(strong - data <= 4, "f_lo {} {secs} s {spacing} Hz: {} of 75 strong MFSK looks pass the scan and aren't known for data", p.f_lo, strong - data);
                 }
             }
         }
@@ -1112,6 +1151,42 @@ mod tests {
                     }
                     eprintln!("f_lo {} mode {m:2} {snr:5.1} dB: {found} looks pass the scan, {data} known for data; whistles reported {} before, {} now", p.f_lo, before.0, now.0);
                     assert_eq!(now.0, 0, "mode {m} at {snr} dB");
+                }
+            }
+        }
+    }
+
+    /// Scores, and strength, of whistles and simulated MFSK at several
+    /// strengths, with whether the matched filter lines them up: what
+    /// `SURE_Z` and `STRONG` were set from.
+    /// `cargo test --release -- --ignored score_survey --nocapture`
+    #[test]
+    #[ignore]
+    fn score_survey() {
+        let mut rng = StdRng::seed_from_u64(77);
+        let q = |v: &mut Vec<f64>| { v.sort_by(|a, b| a.total_cmp(b)); if v.is_empty() { return "none".to_string(); } let g = |f: f64| v[((v.len() as f64 * f) as usize).min(v.len() - 1)]; format!("n{} {:.2}/{:.2}/{:.2}/{:.2}/{:.2}", v.len(), v[0], g(0.1), g(0.5), g(0.9), v[v.len() - 1]) };
+        for p in [profile("wide"), profile("narrow")] {
+            let (mut t, mut d) = (TrackDetector::new(p), Detector::new(p));
+            for n in [9_600, 12_800] {
+                for snr in [30.0, 10.0, 0.0, -5.0, -10.0, -12.0] {
+                    for carrier in [false, true] {
+                        let (mut z, mut fit, mut pk, mut nl) = (vec![], vec![], vec![], vec![]);
+                        for k in 0..40 {
+                            let x = whistle_in(&p, -150.0 + 7.0 * k as f64, snr, carrier, 300 + 97 * k, n, &mut rng);
+                            if let Some(h) = t.scan(&x) { z.push(h.z); pk.push(h.strength); if !d.detect(&x).is_some_and(|d| d.lined_up()) { nl.push(h.z); fit.push(h.strength) } }
+                        }
+                        eprintln!("whistle f_lo {} n {n} {snr:+5.0} dB carrier {carrier:5}: z {} | strength {} | NOT LINED UP: z {} strength {}", p.f_lo, q(&mut z), q(&mut pk), q(&mut nl), q(&mut fit));
+                    }
+                }
+                for (spacing, sym) in [(31.25, 320), (15.625, 640)] {
+                    for snr in [35.0, 10.0, 0.0, -5.0] {
+                        let (mut z, mut fit, mut pk) = (vec![], vec![], vec![]);
+                        for _ in 0..40 {
+                            let x = mfsk(n, spacing, sym, snr, &mut rng);
+                            if let Some(h) = t.scan(&x) { z.push(h.z); pk.push(h.strength); if d.detect(&x).is_some_and(|d| d.lined_up()) { fit.push(h.z) } }
+                        }
+                        eprintln!("MFSK    f_lo {} n {n} {spacing} Hz {snr:+5.0} dB: z {} | strength {} | lined up: z {}", p.f_lo, q(&mut z), q(&mut pk), q(&mut fit));
+                    }
                 }
             }
         }
