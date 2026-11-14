@@ -601,8 +601,10 @@ impl Handle {
 /// 30 s to arrive, even when the latest frame was a faster mode, and
 /// crossed our own hang-up; links that stay fast take about 20 s.
 fn bye_wait(bps: Option<f64>) -> Duration {
+    // Scales with the speed: on the bench the disconnect took 36 s at
+    // 38 bps (MFSK) and 75 s at 18.6 bps (MFSK500, 500 Hz).
     match bps {
-        Some(b) if b > 0.0 && b < 100.0 => Duration::from_secs(75),
+        Some(b) if b > 0.0 => Duration::from_secs_f64((2800.0 / b).clamp(30.0, 180.0)),
         _ => Duration::from_secs(30),
     }
 }
@@ -6879,8 +6881,11 @@ mod tests {
 
     #[test]
     fn slow_links_wait_longer_for_the_disconnect() {
-        assert_eq!(bye_wait(Some(37.8)), Duration::from_secs(75));
-        assert_eq!(bye_wait(Some(192.6)), Duration::from_secs(30));
+        let secs = |b| bye_wait(Some(b)).as_secs();
+        assert_eq!(secs(37.8), 74);
+        assert_eq!(secs(18.6), 150);
+        assert_eq!(secs(192.6), 30);
+        assert_eq!(secs(5.0), 180);
         assert_eq!(bye_wait(None), Duration::from_secs(30));
         assert_eq!(bye_wait(Some(0.0)), Duration::from_secs(30));
     }
