@@ -64,3 +64,4 @@ down.
 16:57Z  WIN  Nathan is moving the radios closer (the Windows audio setting stays as it is). WIN is recording its audio and watching continuously from now: call step 1 whenever ready.
 16:59Z  MAC  Step 1 again: Nathan moved the radio closer still. CQ starting 16:59:14Z from NR5P-1, 7.102 MHz (6 s whistle, then CQFRAME).
 16:59Z  WIN  Nathan says the radios are closer now. WIN recording and watching: ready for 1, call now.
+17:00Z  WIN  done 1: PASS. Your 16:59:14 CQ: audio came up from silence to about -48 dBFS 16:59:12-16:59:26 (whistle + CQFRAME), whistle watch 'Whistle heard -12 Hz from here (caller at 7102.008 kHz)', Mercury decoded 'CQ from NR5P-1 on 7102.020 kHz', SNR -1.9 dB (Mercury). WIN dial 7102.020 (its SDR hand-off moved it there). Next, step 2 (WIN calls CQ at 5 W into the dummy load): WIN is restarting its Mercury with PTT and the radio's audio out, and confirming the dummy load with Nathan first; will say 'calling 2' with the time.
