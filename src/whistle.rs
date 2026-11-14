@@ -385,6 +385,9 @@ impl Detector {
     }
 
     pub fn detect(&mut self, x: &[f64]) -> Option<Detection> {
+        if is_silent(x) {
+            return None;
+        }
         let p = self.params;
         let (ru, rd) = self.correlate(x);
         if ru.is_empty() {
@@ -530,6 +533,9 @@ impl TrackDetector {
 
     /// Look for the whistle in a block of audio (real, at `params.fs`).
     pub fn scan(&mut self, x: &[f64]) -> Option<TrackHit> {
+        if is_silent(x) {
+            return None;
+        }
         let (l, fs) = (self.frame, self.params.fs as f64);
         let hop = l / 2;
         let bw = fs / l as f64;
@@ -727,6 +733,18 @@ pub fn ssb_channel_at(x: &[f64], offset_hz: f64, fs: u32, passband: (f64, f64), 
 
 pub const PASSBAND: (f64, f64) = (300.0, 2700.0);
 
+/// RMS below which audio is no audio at all: −100 dBFS, under 16-bit
+/// resolution and far under any receiver's own noise. A radio sending
+/// nothing over USB leaves only the converter's last bits, and on a real
+/// FTDX3000 (−139 dBFS) those held a few faint tones blinking on and off
+/// that the search took for a whistle in 179 of 180 dwells.
+pub const SILENT_RMS: f64 = 1e-5;
+
+/// Audio too quiet to be a radio's receiver (see `SILENT_RMS`).
+pub fn is_silent(x: &[f64]) -> bool {
+    x.is_empty() || (x.iter().map(|v| v * v).sum::<f64>() / x.len() as f64).sqrt() < SILENT_RMS
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -762,6 +780,29 @@ mod tests {
         x[2000] = f64::INFINITY;
         let _ = TrackDetector::new(p).scan(&x);
         let _ = Detector::new(p).detect(&x);
+    }
+
+    /// A radio sending no receive audio (its converter's last bits, as an
+    /// FTDX3000 with its data output turned down gave: −139 dBFS) is no
+    /// audio, not a whistle; a real but very quiet one is still found.
+    #[test]
+    fn near_silence_is_no_audio_but_quiet_audio_is() {
+        let mut rng = StdRng::seed_from_u64(7);
+        let x = received(200.0, 10.0, 0, 2 * FS as usize, &mut rng);
+        let rms = |v: &[f64]| (v.iter().map(|a| a * a).sum::<f64>() / v.len() as f64).sqrt();
+        let at = |db: f64| {
+            let g = 10f64.powf(db / 20.0) / rms(&x);
+            x.iter().map(|v| v * g).collect::<Vec<f64>>()
+        };
+        let p = WhistleParams::default();
+        let quiet = at(-80.0);
+        let h = TrackDetector::new(p).scan(&quiet).expect("a quiet whistle is scanned");
+        assert!(h.z >= TrackDetector::found(2.0), "z {}", h.z);
+        assert!(Detector::new(p).detect(&quiet).is_some(), "a quiet whistle is detected");
+        let silent = at(-110.0);
+        assert!(is_silent(&silent) && !is_silent(&quiet));
+        assert!(TrackDetector::new(p).scan(&silent).is_none());
+        assert!(Detector::new(p).detect(&silent).is_none());
     }
 
     /// Whistle through a mistuned receiver with noise at `snr_db` (2500 Hz BW).

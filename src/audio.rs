@@ -886,6 +886,44 @@ mod tests {
 }
 
 #[cfg(test)]
+mod recorded_tests {
+    use super::*;
+    use crate::whistle::TrackDetector;
+
+    /// The search's detector over a recording of a radio's receive audio
+    /// (raw little-endian f32 at 48 kHz, as cpal gives it), in 0.5 s
+    /// dwells: `WS_RX_F32=<file> cargo test -- --ignored recorded`.
+    #[test]
+    #[ignore]
+    fn recorded_radio_audio_whistle_scores() {
+        let Ok(path) = std::env::var("WS_RX_F32") else {
+            return;
+        };
+        let raw = std::fs::read(path).unwrap();
+        let gain: f32 = std::env::var("WS_RX_GAIN").ok().and_then(|g| g.parse().ok()).unwrap_or(1.0);
+        let x: Vec<f32> = raw.chunks_exact(4).map(|b| gain * f32::from_le_bytes(b.try_into().unwrap())).collect();
+        let mut ds = Downsampler::new(48000);
+        let mut y = Vec::new();
+        ds.process(&x, &mut y);
+        let mut t = TrackDetector::new(crate::modes::Bandwidth::Hz2300.whistle_profile());
+        let (mut blocks, mut hits, mut zs) = (0, 0, vec![]);
+        for b in y.chunks_exact(4000) {
+            let b: Vec<f64> = b.iter().map(|v| *v as f64).collect();
+            blocks += 1;
+            if let Some(h) = t.scan(&b) {
+                zs.push(h.z);
+                if h.z >= TrackDetector::found(0.5) {
+                    hits += 1;
+                }
+            }
+        }
+        zs.sort_by(|a, b| b.partial_cmp(a).unwrap());
+        let rms = (y.iter().map(|v| (*v as f64).powi(2)).sum::<f64>() / y.len() as f64).sqrt();
+        eprintln!("{blocks} dwells, rms {:.1} dBFS, {hits} 'whistles found'; top scores {:?}", 20.0 * rms.log10(), &zs[..zs.len().min(8)]);
+    }
+}
+
+#[cfg(test)]
 mod failure_tests {
     use super::*;
 

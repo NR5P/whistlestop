@@ -714,6 +714,10 @@ struct Station {
     sdr_stop: Arc<AtomicBool>,
     /// The wide receiver's last failure, once it's in the Log.
     sdr_said: Option<String>,
+    /// The radio's receive audio near-silent since then (see tick).
+    rx_silent_since: Option<Instant>,
+    /// "Almost silent" is in the Log (until the audio comes back).
+    rx_silent_said: bool,
     vfo: Arc<Mutex<f64>>,
     sdr_span: Arc<Mutex<f64>>,
     detector: Detector,
@@ -1033,6 +1037,8 @@ impl Station {
             sim_stop: sim_stop.clone(),
             sdr_stop: Arc::new(AtomicBool::new(false)),
             sdr_said: None,
+            rx_silent_since: None,
+            rx_silent_said: false,
             vfo: vfo.clone(),
             sdr_span: Arc::new(Mutex::new(cfg.sdr.span_hz)),
             peer: None,
@@ -1500,6 +1506,39 @@ impl Station {
         }
         for i in self.incoming.values() {
             i.save_partial();
+        }
+    }
+
+    /// A radio sending no receive audio (its USB/data output turned down)
+    /// left every pill green while Mercury and the search heard nothing,
+    /// and the search chased the converter's last bits. Said once after
+    /// 10 s of it (never while transmitting, when radios mute it), and
+    /// again when the audio is back.
+    fn check_rx_silence(&mut self) {
+        let (tx, ok) = {
+            let g = self.st.lock().unwrap();
+            (g.tx, g.audio_ok)
+        };
+        let x = self.rx.lock().unwrap().last(FS as usize);
+        if tx || !ok || self.cfg.demo || x.len() < FS as usize {
+            self.rx_silent_since = None;
+            return;
+        }
+        let db = 10.0 * (x.iter().map(|v| v * v).sum::<f64>() / x.len() as f64).max(1e-30).log10();
+        if crate::whistle::is_silent(&x) {
+            let since = *self.rx_silent_since.get_or_insert_with(Instant::now);
+            if !self.rx_silent_said && since.elapsed() >= Duration::from_secs(10) {
+                self.rx_silent_said = true;
+                self.log(format!(
+                    "⚠ The radio's audio is almost silent ({db:.0} dBFS): it isn't sending receive audio. Check the radio's USB/data output level (a menu setting on many radios) and the recording level in your sound settings. Until then Mercury can't decode and whistles can't be heard"
+                ));
+            }
+        } else {
+            self.rx_silent_since = None;
+            if self.rx_silent_said {
+                self.rx_silent_said = false;
+                self.log(format!("Radio audio: back ({db:.0} dBFS)"));
+            }
         }
     }
 
@@ -5487,6 +5526,7 @@ impl Station {
             self.log(format!("⚠ {why}"));
             self.sdr_said = Some(why);
         }
+        self.check_rx_silence();
         // A sound stream that stopped (unplugged, a driver error) shows as
         // audio down, with why, instead of a frozen waterfall and silence.
         if !self.audio_failed {
