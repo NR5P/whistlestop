@@ -10,6 +10,12 @@ pub enum Kind {
     Icom(u8),
     /// Kenwood-protocol radio with this ID (e.g. "023" TS-590SG, "020" QMX).
     Kenwood(&'static str),
+    /// A QRP Labs QMX, answering as a real one (firmware 1_02_005) did on
+    /// the bench: ID020, two VFOs with the dial on whichever FR names,
+    /// `SM;` but not `SM0;`, SWR and power only while transmitting, and
+    /// `?;` to everything it doesn't have. `ssb_tx` false is that
+    /// firmware's fault: TX; is ignored in LSB and USB.
+    Qmx { ssb_tx: bool },
     Elecraft,
     /// Yaesu with this ID (e.g. "0670" FT-991A).
     Yaesu(&'static str),
@@ -53,8 +59,58 @@ impl SimRadio {
         self.out.extend(s.as_bytes());
     }
 
+    fn qmx(&mut self, cmd: &str, ssb_tx: bool) {
+        let (head, arg) = cmd.split_at(cmd.len().min(2));
+        let on_b = self.vals.get("FR").is_some_and(|v| v == "1");
+        let fb: u64 = self.vals.get("FB").and_then(|v| v.parse().ok()).unwrap_or(7_030_000);
+        let active = if on_b { fb } else { self.freq };
+        match (head, arg) {
+            ("ID", "") => self.reply("ID020;"),
+            ("VN", "") => self.reply("VN1_02_005QMX;"),
+            ("FA", "") => {
+                let f = self.freq;
+                self.reply(&format!("FA{f:011};"));
+            }
+            ("FB", "") => self.reply(&format!("FB{fb:011};")),
+            ("FA", a) => self.freq = a.parse().unwrap_or(self.freq),
+            ("FB", a) => {
+                self.vals.insert("FB".into(), a.trim_start_matches('0').to_string());
+            }
+            ("FR" | "FT", "") => self.reply(&format!("{head}{};", on_b as u8)),
+            ("FR" | "FT", a) => {
+                self.vals.insert("FR".into(), a.to_string());
+            }
+            ("MD", "") => {
+                let m = self.mode as char;
+                self.reply(&format!("MD{m};"));
+            }
+            ("MD", a) => self.mode = *a.as_bytes().last().unwrap(),
+            ("TX", _) | ("TQ", "1") => self.ptt = ssb_tx || !matches!(self.mode, b'1' | b'2'),
+            ("RX", "") | ("TQ", "0") => self.ptt = false,
+            ("TQ", "") => {
+                let p = self.ptt as u8;
+                self.reply(&format!("TQ{p};"));
+            }
+            ("IF", "") => {
+                let s = format!(
+                    "IF{active:011}     +000000000{}{}{}00000 ;",
+                    self.ptt as u8, self.mode as char, on_b as u8
+                );
+                self.reply(&s);
+            }
+            ("SM", "") => self.reply("SM013;"),
+            ("SW", "") => self.reply(if self.ptt { "SW163;" } else { "SW;" }),
+            ("PC", "") => self.reply(if self.ptt { "PC45;" } else { "PC00;" }),
+            ("AG", "" | "0") => self.reply("AG0054;"),
+            _ => self.reply("?;"),
+        }
+    }
+
     fn ascii(&mut self, cmd: &str) {
         self.log.push(cmd.to_string());
+        if let Kind::Qmx { ssb_tx } = self.kind {
+            return self.qmx(cmd, ssb_tx);
+        }
         let yaesu = matches!(self.kind, Kind::Yaesu(_));
         let (head, arg) = cmd.split_at(cmd.len().min(2));
         let get = arg.is_empty()
@@ -401,6 +457,53 @@ mod tests {
         .unwrap();
         exercise(&mut d);
         assert!(d.get_func("NB").is_err());
+    }
+
+    #[test]
+    fn qmx_as_on_the_bench() {
+        let mut d = Kenwood::new(Box::new(SimRadio::new(Kind::Qmx { ssb_tx: true })), "020", false, 5.0).unwrap();
+        assert_eq!(d.describe(), "QRP Labs QMX (firmware 1_02_005) (direct CAT)");
+        exercise(&mut d);
+        // Its own meters; no RF gain, squelch or power setting to offer.
+        let caps = d.caps();
+        assert!(caps.can_get_level("STRENGTH") && caps.can_get_level("SWR") && caps.can_get_level("RFPOWER_METER"));
+        assert!(!caps.can_get_level("RF") && !caps.can_get_level("RFPOWER"));
+        // SM; is dB: 13 dB above S0 is a little over S2.
+        assert!((d.get_level("STRENGTH").unwrap() + 41.0).abs() < 0.01);
+        assert!(d.get_level("SWR").is_err(), "no SWR on receive");
+        d.set_ptt(true).unwrap();
+        assert!((d.get_level("SWR").unwrap() - 1.63).abs() < 0.001);
+        assert!((d.get_level("RFPOWER_METER").unwrap() - 0.9).abs() < 0.001, "4.5 W of 5");
+        d.set_ptt(false).unwrap();
+        assert!(d.set_level("RFPOWER", 0.5).is_err());
+    }
+
+    #[test]
+    fn qmx_on_vfo_b_is_tuned_on_b() {
+        // The dial follows VFO B: reading or setting A would move nothing.
+        let mut sim = SimRadio::new(Kind::Qmx { ssb_tx: true });
+        sim.vals.insert("FR".into(), "1".into());
+        sim.vals.insert("FB".into(), "7078000".into());
+        let mut d = Kenwood::new(Box::new(sim), "020", false, 5.0).unwrap();
+        assert_eq!(d.freq().unwrap(), 7_078_000.0);
+        d.set_freq(7_103_000.0).unwrap();
+        assert_eq!(d.freq().unwrap(), 7_103_000.0);
+        assert_eq!(d.vfo().unwrap(), "VFOB");
+        assert_eq!(poll(&mut d).unwrap().freq_hz, 7_103_000.0);
+    }
+
+    #[test]
+    fn qmx_that_ignores_tx_in_ssb_says_so() {
+        let mut d = Kenwood::new(Box::new(SimRadio::new(Kind::Qmx { ssb_tx: false })), "020", false, 5.0).unwrap();
+        d.set_mode("USB", 0).unwrap();
+        let e = d.set_ptt(true).unwrap_err().to_string();
+        assert!(e.contains("SSB VOX") && e.contains("firmware"), "{e}");
+        assert!(!d.ptt().unwrap());
+        // Its Digi mode does key over CAT.
+        d.set_mode("RTTY", 0).unwrap();
+        d.set_ptt(true).unwrap();
+        assert!(d.ptt().unwrap());
+        d.set_ptt(false).unwrap();
     }
 
     #[test]

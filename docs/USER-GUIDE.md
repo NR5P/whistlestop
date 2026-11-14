@@ -622,11 +622,20 @@ With **Settings → Radio connection → Direct CAT (built in)**, Whistlestop co
 
 **Kenwood TS-890S.** Mode is read and set with its own `OM` command (main band), including its data modes (USB-D, LSB-D, FM-D). **TS-990S**: it has no `IF` command and keys differently, so direct CAT refuses it with a note; use Hamlib (Settings → Radio → Managed rigctld).
 
+**QRP Labs QMX.** A QMX says it is a TS-480; Whistlestop asks for its firmware version (`VN;`) and, when that names a QMX, treats it as one (the Log shows "QRP Labs QMX (firmware 1_02_005)"). Checked against a real QMX on firmware 1_02_005:
+
+- **Use USB mode, not DIGI.** The QMX's DIGI mode sends one tone at a time (it measures the audio's pitch and makes that frequency), so it can send the whistle but not Mercury's signal, which is many tones at once. That needs the SSB firmware (1_02_000 or newer) and **Mode: USB** or **PKTUSB** (both put the QMX in USB). On the radio, set **SSB → Input** to **USB**, with CESSB off and compression 0.
+- **Keying.** Whistlestop sends the CAT transmit command and then checks that the radio went to transmit. Firmware 1_02_005 ignores that command in USB and LSB (it obeys it in DIGI and CW), and the Log then says "⚠ PTT: the QMX didn't go to transmit …". Two ways out: update the QMX's firmware (QRP Labs' firmware notes list a fix for CAT transmit in SSB), or turn on **SSB → VOX** on the radio so it keys on the audio, with **CAT config → Timeout** disabled. With VOX the warning still appears, and can be ignored.
+- **VFO A or B.** The frequency is read from, and set on, whichever VFO the QMX is using. (The same goes for a TS-480, TS-2000 and truSDX.)
+- **Meters.** The S-meter is the QMX's own reading in dB, taken as dB above S0. While transmitting, **SWR** and **Power out** are the QMX's own measurements; power is shown as a share of **Full power**, so set that to 5 W (or what your QMX makes).
+- **No power, RF gain, squelch or volume control**: the QMX has no CAT commands that fit them, so the Radio Controls window doesn't offer them. Set power with the supply voltage, as usual for a QMX.
+- One USB cable carries CAT and audio: choose **QMX Transceiver** for **Audio in** and **Audio out**, and the same device in Mercury.
+
 **Per-model details.** The S-meter is read on each model's own scale (TS-2000 0–30, TS-480 0–20, TS-590 0–30, TS-890 0–70 dots; Elecraft K3/KX 0–15, or 0–21 in its extended K31 mode). Yaesu squelch, mic gain and RF gain use each model's range (e.g. squelch 0–255 on the FTDX3000, FT-950, FTDX1200, FTDX5000, FT-2000, FTDX10 and FT-710; RF gain 0–30 on the FT-891). Split on Yaesu radios uses `ST` on the FTDX101 and FT-891 and the transmit-VFO command `FT` on the others, and is read back after setting; the FT-991/991A and FT-891 have no VFO select. The Elecraft K3/KX always receives on VFO A: choosing VFO B is refused (use split to transmit on B).
 
 **What each protocol controls.** Frequency, mode (including the radio's data mode: Icom DATA, Kenwood DA, Elecraft DATA A, Yaesu DATA-U, FT-817 DIG), PTT and the S-meter work on every radio. The Radio Controls window offers what the radio supports:
 
-| | Icom | Kenwood TS-590/890/990 | Elecraft | Yaesu | TS-480 / QMX / truSDX | FT-817 family |
+| | Icom | Kenwood TS-590/890/990 | Elecraft | Yaesu | TS-480 / truSDX | FT-817 family |
 |---|---|---|---|---|---|---|
 | Power, AF, RF, squelch | ✓ | ✓ | ✓ | ✓ | ✓ (no mic gain) | — |
 | SWR meter | ✓ | ✓ (approximate) | ✓ | ✓ | — | — |
@@ -637,7 +646,7 @@ With **Settings → Radio connection → Direct CAT (built in)**, Whistlestop co
 | Antenna tuner on/off and **Tune** | ✓ | ✓ | — | ✓ | — | — |
 | Split, VFO A/B, RIT/XIT | ✓ | ✓ | ✓ | ✓ | — | — |
 
-Meter readings come from each radio's own scale and are converted to S-units and SWR; on some radios (Kenwood SWR especially) the conversion is approximate.
+The QMX has its own list: see "QRP Labs QMX" above. Meter readings come from each radio's own scale and are converted to S-units and SWR; on some radios (Kenwood SWR especially) the conversion is approximate.
 
 **FT-817 family**: set the radio's DIG mode to USER-U in its menu. The FT-817 can't report PTT over CAT, so Whistlestop remembers what it last sent.
 

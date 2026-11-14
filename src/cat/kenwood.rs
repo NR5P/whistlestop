@@ -26,6 +26,11 @@ pub struct Kenwood {
     om: bool,
     /// S-meter dots → dB over S9, for this model (RigHelm's / Hamlib's).
     sm: &'static [(f32, f32)],
+    /// A QRP Labs QMX (ID020 like a TS-480, but `VN;` names it): its own
+    /// meters (`SM;` in dB, `SW;`, `PC;` as measured power), no RF gain,
+    /// squelch or power setting, and a transmit command that has to be
+    /// checked (early SSB firmware ignores it in USB/LSB).
+    qmx: bool,
 }
 
 // S-meter scales.
@@ -37,6 +42,8 @@ const SM_TS480: &[(f32, f32)] =
     &[(0.0, -60.0), (3.0, -48.0), (5.0, -36.0), (7.0, -24.0), (9.0, -12.0), (11.0, 0.0), (14.0, 20.0), (17.0, 40.0), (20.0, 60.0)];
 const SM_TS890: &[(f32, f32)] = &[(0.0, -54.0), (35.0, 0.0), (47.0, 20.0), (58.0, 40.0), (70.0, 60.0)];
 const SM_PLAIN: &[(f32, f32)] = &[(0.0, -54.0), (9.0, 0.0), (15.0, 60.0)];
+/// The QMX reports dB; taken as dB above S0 (6 dB per S-unit).
+const SM_QMX: &[(f32, f32)] = &[(0.0, -54.0), (54.0, 0.0), (114.0, 60.0)];
 
 pub fn model_name(id: &str) -> &'static str {
     match id {
@@ -56,7 +63,7 @@ impl Kenwood {
         // Elecraft radios answer OM; (their options); Kenwoods don't.
         let elecraft =
             elecraft_hint || (id == "017" && ascii_query(w.as_mut(), "OM;", "OM").is_ok());
-        let (v, name) = if elecraft {
+        let (v, mut name) = if elecraft {
             let k4 = ascii_query(w.as_mut(), "K4;", "K4").is_ok();
             (
                 Variant::Elecraft,
@@ -80,6 +87,18 @@ impl Kenwood {
             };
             (v, format!("Kenwood {}", model_name(id)))
         };
+        // A QMX says ID020 like a TS-480; VN; (its firmware version, e.g.
+        // VN1_02_005QMX) tells it apart. Other radios answer ?; or nothing.
+        let qmx_fw = if !elecraft && id == "020" {
+            ascii_query(w.as_mut(), "VN;", "VN").ok().filter(|r| r.to_uppercase().contains("QMX"))
+        } else {
+            None
+        };
+        let qmx = qmx_fw.is_some();
+        if let Some(fw) = qmx_fw {
+            let fw = fw[2..].to_uppercase().replace("QMX", "");
+            name = format!("QRP Labs QMX (firmware {})", fw.trim_matches('_'));
+        }
         // The TS-890S (ID024) sets modes with OM.
         let om = !elecraft && id == "024";
         let sm = if elecraft {
@@ -90,6 +109,7 @@ impl Kenwood {
         } else {
             match id {
                 "019" => SM_TS2000,
+                "020" if qmx => SM_QMX,
                 "020" => SM_TS480,
                 "021" | "023" => SM_TS590,
                 "024" => SM_TS890,
@@ -103,6 +123,7 @@ impl Kenwood {
             max_w,
             om,
             sm,
+            qmx,
         };
         k.freq().map_err(|e| anyhow!("{}: {e}", k.name))?;
         Ok(k)
@@ -213,6 +234,7 @@ impl Driver for Kenwood {
                 "NB NR VOX",
                 "",
             ),
+            Variant::Plain if self.qmx => ("STRENGTH SWR RFPOWER_METER", "", "", ""),
             Variant::Plain => ("AF RF SQL RFPOWER STRENGTH", "AF RF SQL RFPOWER", "", ""),
         };
         RigCaps {
@@ -237,12 +259,23 @@ impl Driver for Kenwood {
     }
 
     fn freq(&mut self) -> Result<f64> {
+        // The plain radios have no VFO controls here, and may be on VFO B
+        // (a QMX often is): IF; gives the frequency of the VFO in use.
+        if self.v == Variant::Plain {
+            if let Ok(r) = self.info() {
+                return Ok(num(&r, 2, Some(11))? as f64);
+            }
+        }
         let r = self.q("FA;", "FA")?;
         Ok(num(&r, 2, None)? as f64)
     }
 
     fn set_freq(&mut self, hz: f64) -> Result<()> {
-        self.s(&format!("FA{:011};", hz.round() as u64))
+        // Tune the VFO the radio is listening on: setting A while it is on
+        // B would change nothing you can hear.
+        let on_b = self.v == Variant::Plain && self.q("FR;", "FR").is_ok_and(|r| r.ends_with('1'));
+        let vfo = if on_b { 'B' } else { 'A' };
+        self.s(&format!("F{vfo}{:011};", hz.round() as u64))
     }
 
     fn mode(&mut self) -> Result<(String, i64)> {
@@ -329,6 +362,23 @@ impl Driver for Kenwood {
         // TX1 on Kenwood transmits the USB/ACC audio (data), not the mic.
         match (on, self.v) {
             (true, Variant::Kenwood) => self.s("TX1;"),
+            (true, _) if self.qmx => {
+                // Checked: QMX firmware with early SSB support ignores TX;
+                // in USB and LSB, and a silent failure would look like a
+                // transmission that nobody hears.
+                for _ in 0..2 {
+                    self.s("TX;")?;
+                    std::thread::sleep(std::time::Duration::from_millis(60));
+                    if !matches!(self.ptt(), Ok(false)) {
+                        return Ok(());
+                    }
+                }
+                let ssb = matches!(self.q("MD;", "MD").ok().and_then(|r| r.chars().nth(2)), Some('1' | '2'));
+                if ssb {
+                    bail!("the QMX didn't go to transmit: in USB/LSB this firmware ignores the CAT transmit command. Update the QMX firmware, or turn on its SSB VOX (with Input = USB) so it keys on the audio");
+                }
+                bail!("the QMX didn't go to transmit")
+            }
             (true, _) => self.s("TX;"),
             // Confirmed: see `unkey_confirmed`.
             (false, _) => unkey_confirmed(self, |k| k.s("RX;")),
@@ -342,17 +392,33 @@ impl Driver for Kenwood {
         }
         let e = self.elecraft();
         Ok(match name {
-            "RFPOWER" => {
+            "RFPOWER" if !self.qmx => {
                 let r = self.q("PC;", "PC")?;
                 num(&r, 2, Some(3))? as f32 / self.max_w.max(1.0)
+            }
+            // The QMX measures its output: PC; is tenths of a watt, and
+            // SW; the SWR in hundredths (empty on receive).
+            "RFPOWER_METER" if self.qmx => {
+                let r = self.q("PC;", "PC")?;
+                num(&r, 2, None)? as f32 / 10.0 / self.max_w.max(1.0)
+            }
+            "SWR" if self.qmx => {
+                let r = self.q("SW;", "SW")?;
+                if r.len() <= 2 {
+                    bail!("the QMX reads SWR only while transmitting");
+                }
+                num(&r, 2, None)? as f32 / 100.0
             }
             "STRENGTH" => {
                 let t = self.sm;
                 let r = match self.v {
                     Variant::Elecraft => self.q("SM;", "SM")?,
+                    // The QMX answers ?; to SM0;.
+                    _ if self.qmx => self.q("SM;", "SM")?,
                     _ => self.q("SM0;", "SM0")?,
                 };
-                let skip = r.len().saturating_sub(4);
+                // SM0nnnn (four digits); the QMX's is just SMnnn.
+                let skip = if self.qmx { 2 } else { r.len().saturating_sub(4) };
                 cal(t, num(&r, skip, None)? as f32)
             }
             "SWR" if e => num(&self.q("SW;", "SW")?, 2, None)? as f32 / 10.0,
@@ -391,7 +457,7 @@ impl Driver for Kenwood {
             // Three digits: a max power set above 999 W (allowed up to
             // 2000 for other radios) would make "PC2000;", which the radio
             // misreads.
-            "RFPOWER" => self.s(&format!(
+            "RFPOWER" if !self.qmx => self.s(&format!(
                 "PC{:03};",
                 ((v.clamp(0.0, 1.0) * self.max_w).round() as u32).min(999)
             )),
