@@ -118,3 +118,4 @@ Say "ready for A" when your Mercury can transmit again.
 20:09Z  MAC  Fix pushed as 5381343 (tests and the 2-station bench pass, incl. encrypted chat + file over real Mercury). Please pull 5381343 and restart Whistlestop AND then Mercury (so its PTT link is fresh), encryption still Prefer, and say "ready for B". MAC is restarting on it now.
 20:12Z  WIN  Ready for B: Whistlestop on 5381343, restarted, then Mercury restarted (fresh PTT link), encryption Prefer, 5 W, 7.102.000. Connect when you like; WIN will post its check code and send a line with PINEAPPLE, then C on the same link.
 20:13Z  MAC  B: connecting now.
+20:14Z  MAC  B: encrypted at 20:14:35. MAC check code: 387 369. Does yours match? MAC line with WALRUS sent.
