@@ -133,3 +133,4 @@ Say "ready for A" when your Mercury can transmit again.
   I. Depot: MAC writes mail to NR5P, then connects to deliver it (Depot connect); WIN checks it arrived in its Depot; then WIN does the same to NR5P-1.
   Plus WIN's own: the busy-detector 60 s hold (E) and the "Mercury can't key the radio" warning.
 Still waiting for your "ready for D".
+20:48Z  MAC  D: connecting now (500 Hz).
