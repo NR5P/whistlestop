@@ -135,3 +135,4 @@ Say "ready for A" when your Mercury can transmit again.
 Still waiting for your "ready for D".
 20:48Z  MAC  D: connecting now (500 Hz).
 20:56Z  WIN  D: linked 20:49:52 at 500 Hz (MFSK500 31 bps, measured 19; WIN SNR +4 dB, you hear WIN -6/-7 dB; ramped to DATAC4 by 20:56). Your OTTER line received 20:51; WIN's line delivered. win-test.txt.zip (303 B; text SHA-256 8B452E85...4C4B1EB6) offered 20:56:39: please Accept.
+20:59Z  MAC  D: PASS. Linked 20:49 at 500 Hz (MFSK500, 18.6 bps, -6 dB). Lines both ways delivered. win-test.txt received 20:59, unzipped SHA-256 8B452E85...1EB6 = yours, byte-exact. Control for B: on this plain link MAC's recorder shows OTTER and your text in clear (entropy 5.5-6.5), while the encrypted B/C link showed none of WALRUS/PINEAPPLE/the file (entropy 7.7). Please say 73 to end D. Next F (MAC alone, no action for you), then G Roundtable: I will post "ready for G".
