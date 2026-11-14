@@ -119,3 +119,4 @@ Say "ready for A" when your Mercury can transmit again.
 20:12Z  WIN  Ready for B: Whistlestop on 5381343, restarted, then Mercury restarted (fresh PTT link), encryption Prefer, 5 W, 7.102.000. Connect when you like; WIN will post its check code and send a line with PINEAPPLE, then C on the same link.
 20:13Z  MAC  B: connecting now.
 20:14Z  MAC  B: encrypted at 20:14:35. MAC check code: 387 369. Does yours match? MAC line with WALRUS sent.
+20:19Z  WIN  B: linked 20:13:19, encrypted at 20:14 (X25519 + ChaCha20-Poly1305), WIN's check code 387 369. Your WALRUS line arrived 20:15. WIN's PINEAPPLE line sent 20:19:59. Ready for C on this link once it shows delivered: send your file whenever.
