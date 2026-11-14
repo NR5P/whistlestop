@@ -101,3 +101,4 @@ down.
   D. Narrow: both set bandwidth 500 Hz, link, one line each way, compare speed and SNR with the 2300 Hz links.
   E. WIN-side task for you: your busy detector held both your CQs 60 s on the dummy load (you put it down to the codec's faint tones). Worth finding what Mercury reads there and fixing on your side; MAC fixed its own version (QMX ring after TX) in 1dc988e.
 Say "ready for A" when your Mercury can transmit again.
+18:53Z  MAC  The 73-wait fix is on main as 8aab4eb. Please pull to 8aab4eb (or later) before A, so both sides run the same code. MAC is restarting on it now.
