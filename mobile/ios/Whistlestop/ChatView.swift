@@ -292,7 +292,16 @@ struct Bubble: View {
                     HStack(spacing: 4) {
                         if !line.mine, let from = line.from, !from.isEmpty { Text(from) }
                         Text(Fmt.utc(line.at))
-                        if line.mine { Image(systemName: line.delivered == true ? "checkmark" : "clock") }
+                        if line.mine {
+                            if line.delivered == true {
+                                Image(systemName: "checkmark")
+                            } else if line.unconfirmed == true {
+                                Image(systemName: "xmark").foregroundStyle(.red)
+                                Text("not confirmed").foregroundStyle(.red)
+                            } else {
+                                Image(systemName: "clock")
+                            }
+                        }
                     }
                     .font(.caption2).foregroundStyle(Theme.dim)
                 }

@@ -1282,7 +1282,13 @@ impl App {
                                             ui.label(RichText::new(&c.from).strong().color(if mine { BRASS } else { TEAL }));
                                             ui.label(RichText::new(c.at.hhmm()).small().color(DIM));
                                             if mine {
-                                                let (t, col) = if c.delivered { ("✓ delivered", TEAL) } else { ("… sending", BRASS) };
+                                                let (t, col) = if c.delivered {
+                                                    ("✓ delivered", TEAL)
+                                                } else if c.unconfirmed {
+                                                    ("✗ not confirmed", RED)
+                                                } else {
+                                                    ("… sending", BRASS)
+                                                };
                                                 ui.label(RichText::new(t).small().color(col));
                                             }
                                         });

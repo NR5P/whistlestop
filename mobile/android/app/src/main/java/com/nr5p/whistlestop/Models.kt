@@ -80,7 +80,7 @@ data class EngineState(
                     )
                 },
                 chat = s.a("chat").map { it.obj() }.map {
-                    ChatLine(it.l("at"), it.s("who") ?: "", it.s("from") ?: "", it.s("text") ?: "", it.b("delivered"))
+                    ChatLine(it.l("at"), it.s("who") ?: "", it.s("from") ?: "", it.s("text") ?: "", it.b("delivered"), it.b("unconfirmed"))
                 },
                 heard = s.a("heard").map { it.obj() }.map {
                     Heard(it.l("at"), it.s("call") ?: "", it.d("dial_hz") ?: 0.0, it.s("what") ?: "", it.s("table"))
@@ -175,7 +175,7 @@ data class TableState(
 )
 /** `from` is empty for the table's own notices. */
 data class TableLine(val at: Long, val from: String, val text: String)
-data class ChatLine(val at: Long, val who: String, val from: String, val text: String, val delivered: Boolean) {
+data class ChatLine(val at: Long, val who: String, val from: String, val text: String, val delivered: Boolean, val unconfirmed: Boolean = false) {
     val mine get() = who == "Me"
     val system get() = who == "System"
 }

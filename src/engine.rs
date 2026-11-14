@@ -134,6 +134,10 @@ pub struct ChatLine {
     pub id: u64,
     /// The other station confirmed it arrived (a RECEIVED packet).
     pub delivered: bool,
+    /// The link ended before the other station confirmed it: it may or may
+    /// not have got there.
+    #[serde(default)]
+    pub unconfirmed: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -270,6 +274,14 @@ const TABLE_REPORT_EVERY: Duration = Duration::from_secs(120);
 /// An unattended transmission (CQ, Station ID) waits at most this long for a
 /// busy channel to clear, then goes anyway.
 const BUSY_WAIT_MAX: Duration = Duration::from_secs(60);
+/// A busy report that starts within this long of our own key-up is the
+/// tail of our own transmission, not another station: some radios ring as
+/// they come back to receive (a QMX sends a 1500 Hz "ding", 25 dB over the
+/// band noise, dying away over about 0.8 s, and Mercury reads it as busy).
+const OWN_TAIL: Duration = Duration::from_millis(1500);
+/// ... and it is set aside for at most this long after key-up: if it is
+/// still busy then, someone really is on the frequency.
+const OWN_TAIL_HOLD: Duration = Duration::from_secs(3);
 /// How long an automatic deliver/collect call waits for a clear channel
 /// (past BUSY_WAIT_MAX, so a stuck detector still lets it go).
 const AUTO_PENDING_MAX: Duration = Duration::from_secs(90);
@@ -583,6 +595,40 @@ impl Handle {
     }
 }
 
+/// How long to wait for the other station's disconnect after its 73. On
+/// the bench, over a weak link in Mercury's slowest mode (MFSK, 38 bps),
+/// it took 30 s to arrive and crossed our own hang-up; the faster modes
+/// take about 20 s.
+fn bye_wait(bps: Option<f64>) -> Duration {
+    match bps {
+        Some(b) if b > 0.0 && b < 100.0 => Duration::from_secs(75),
+        _ => Duration::from_secs(30),
+    }
+}
+
+/// The link has ended: our lines the other station never confirmed can't
+/// be any more, so they stop reading "sending".
+fn mark_unconfirmed(chat: &mut [ChatLine]) {
+    for c in chat.iter_mut().filter(|c| c.who == Who::Me && !c.delivered) {
+        c.unconfirmed = true;
+    }
+}
+
+/// See `Engine::busy_now`: a BUSY that came on within `OWN_TAIL` of our own
+/// key-up is set aside until `OWN_TAIL_HOLD` after it.
+fn busy_counts(busy: bool, from: Option<Instant>, own_end: Option<Instant>, now: Instant) -> bool {
+    if !busy {
+        return false;
+    }
+    match (from, own_end) {
+        (Some(f), Some(e)) => {
+            let tail = f.saturating_duration_since(e) < OWN_TAIL;
+            !(tail && now.saturating_duration_since(e) < OWN_TAIL_HOLD)
+        }
+        _ => true,
+    }
+}
+
 /// A tiny wall-clock time for display, without a date/time crate.
 pub mod chrono_lite {
     #[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
@@ -849,6 +895,10 @@ struct Station {
     last_sn: Option<(Instant, f64)>,
     /// Mercury's busy detector says someone is transmitting (BUSY ON/OFF).
     chan_busy: bool,
+    /// When that BUSY came on, and when our own last transmission ended
+    /// (see `OWN_TAIL`).
+    busy_from: Option<Instant>,
+    own_tx_end: Option<Instant>,
     /// Since when an unattended transmission has been waiting for the
     /// channel to clear (and when it last asked: a gap starts it over).
     busy_wait: Option<(Instant, Instant)>,
@@ -1137,6 +1187,8 @@ impl Station {
             cfg_notes: vec![],
             last_sn: None,
             chan_busy: false,
+            busy_from: None,
+            own_tx_end: None,
             busy_wait: None,
             auto_pending: None,
             host_snr: None,
@@ -1989,6 +2041,7 @@ impl Station {
                         text,
                         id,
                         delivered: false,
+                        unconfirmed: false,
                     })
                 });
                 self.pump().await?;
@@ -2284,6 +2337,9 @@ impl Station {
     }
 
     async fn ptt(&mut self, on: bool) {
+        if self.engine_keyed && !on {
+            self.own_tx_end = Some(Instant::now());
+        }
         self.engine_keyed = on;
         if let Some(r) = self.rig.as_mut() {
             match r.ptt(on).await {
@@ -2945,7 +3001,7 @@ impl Station {
                 CqPhase::Whistle { .. } => "whistling".to_string(),
                 CqPhase::Frame { .. } => "sending CQFRAME".into(),
                 // The next cycle is due but someone is on the frequency.
-                CqPhase::Listen { until } if Instant::now() >= *until && self.chan_busy => {
+                CqPhase::Listen { until } if Instant::now() >= *until && self.busy_now() => {
                     let waited = self.busy_wait.map(|(t, _)| t.elapsed().as_secs()).unwrap_or(0);
                     format!(
                         "waiting for a clear channel ({}s)",
@@ -3106,6 +3162,7 @@ impl Station {
                         text: format!("Linked with {peer} ({bw} Hz)"),
                         id: 0,
                         delivered: true,
+                        unconfirmed: false,
                     });
                 });
                 self.log(format!("Linked with {peer}, {bw} Hz"));
@@ -3179,6 +3236,9 @@ impl Station {
                 self.on_bodies(early).await?;
             }
             "DISCONNECTED" => {
+                // Lines the other station never confirmed stop saying
+                // "sending": that can't happen any more on this link.
+                self.set(|g| mark_unconfirmed(&mut g.chat));
                 // The other modem can keep sending teardown bursts for a
                 // while (up to ~25 s seen on the bench).
                 self.quiet_watch_for(30.0);
@@ -3205,6 +3265,7 @@ impl Station {
                             text: format!("Link with {p} ended"),
                             id: 0,
                             delivered: true,
+                            unconfirmed: false,
                         })
                     });
                 }
@@ -3340,6 +3401,9 @@ impl Station {
                 if on && !self.mercury_ptt {
                     self.mercury_ptt_at = Instant::now();
                 }
+                if self.mercury_ptt && !on {
+                    self.own_tx_end = Some(Instant::now());
+                }
                 self.mercury_ptt = on;
                 // One more frame off the air for a waiting speed change.
                 if !on && let Some((_, _, owed)) = self.pending_speed.as_mut() {
@@ -3390,6 +3454,9 @@ impl Station {
             // Mercury's busy detector (on while not linked, see busy_detect).
             "BUSY" => {
                 let on = l.split_whitespace().nth(1) == Some("ON");
+                if on && !self.chan_busy {
+                    self.busy_from = Some(Instant::now());
+                }
                 self.chan_busy = on;
                 self.set(|g| g.channel_busy = on);
             }
@@ -3441,6 +3508,7 @@ impl Station {
                 text,
                 id: 0,
                 delivered: true,
+                unconfirmed: false,
             })
         });
     }
@@ -3714,6 +3782,7 @@ impl Station {
                         text,
                         id,
                         delivered: true,
+                        unconfirmed: false,
                     })
                 });
                 self.pump().await?;
@@ -3885,12 +3954,13 @@ impl Station {
                         text,
                         id: 0,
                         delivered: true,
+                        unconfirmed: false,
                     })
                 });
                 // They're leaving and will disconnect (Mercury's disconnect
-                // takes ~20 s to arrive). If it never does (say, after a
-                // QSY), hang up from this end after 30 s; sooner would
-                // collide with theirs.
+                // takes ~20 s to arrive, longer on a slow link). If it never
+                // does (say, after a QSY), hang up from this end after
+                // `bye_wait`; sooner would collide with theirs.
                 if self.bye_at.is_none() {
                     self.bye_at = Some(Instant::now());
                 }
@@ -5802,7 +5872,7 @@ impl Station {
         if let Some(at) = self.bye_at {
             if self.peer.is_none() {
                 self.bye_at = None;
-            } else if at.elapsed() > Duration::from_secs(30) {
+            } else if at.elapsed() > bye_wait(self.st.lock().unwrap().link.as_ref().map(|l| l.bps)) {
                 self.bye_at = None;
                 self.log("The other station said 73 but its disconnect didn't arrive; hanging up from here".into());
                 // ABORT, not DISCONNECT: they've gone (after a QSY, maybe to
@@ -5945,12 +6015,19 @@ impl Station {
         }
     }
 
+    /// Is someone else on the frequency? Mercury's BUSY, unless it came on
+    /// just after our own key-up and that was moments ago: then it is our
+    /// own transmission's tail (`OWN_TAIL`).
+    fn busy_now(&self) -> bool {
+        busy_counts(self.chan_busy, self.busy_from, self.own_tx_end, Instant::now())
+    }
+
     /// May an unattended transmission go now? Not while the channel is busy,
     /// but after BUSY_WAIT_MAX of waiting it goes anyway (a detector that
     /// reads busy all the time, behind a narrow filter say, mustn't silence
     /// the station).
     fn clear_to_send(&mut self, what: &str) -> bool {
-        if !self.chan_busy {
+        if !self.busy_now() {
             self.busy_wait = None;
             return true;
         }
@@ -6769,6 +6846,50 @@ fn air_grid(grid: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unconfirmed_lines_stop_sending_when_the_link_ends() {
+        let line = |who, id, delivered| ChatLine {
+            at: Clock::now(),
+            who,
+            from: "X".into(),
+            text: "t".into(),
+            id,
+            delivered,
+            unconfirmed: false,
+        };
+        let mut chat = vec![line(Who::Me, 1, true), line(Who::Me, 2, false), line(Who::Them, 2, true), line(Who::System, 0, true)];
+        mark_unconfirmed(&mut chat);
+        let u: Vec<bool> = chat.iter().map(|c| c.unconfirmed).collect();
+        assert_eq!(u, vec![false, true, false, false]);
+        // An old settings or state file without the field still reads.
+        let old = r#"{"at":0,"who":"Me","from":"X","text":"t","id":3,"delivered":false}"#;
+        assert!(!serde_json::from_str::<ChatLine>(old).unwrap().unconfirmed);
+    }
+
+    #[test]
+    fn slow_links_wait_longer_for_the_disconnect() {
+        assert_eq!(bye_wait(Some(37.8)), Duration::from_secs(75));
+        assert_eq!(bye_wait(Some(192.6)), Duration::from_secs(30));
+        assert_eq!(bye_wait(None), Duration::from_secs(30));
+        assert_eq!(bye_wait(Some(0.0)), Duration::from_secs(30));
+    }
+
+    #[test]
+    fn own_tail_is_not_another_station() {
+        let end = Instant::now();
+        let ms = |n: u64| end + Duration::from_millis(n);
+        // The QMX's ding: BUSY 0.6 s after our key-up, asked at 1 s and 2.9 s.
+        assert!(!busy_counts(true, Some(ms(600)), Some(end), ms(1000)));
+        assert!(!busy_counts(true, Some(ms(600)), Some(end), ms(2900)));
+        // Still busy 3 s after key-up: someone really is there.
+        assert!(busy_counts(true, Some(ms(600)), Some(end), ms(3100)));
+        // A BUSY that starts later than the tail is another station at once.
+        assert!(busy_counts(true, Some(ms(2000)), Some(end), ms(2100)));
+        // Never keyed: counts.
+        assert!(busy_counts(true, Some(ms(100)), None, ms(200)));
+        assert!(!busy_counts(false, Some(ms(100)), Some(end), ms(200)));
+    }
 
     /// The search tests run a simulated band in real time and time a
     /// search across it: several at once starve each other of CPU (whistles

@@ -141,6 +141,8 @@ struct ChatLine: Decodable {
     var text: String
     var id: UInt64? = nil
     var delivered: Bool? = nil
+    /// The link ended before the other station confirmed it.
+    var unconfirmed: Bool? = nil
     var mine: Bool { who == "Me" }
     var system: Bool { who == "System" }
 }

@@ -585,7 +585,7 @@ private fun Bubble(line: ChatLine) {
             val meta = buildList {
                 if (!line.mine && line.from.isNotEmpty()) add(line.from)
                 add(Fmt.utc(line.at))
-                if (line.mine) add(if (line.delivered) "✓" else "…")
+                if (line.mine) add(if (line.delivered) "✓" else if (line.unconfirmed) "✗ not confirmed" else "…")
             }.joinToString(" ")
             Text(meta, color = C.dim, fontSize = 11.sp)
         }
