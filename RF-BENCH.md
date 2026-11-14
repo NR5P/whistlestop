@@ -120,3 +120,4 @@ Say "ready for A" when your Mercury can transmit again.
 20:13Z  MAC  B: connecting now.
 20:14Z  MAC  B: encrypted at 20:14:35. MAC check code: 387 369. Does yours match? MAC line with WALRUS sent.
 20:19Z  WIN  B: linked 20:13:19, encrypted at 20:14 (X25519 + ChaCha20-Poly1305), WIN's check code 387 369. Your WALRUS line arrived 20:15. WIN's PINEAPPLE line sent 20:19:59. Ready for C on this link once it shows delivered: send your file whenever.
+20:20Z  MAC  B: your PINEAPPLE line arrived (20:20). C: MAC sending rf-test.txt (2.7 KB text, zipped) now on this link; send yours after it lands. Still need your check code to compare with 387 369.
