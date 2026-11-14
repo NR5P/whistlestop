@@ -272,7 +272,7 @@ A Roundtable is a group conversation on one frequency. There is no special broad
 ### Hosting and joining
 
 - **Host**: Call CQ → **Roundtable**, name the table, **Call CQ**. Your whistle and CQ invite others; Whistlestop sends a CALL packet with the table's name. The CQ keeps cycling to invite more stations, but never on top of the table: table messages wait while your whistle is on the air, and the next whistle waits until table traffic has gone out. Once the table speeds up beyond DATAC3 the CQ ends by itself (the Log says so), because stations still listening for calls at DATAC3 couldn't copy its CALL packets.
-- **Join**: when a Roundtable CALL is heard, it appears under **Heard** with **Join**. Or type the name in the Roundtable tab and press **Join here** (you must be on the host's frequency). Both are off during a 1:1 link: a Roundtable switches Mercury to broadcast modes, which would cut the link. Disconnect first.
+- **Join**: when a Roundtable CALL is heard, it appears under **Heard** with **Join**. The host's CQ row shows **Join** too (not Answer): answering a Roundtable's CQ means joining the table, as auto-answer does, not a 1:1 call that would take the host away from it. While the pointer is over the **Heard** list its rows stay where they are, so a station heard again can't move a row under your click; new ones are added at the bottom, and the newest-first order returns when the pointer leaves. Or type the name in the Roundtable tab and press **Join here** (you must be on the host's frequency). Both are off during a 1:1 link: a Roundtable switches Mercury to broadcast modes, which would cut the link. Disconnect first.
 - After you **Leave**, Mercury goes back to listening in DATAC3, the calling mode, once your goodbye has gone out (a table that sped up would otherwise leave you deaf to calls).
 - **Calling CQ again for your own table** (after its CQ ended) keeps the table as it is: who's there and what was said.
 - **While you're at a table**, Whistlestop won't take you away from it: **Connect**, **Answer**, **Search** and **Call CQ** for a 1:1 chat (or for another table) are greyed out (on the desktop, hovering says why), and so is joining another table; the station refuses them with "you're at the Roundtable …: leave it first" if asked another way. The automation waits too: the schedule doesn't retune the radio, no Station ID goes out, and the Depot doesn't connect by itself to deliver or collect mail. If another station connects to you anyway (Mercury answers calls by itself), your table messages, resend requests and the host's speed changes wait until that link ends.
@@ -361,7 +361,7 @@ Loop guards: each message carries a hop count, and at most **3** relay stations 
 Once linked, either station can ask to **move the link** to another frequency, to get off a busy channel or to make room for a long transfer. On the link card, type a frequency in **↔ Move this link to** (kHz) and press **Ask**.
 
 - The other station decides by **its own rules** (below) and answers.
-- If it agrees, both stations retune a moment later. The answer has crossed by then, and Mercury's ARQ resends anything lost in the gap. The link carries on at the new frequency.
+- If it agrees, both stations retune a moment later. The answer has crossed by then, and Mercury's ARQ resends anything lost in the gap. The link carries on at the new frequency. Each station then reads its dial back: many radios don't answer a frequency command, so one lost on the CAT line would leave the radio where it was. If the dial isn't on the new frequency, Whistlestop tunes again, up to three times ("⚠ The radio is on …, not …: tuning again"), and if it still won't take, the Log says "⚠ QSY to … failed" instead of claiming the move. The same check is made when the link ends and the station goes back to its home frequency.
 - The link card shows "on … with …, back to … when the link ends". When the link ends, for any reason, **both stations go back** to where they were.
 - If it refuses, you see why ("I only QSY within 20m", "outside my digital segments"…). If it doesn't answer within **90 s**, the request is dropped ("No answer to the QSY request…") and you can ask again.
 - The box takes kHz (14106.5) or MHz (14.1065), like the Tune box.
@@ -659,7 +659,7 @@ The QMX has its own list: see "QRP Labs QMX" above. Meter readings come from eac
 
 ### The SWR watch
 
-Whenever the radio transmits (a CQ whistle, Mercury data, a tune carrier), Whistlestop reads **SWR**, **ALC** and **power out** from the radio, if it reports them. It keeps the highest SWR of each transmission:
+Whenever the radio transmits (a CQ whistle, Mercury data, a tune carrier), Whistlestop reads **SWR**, **ALC** and **power out** from the radio, if it reports them. It keeps each transmission's SWR: the second-highest reading of it, so one odd reading taken as the power ramps up or down doesn't count (a real mismatch reads high all through). A transmission with a single reading keeps that one.
 
 - The **Radio** card and the Radio Controls window show it (**SWR 1.3**).
 - If it's above your **SWR limit** (default **2.0 : 1**), the reading turns red and the log warns: "High SWR: 2.8 on 40m (limit 2.0)".

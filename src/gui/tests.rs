@@ -416,3 +416,28 @@ fn typed_frequencies_in_mhz_khz_or_hz() {
     assert_eq!(parse_freq("-14100"), None);
     assert_eq!(parse_freq(""), None);
 }
+
+/// While the pointer is over the Heard list, a station heard again keeps
+/// its row (it used to jump to the top, under the click: on the bench a
+/// Join meant for a table hit the CQ row's Answer).
+#[test]
+fn heard_rows_hold_still_under_the_pointer() {
+    let h = |call: &str, what: &str| engine::Heard {
+        at: engine::chrono_lite::Clock(0),
+        call: call.into(),
+        dial_hz: 7_102_000.0,
+        what: what.into(),
+        table: None,
+    };
+    let before = vec![h("NR5P", "CALL BENCH"), h("NR5P", "CQ"), h("K1ABC", "CQ")];
+    let drawn: Vec<(String, String)> = before.iter().map(|x| (x.call.clone(), x.what.clone())).collect();
+    // NR5P's CQ is heard again: newest first, it moves to the top...
+    let after = vec![h("NR5P", "CQ"), h("NR5P", "CALL BENCH"), h("K1ABC", "CQ"), h("W2NEW", "CQ")];
+    let order = |rows: Vec<&engine::Heard>| rows.iter().map(|r| format!("{} {}", r.call, r.what)).collect::<Vec<_>>();
+    assert_eq!(order(heard_rows(&after, &drawn, false))[0], "NR5P CQ");
+    // ...but not while the pointer is over the list; something new goes last.
+    assert_eq!(
+        order(heard_rows(&after, &drawn, true)),
+        vec!["NR5P CALL BENCH", "NR5P CQ", "K1ABC CQ", "W2NEW CQ"]
+    );
+}

@@ -16,7 +16,7 @@ use waterfall::Waterfall;
 use whistlestop::bandplan::{self, SearchScope};
 use whistlestop::config::Config;
 use whistlestop::e2e::{self, Policy};
-use whistlestop::engine::{self, Cmd, Dir, E2eView, Handle, State, Who, XferState};
+use whistlestop::engine::{self, Cmd, Dir, E2eView, Handle, Heard, State, Who, XferState};
 use whistlestop::modes::{self, Bandwidth};
 use whistlestop::protocol;
 
@@ -75,6 +75,25 @@ fn style(ctx: &egui::Context) {
         v.widgets.noninteractive.bg_stroke = Stroke::new(1.0, BORDER);
         v.widgets.hovered.bg_stroke = Stroke::new(1.0, BRASS.linear_multiply(0.6));
     });
+}
+
+/// The Heard rows to draw (up to 8): newest first, or, while the pointer
+/// is over them, in the order last drawn, with anything new after them.
+fn heard_rows<'a>(heard: &'a [Heard], last: &[(String, String)], hold: bool) -> Vec<&'a Heard> {
+    let newest: Vec<&Heard> = heard.iter().take(8).collect();
+    if !hold {
+        return newest;
+    }
+    let mut rows: Vec<&Heard> = last
+        .iter()
+        .filter_map(|(c, w)| heard.iter().find(|h| &h.call == c && &h.what == w))
+        .collect();
+    for h in newest {
+        if rows.len() < 8 && !rows.iter().any(|r| r.call == h.call && r.what == h.what) {
+            rows.push(h);
+        }
+    }
+    rows
 }
 
 fn card<R>(ui: &mut Ui, title: &str, add: impl FnOnce(&mut Ui) -> R) -> R {
@@ -167,6 +186,11 @@ pub struct App {
     h: Handle,
     /// Waterfall rows already shown (engine row counter).
     audio_seen: u64,
+    /// The Heard rows as last drawn (call, what), and whether the pointer
+    /// was over them: while it is, the rows keep their places (a station
+    /// heard again would otherwise jump to the top under the click).
+    heard_order: Vec<(String, String)>,
+    heard_hover: bool,
     rm: remote::RemoteWin,
     /// Operating a radio computer from here.
     client: Option<whistlestop::remote::Client>,
@@ -251,6 +275,8 @@ impl App {
         let first_run = !whistlestop::config::path().exists();
         let mut app = Self {
             audio_seen: 0,
+            heard_order: vec![],
+            heard_hover: false,
             rm: remote::RemoteWin { addr: cfg.remote_addr.clone(), ..Default::default() },
             client: None,
             connecting: None,
@@ -1059,7 +1085,16 @@ impl App {
             if s.heard.is_empty() && s.wide.hits.is_empty() {
                 ui.label(RichText::new("No CQs heard yet.").color(DIM));
             }
-            for h in s.heard.iter().take(8) {
+            let rows = heard_rows(&s.heard, &self.heard_order, self.heard_hover);
+            self.heard_order = rows.iter().map(|h| (h.call.clone(), h.what.clone())).collect();
+            let top = ui.cursor().min.y;
+            for h in rows {
+                // A Roundtable host's CQ row: answering it is joining its
+                // table (as auto-answer does), not a 1:1 call that would
+                // pull the host away from the table.
+                let table = h.table.clone().or_else(|| {
+                    s.heard.iter().find(|o| o.call == h.call && o.table.is_some() && (o.dial_hz - h.dial_hz).abs() < 100.0).and_then(|o| o.table.clone())
+                });
                 ui.horizontal(|ui| {
                     ui.label(RichText::new(h.at.hhmm()).monospace().small().color(DIM));
                     ui.label(RichText::new(&h.call).strong().color(TEXT));
@@ -1068,7 +1103,7 @@ impl App {
                         // To where the station was heard first (a search may
                         // have moved on since), like the phones.
                         let free = s.link.is_none() && s.calling.is_none() && s.table.is_none();
-                        if let Some(t) = &h.table {
+                        if let Some(t) = &table {
                             if free && ui.small_button("Join").help(&help::H_JOIN).clicked() {
                                 self.send(Cmd::SetFreq(h.dial_hz));
                                 self.send(Cmd::JoinTable(t.clone()));
@@ -1082,6 +1117,8 @@ impl App {
                     });
                 });
             }
+            let area = Rect::from_min_max(Pos2::new(ui.min_rect().min.x, top), Pos2::new(ui.min_rect().max.x, ui.cursor().min.y));
+            self.heard_hover = ui.ctx().pointer_hover_pos().is_some_and(|p| area.contains(p));
         });
     }
 

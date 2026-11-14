@@ -617,6 +617,21 @@ fn mark_unconfirmed(chat: &mut [ChatLine]) {
     }
 }
 
+/// The SWR of a transmission, from its readings: the second highest, so a
+/// single reading taken while the power ramps up or down (on the bench a
+/// QMX read 2.2 once, 1.1 the rest of the time, and 9.98 as power fell
+/// away) doesn't count; a real mismatch reads high throughout. With one
+/// reading, that one.
+fn tx_swr(reads: &[f32]) -> Option<f32> {
+    let mut r: Vec<f32> = reads.iter().copied().filter(|v| v.is_finite() && *v >= 1.0).collect();
+    r.sort_by(|a, b| b.total_cmp(a));
+    match r.len() {
+        0 => None,
+        1 => Some(r[0]),
+        _ => Some(r[1]),
+    }
+}
+
 /// See `Engine::busy_now`: a BUSY that came on within `OWN_TAIL` of our own
 /// key-up is set aside until `OWN_TAIL_HOLD` after it.
 fn busy_counts(busy: bool, from: Option<Instant>, own_end: Option<Instant>, now: Instant) -> bool {
@@ -869,6 +884,8 @@ struct Station {
     last_ext_poll: Instant,
     tx_was: bool,
     swr_peak: f32,
+    /// Every SWR reading of the transmission (see `tx_swr`).
+    swr_reads: Vec<f32>,
     pending_tune: bool,
     last_autotune: Option<(Instant, Option<&'static str>)>,
     monitor: Option<Arc<Mutex<audio::Monitor>>>,
@@ -1155,6 +1172,7 @@ impl Station {
             last_ext_poll: Instant::now(),
             tx_was: false,
             swr_peak: 0.0,
+            swr_reads: vec![],
             pending_tune: false,
             last_autotune: None,
             monitor: None,
@@ -1663,6 +1681,33 @@ impl Station {
         self.watch_pending = None;
     }
 
+    /// Tune, then read the dial back and try again if the radio didn't
+    /// take it. Kenwood- and Yaesu-style radios don't answer a frequency
+    /// command, so one lost to RF on the CAT line would otherwise go
+    /// unnoticed (seen on the bench: a QSY logged "moved" while the radio
+    /// stayed put). Used where a wrong dial loses the link: QSY.
+    async fn tune_checked(&mut self, hz: f64) -> anyhow::Result<()> {
+        for attempt in 1..=3 {
+            self.tune(hz).await?;
+            let Some(r) = self.rig.as_mut() else { return Ok(()) };
+            if r.is_sim() {
+                return Ok(());
+            }
+            tokio::time::sleep(Duration::from_millis(250)).await;
+            match r.freq().await {
+                Ok(f) if (f - hz).abs() <= 10.0 => return Ok(()),
+                Ok(f) => self.log(format!(
+                    "⚠ The radio is on {:.3} kHz, not {:.3}: tuning again ({attempt} of 3)",
+                    f / 1e3,
+                    hz / 1e3
+                )),
+                // Can't tell: a read lost the same way. Ask once more.
+                Err(e) => self.log(format!("⚠ Couldn't read the dial back ({e}); tuning again ({attempt} of 3)")),
+            }
+        }
+        anyhow::bail!("the radio didn't take {:.3} kHz after three tries", hz / 1e3)
+    }
+
     async fn tune(&mut self, hz: f64) -> anyhow::Result<()> {
         if let Some(r) = self.rig.as_mut() {
             r.set_freq(hz).await?;
@@ -1698,6 +1743,7 @@ impl Station {
             };
             if let Some(v) = swr {
                 self.swr_peak = self.swr_peak.max(v);
+                self.swr_reads.push(v);
             }
             self.set(|g| {
                 g.rig_ext.swr = swr;
@@ -1706,8 +1752,9 @@ impl Station {
             });
         } else if self.tx_was {
             // A transmission just ended.
-            let peak = self.swr_peak;
+            let peak = tx_swr(&self.swr_reads).unwrap_or(self.swr_peak);
             self.swr_peak = 0.0;
+            self.swr_reads.clear();
             if peak >= 1.0 {
                 let band = bandplan::band_of(self.dial());
                 self.set(|g| g.rig_ext.swr_last_tx = Some(peak));
@@ -5911,7 +5958,7 @@ impl Station {
         {
             self.qsy_home = None;
             if self.peer.is_none() {
-                self.tune(home).await?;
+                self.tune_checked(home).await?;
                 self.log(format!(
                     "↔ QSY over: back from {:.3} to {:.3} kHz",
                     at / 1e3,
@@ -5941,7 +5988,12 @@ impl Station {
             } else if due {
                 self.qsy_move = None;
                 let home = self.qsy.map(|q| q.0).unwrap_or(self.dial());
-                self.tune(hz).await?;
+                if let Err(e) = self.tune_checked(hz).await {
+                    // Stay put and say so: "moved" would be untrue, and the
+                    // other station has gone, so the link is likely lost.
+                    self.log(format!("⚠ QSY to {:.3} kHz failed: {e}", hz / 1e3));
+                    return Err(e);
+                }
                 self.qsy = Some((home, hz));
                 self.qsy_tuned = false;
                 self.qsy_fail = false;
@@ -6888,6 +6940,15 @@ mod tests {
         assert_eq!(secs(5.0), 180);
         assert_eq!(bye_wait(None), Duration::from_secs(30));
         assert_eq!(bye_wait(Some(0.0)), Duration::from_secs(30));
+    }
+
+    #[test]
+    fn one_odd_swr_reading_is_not_the_transmission_s_swr() {
+        assert_eq!(tx_swr(&[1.09, 2.23, 1.08, 1.09]), Some(1.09));
+        assert_eq!(tx_swr(&[3.1, 2.9, 3.0]), Some(3.0), "a real mismatch reads high throughout");
+        assert_eq!(tx_swr(&[2.5]), Some(2.5));
+        assert_eq!(tx_swr(&[]), None);
+        assert_eq!(tx_swr(&[0.0, f32::NAN]), None);
     }
 
     #[test]

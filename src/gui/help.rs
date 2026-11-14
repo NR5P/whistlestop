@@ -177,7 +177,7 @@ pub const H_TUNE_TO: Topic = (
 );
 pub const H_ANSWER: Topic = ("Answer", "Connect to this station: Mercury places the call, and the Chat tab opens when the link is up. Not offered while you're at a Roundtable: leave it first.", "Chat");
 pub const H_JOIN: Topic =
-    ("Join", "Join this Roundtable on the current frequency. The host hears your report and may adjust the table's speed. Not offered during a 1:1 link (joining would cut it).", "Roundtables");
+    ("Join", "Join this Roundtable on the current frequency (a table host's CQ row offers Join too, not Answer). The host hears your report and may adjust the table's speed. Not offered during a 1:1 link (joining would cut it). The rows hold still while the pointer is over them.", "Roundtables");
 pub const H_LOCK: Topic = ("Lock on", "Tune the radio to this SDR hit and fine-lock using the radio's own audio, then wait for the CQ.", "Finding stations");
 
 pub const BW_BUTTONS: Topic = (
