@@ -102,7 +102,11 @@ impl SimRadio {
             }
             ("SM", "") => self.reply("SM013;"),
             ("SW", "") => self.reply(if self.ptt { "SW163;" } else { "SW;" }),
-            ("PC", "") => self.reply(if self.ptt { "PC45;" } else { "PC00;" }),
+            ("PC", "") => {
+                // `PCTX`: what it measures while keyed (45 = 4.5 W).
+                let p = if self.ptt { self.vals.get("PCTX").cloned().unwrap_or("45".into()) } else { "00".into() };
+                self.reply(&format!("PC{p};"));
+            }
             ("AG", "" | "0") => self.reply("AG0054;"),
             _ => self.reply("?;"),
         }
@@ -473,11 +477,30 @@ mod tests {
         // SM; is dB: 13 dB above S0 is a little over S2.
         assert!((d.get_level("STRENGTH").unwrap() + 41.0).abs() < 0.01);
         assert!(d.get_level("SWR").is_err(), "no SWR on receive");
+        // Keyed but no power going out yet (or any more): its meter can't
+        // be trusted then.
+        d.set_ptt(true).unwrap();
+        assert!((d.get_level("SWR").unwrap() - 1.63).abs() < 0.001);
+        d.set_ptt(false).unwrap();
         d.set_ptt(true).unwrap();
         assert!((d.get_level("SWR").unwrap() - 1.63).abs() < 0.001);
         assert!((d.get_level("RFPOWER_METER").unwrap() - 0.9).abs() < 0.001, "4.5 W of 5");
         d.set_ptt(false).unwrap();
         assert!(d.set_level("RFPOWER", 0.5).is_err());
+    }
+
+    #[test]
+    fn qmx_swr_only_while_power_goes_out() {
+        // At the end of a transmission the power falls to nothing while the
+        // QMX still says it's keyed, and its SWR meter reads 9.98 into a
+        // dummy load: that isn't an SWR.
+        let mut sim = SimRadio::new(Kind::Qmx { ssb_tx: true });
+        sim.vals.insert("PCTX".into(), "00".into());
+        let mut d = Kenwood::new(Box::new(sim), "020", false, 5.0).unwrap();
+        d.set_ptt(true).unwrap();
+        assert!(d.ptt().unwrap());
+        assert!(d.get_level("SWR").is_err());
+        d.set_ptt(false).unwrap();
     }
 
     #[test]

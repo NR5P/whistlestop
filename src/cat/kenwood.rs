@@ -434,6 +434,14 @@ impl Driver for Kenwood {
                 if r.len() <= 2 {
                     bail!("the QMX reads SWR only while transmitting");
                 }
+                // As the power falls away at the end of a transmission its
+                // meter reads nonsense (9.98 into a dummy load that reads
+                // 1.09 a moment before): only trust it while power is going
+                // out. PC; is tenths of a watt.
+                let pc = num(&self.q("PC;", "PC")?, 2, None)?;
+                if pc < 2 {
+                    bail!("the QMX reads SWR only while power is going out");
+                }
                 num(&r, 2, None)? as f32 / 100.0
             }
             "STRENGTH" => {
