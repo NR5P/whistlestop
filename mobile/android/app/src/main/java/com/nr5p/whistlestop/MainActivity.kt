@@ -341,7 +341,10 @@ private fun OperateScreen(station: Station, s: EngineState) {
                         Text(h.call, color = C.text, fontWeight = FontWeight.SemiBold)
                         Text("${Fmt.dial(h.dialHz)} kHz · ${h.what} · ${Fmt.utc(h.at)}", color = C.dim, fontSize = 12.sp, maxLines = 1)
                     }
-                    val table = h.table
+                    // A Roundtable host's CQ row: answering it is joining its table.
+                    val table = h.table ?: s.heard.firstOrNull {
+                        it.call == h.call && it.table != null && kotlin.math.abs(it.dialHz - h.dialHz) < 100.0
+                    }?.table
                     if (table != null) {
                         BrassButton("Join", Modifier.width(110.dp).semantics { contentDescription = "Join $table" }, color = C.teal,
                             enabled = !busy && s.table == null) {

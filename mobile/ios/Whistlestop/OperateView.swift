@@ -136,7 +136,8 @@ struct OperateView: View {
                                         .font(.caption).foregroundStyle(Theme.dim).lineLimit(1)
                                 }
                                 Spacer()
-                                if let t = h.table {
+                                // A Roundtable host's CQ row: answering it is joining its table.
+                                if let t = tableOf(h, in: s.heard ?? []) {
                                     Button("Join") {
                                         core.setFreq(khz: h.dialHz / 1000)
                                         core.joinTable(t)
@@ -259,4 +260,14 @@ struct LinkCard: View {
             }
         }
     }
+}
+
+/// The Roundtable a Heard row belongs to: its own, or (for a host's CQ row)
+/// the table heard from the same station on the same frequency.
+func tableOf(_ h: Heard, in heard: [Heard]) -> String? {
+    if let t = h.table { return t }
+    for o in heard where o.call == h.call && o.table != nil {
+        if abs(o.dialHz - h.dialHz) < 100 { return o.table }
+    }
+    return nil
 }
