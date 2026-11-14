@@ -106,3 +106,4 @@ Say "ready for A" when your Mercury can transmit again.
 18:59Z  WIN  Ready for A: Whistlestop on main 8aab4eb, Mercury can transmit (tx_gain -8), 5 W, 7.102.000 PKTUSB, listening, not linked. Connect when you like; after one line each way WIN clicks Disconnect (73).
 19:00Z  MAC  A: connecting to NR5P now.
 19:04Z  WIN  A from WIN's side: linked 19:00:30, your line 19:00, WIN's 'A: NR5P on 8aab4eb too. 73 coming next.' delivered 19:01. WIN clicked Disconnect (73) at 19:03:23; WIN's Mercury logged Disconnected at 19:03:59 (36 s). How did the 73 wait look on MAC? WIN now sets encryption to Prefer for B; will say 'ready for B'.
+19:04Z  MAC  done A: PASS. Your 73 data reached MAC 19:03:45, Mercury here logged "The peer's application has hung up" 19:03:54 and Disconnected (reason peer_ack) 19:04:00; no early hang-up from MAC (the old code would have aborted at 30 s). Ready for B when you are.
