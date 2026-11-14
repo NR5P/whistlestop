@@ -595,10 +595,11 @@ impl Handle {
     }
 }
 
-/// How long to wait for the other station's disconnect after its 73. On
-/// the bench, over a weak link in Mercury's slowest mode (MFSK, 38 bps),
-/// it took 30 s to arrive and crossed our own hang-up; the faster modes
-/// take about 20 s.
+/// How long to wait for the other station's disconnect after its 73, from
+/// the slowest speed the link has run at. On the bench, over weak links
+/// that had dropped to Mercury's slowest mode (MFSK, 38 bps), it took over
+/// 30 s to arrive, even when the latest frame was a faster mode, and
+/// crossed our own hang-up; links that stay fast take about 20 s.
 fn bye_wait(bps: Option<f64>) -> Duration {
     match bps {
         Some(b) if b > 0.0 && b < 100.0 => Duration::from_secs(75),
@@ -899,6 +900,9 @@ struct Station {
     /// (see `OWN_TAIL`).
     busy_from: Option<Instant>,
     own_tx_end: Option<Instant>,
+    /// The slowest speed this link has run at (see `bye_wait`); Mercury's
+    /// reported mode changes frame by frame, so the latest one says little.
+    link_min_bps: Option<f64>,
     /// Since when an unattended transmission has been waiting for the
     /// channel to clear (and when it last asked: a gap starts it over).
     busy_wait: Option<(Instant, Instant)>,
@@ -1189,6 +1193,7 @@ impl Station {
             chan_busy: false,
             busy_from: None,
             own_tx_end: None,
+            link_min_bps: None,
             busy_wait: None,
             auto_pending: None,
             host_snr: None,
@@ -3131,6 +3136,7 @@ impl Station {
                 };
                 self.quiet_watch();
                 self.leaving_since = None;
+                self.link_min_bps = None;
                 self.auto_call = None;
                 self.busy_detect(false).await;
                 self.stop_search("— linked");
@@ -3244,6 +3250,7 @@ impl Station {
                 self.quiet_watch_for(30.0);
                 self.link_auto = None;
                 self.leaving_since = None;
+                self.link_min_bps = None;
                 self.link_ended_at = Some(Instant::now());
                 // Forget the session keys (they wipe themselves on drop).
                 self.e2e = None;
@@ -5686,6 +5693,9 @@ impl Station {
 
         if self.peer.is_some() {
             let bps = self.est.bps(self.bw);
+            if bps > 0.0 {
+                self.link_min_bps = Some(self.link_min_bps.map_or(bps, |m| m.min(bps)));
+            }
             let mode = self.est.reported_mode;
             self.set(|g| {
                 g.est_bps = bps;
@@ -5872,7 +5882,7 @@ impl Station {
         if let Some(at) = self.bye_at {
             if self.peer.is_none() {
                 self.bye_at = None;
-            } else if at.elapsed() > bye_wait(self.st.lock().unwrap().link.as_ref().map(|l| l.bps)) {
+            } else if at.elapsed() > bye_wait(self.link_min_bps) {
                 self.bye_at = None;
                 self.log("The other station said 73 but its disconnect didn't arrive; hanging up from here".into());
                 // ABORT, not DISCONNECT: they've gone (after a QSY, maybe to
