@@ -14,7 +14,7 @@ use crate::protocol::*;
 use crate::rig::{Rig, RigStatus, RigctldClient};
 use crate::sdr;
 use crate::tnc::{Tnc, TncEvent, parse_connected};
-use crate::whistle::{Detector, FS, TrackDetector, WhistleParams, looks_like_data, watch_confirms, whistle};
+use crate::whistle::{Detector, FS, SURE_Z, TrackDetector, WhistleParams, looks_like_data, watch_confirms, whistle};
 use crate::ziputil;
 use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
@@ -709,13 +709,16 @@ enum SearchPhase {
         from: u64,
     },
     /// Retuned onto a whistle the scan found (`coarse` Hz off the channel):
-    /// measure it finely. `again`: this is the second listen.
+    /// measure it finely. `again`: this is the second listen. `sure`: a look
+    /// scored it `SURE_Z` or more, which only a whistle does: if it's gone
+    /// after the retune, it has ended and its CQ is coming.
     Verify {
         target: f64,
         from: u64,
         coarse: f64,
         again: bool,
         hops: u8,
+        sure: bool,
     },
     WaitCq {
         until: Instant,
@@ -2546,6 +2549,7 @@ impl Station {
                                 coarse: h.offset_hz,
                                 again: false,
                                 hops: 0,
+                                sure: h.z >= SURE_Z,
                             };
                         }
                         Some(h) if h.z >= TrackDetector::MAYBE && hold_s > dwell => {
@@ -2567,6 +2571,7 @@ impl Station {
                                 coarse: h.offset_hz,
                                 again: false,
                                 hops: 0,
+                                sure: h.z >= SURE_Z,
                             };
                         }
                         _ => next_channel = true,
@@ -2579,8 +2584,9 @@ impl Station {
                 coarse,
                 again,
                 hops,
+                sure,
             } => {
-                let (target, from, coarse, again, hops) = (*target, *from, *coarse, *again, *hops);
+                let (target, from, coarse, again, hops, sure) = (*target, *from, *coarse, *again, *hops, *sure);
                 let got = if from == 0 {
                     None
                 } else {
@@ -2595,6 +2601,7 @@ impl Station {
                         coarse,
                         again,
                         hops,
+                        sure,
                     };
                 } else if let Some(x) = got {
                     // Now within a few tens of hertz: the matched filter
@@ -2617,7 +2624,15 @@ impl Station {
                     // strong signal whose chirps don't line up and that
                     // doesn't own its track is data.
                     let data = hit.filter(|h| looks_like_data(h, det.as_ref()));
-                    let coarse_now = hit.filter(|h| h.offset_hz.abs() <= reach);
+                    // Lock on only to a confirmed whistle, as the whistle
+                    // watch does: its chirps line up, or the scan's score is
+                    // one only a whistle reaches. On 26 recordings of real
+                    // bands none of the 33 looks that passed the scan here
+                    // was confirmed, while 95 % of whistles at -10 dB were
+                    // (the rest get a second listen). Live, the search had
+                    // locked on and waited for a CQ on busy 15 m and 40 m.
+                    let lined = det.as_ref().is_some_and(|d| d.lined_up());
+                    let coarse_now = hit.filter(|h| h.offset_hz.abs() <= reach && (lined || h.z >= SURE_Z));
                     let fine = det.map(|d| d.offset_hz);
                     let v = match (coarse_now, fine) {
                         (Some(h), Some(f)) => {
@@ -2629,7 +2644,7 @@ impl Station {
                             })
                         }
                         (Some(h), None) => Some(h.offset_hz),
-                        (None, _) => self.detector.detect_near(&x, 60.0).map(|d| d.offset_hz),
+                        (None, _) => self.detector.detect_near(&x, 60.0).filter(|d| d.lined_up()).map(|d| d.offset_hz),
                     };
                     let heard_something = coarse_now.is_some()
                         || self
@@ -2666,6 +2681,7 @@ impl Station {
                             coarse: coarse + h.offset_hz,
                             again: false,
                             hops: hops + 1,
+                            sure: sure || h.z >= SURE_Z,
                         };
                     } else {
                         match v {
@@ -2688,6 +2704,7 @@ impl Station {
                                     // Counts as a hop: if the whistle has
                                     // ended meanwhile, wait for its CQ here.
                                     hops: hops + 1,
+                                    sure,
                                 };
                             }
                             // Two looks agree it's that far off: go there and
@@ -2702,6 +2719,7 @@ impl Station {
                                     coarse,
                                     again: false,
                                     hops: hops + 1,
+                                    sure,
                                 };
                             }
                             Some(off) => {
@@ -2718,31 +2736,28 @@ impl Station {
                                     until: Instant::now() + Duration::from_secs(45),
                                 };
                             }
-                            _ if !again && heard_something => {
-                                // Faded, or the pattern straddled the window: listen once more.
-                                s.phase = SearchPhase::Verify {
-                                    target,
-                                    from: audio::now_count(&self.rx).max(1),
-                                    coarse,
-                                    again: true,
-                                    hops,
-                                };
-                            }
-                            // Reached by walking (two looks agreed where it is),
-                            // and now silent: the whistle has likely ended and its
-                            // CQ is about to follow. Wait for it here.
-                            _ if hops > 0 => {
-                                self.log(format!("Whistle ended; staying on {:.3} kHz (the scan's estimate) for the CQ…", target / 1e3));
-                                s.phase = SearchPhase::WaitCq {
-                                    until: Instant::now() + Duration::from_secs(20),
-                                };
-                            }
-                            _ => {
-                                self.log(
-                                    "Whistle not confirmed after retuning; resuming search".into(),
-                                );
-                                next_channel = true;
-                            }
+                            None => match unconfirmed(again, heard_something, hops, sure) {
+                                Unconfirmed::ListenAgain => {
+                                    s.phase = SearchPhase::Verify {
+                                        target,
+                                        from: audio::now_count(&self.rx).max(1),
+                                        coarse,
+                                        again: true,
+                                        hops,
+                                        sure,
+                                    };
+                                }
+                                Unconfirmed::WaitHere => {
+                                    self.log(format!("Whistle ended; staying on {:.3} kHz (the scan's estimate) for the CQ…", target / 1e3));
+                                    s.phase = SearchPhase::WaitCq {
+                                        until: Instant::now() + Duration::from_secs(20),
+                                    };
+                                }
+                                Unconfirmed::Resume => {
+                                    self.log("Whistle not confirmed after retuning; resuming search".into());
+                                    next_channel = true;
+                                }
+                            },
                         }
                     }
                 }
@@ -6644,6 +6659,7 @@ impl Station {
                 coarse: 0.0,
                 again: false,
                 hops: 0,
+                sure: false,
             },
             scope: WIDE_SCOPE.into(),
             resume,
@@ -6794,6 +6810,35 @@ pub const ANSWER_AFTER_CQ_S: f64 = 4.5;
 /// A fine correction at least this big right after retuning onto a whistle
 /// is measured again before locking (the scan detector is good to ~10 Hz).
 pub const RECHECK_HZ: f64 = 25.0;
+
+/// What a search does when the look after retuning onto a whistle finds
+/// none.
+#[derive(Debug, PartialEq)]
+enum Unconfirmed {
+    /// Faded, or the pattern straddled the window: listen once more.
+    ListenAgain,
+    /// The whistle has ended, and its CQ is about to follow: wait for it.
+    WaitHere,
+    /// It wasn't a whistle after all.
+    Resume,
+}
+
+/// `again`: this was already the second look; `heard`: a hint of a whistle
+/// in it; `hops`: retunes since the first find (reached by walking or
+/// re-measuring, where two looks agreed); `sure`: a look scored it
+/// `SURE_Z` or more, which only a whistle does. A search that reaches the
+/// caller in the whistle's last second or two finds it just as it stops:
+/// on the bench a whistle scored 22, the look after the retune heard
+/// nothing, and the search dropped it, though its CQ came next.
+fn unconfirmed(again: bool, heard: bool, hops: u8, sure: bool) -> Unconfirmed {
+    if !again && heard {
+        Unconfirmed::ListenAgain
+    } else if hops > 0 || sure {
+        Unconfirmed::WaitHere
+    } else {
+        Unconfirmed::Resume
+    }
+}
 
 /// Link packets that arrive before CONNECTED are kept this long for it
 /// (Mercury's data port can beat its control port by a moment).
@@ -7481,6 +7526,25 @@ mod tests {
         assert!(!a.missing_quiet(Duration::ZERO).is_empty());
         a.forget_sender("AA1A");
         assert!(a.missing_quiet(Duration::ZERO).is_empty());
+    }
+
+    /// After retuning onto a whistle the search heard nothing: a hint means
+    /// listen again; a whistle that two looks placed, or one that scored as
+    /// only a whistle does, has ended and its CQ is coming; anything else
+    /// wasn't a whistle.
+    #[test]
+    fn an_unconfirmed_whistle_is_waited_for_only_when_sure() {
+        use Unconfirmed::*;
+        assert_eq!(unconfirmed(false, true, 0, false), ListenAgain);
+        assert_eq!(unconfirmed(false, true, 0, true), ListenAgain);
+        assert_eq!(unconfirmed(false, false, 0, true), WaitHere);
+        assert_eq!(unconfirmed(true, true, 0, true), WaitHere);
+        assert_eq!(unconfirmed(false, false, 1, false), WaitHere);
+        assert_eq!(unconfirmed(false, false, 0, false), Resume);
+        assert_eq!(unconfirmed(true, true, 0, false), Resume);
+        // A whistle at +8 dB scores about 20-40: sure. A busy band's best
+        // look, 10; Mercury's MFSK, 12: not.
+        assert!(SURE_Z > 12.0 && SURE_Z < 20.0);
     }
 
     /// A caller further off than one ambiguity period (the scan reaches

@@ -1050,6 +1050,18 @@ mod recorded_calibration_tests {
                 let w: Vec<f64> = whistle(band.len() as f64 / 8000.0 + 1.0, &p).iter().map(|v| *v as f64).collect();
                 let sig_p0 = w.iter().map(|v| v * v).sum::<f64>() / w.len() as f64;
                 let mut t = TrackDetector::new(p);
+                let mut d = crate::whistle::Detector::new(p);
+                let found_z = TrackDetector::found(1.2);
+                // Of the 1.2 s looks over `found` (the search's check after
+                // retuning): how many the watch's test confirms.
+                let mut conf = vec![];
+                let mut confirm = |t: &mut TrackDetector, d: &mut crate::whistle::Detector, b: &[f64]| -> Option<bool> {
+                    let h = t.scan(b).filter(|h| h.z >= found_z)?;
+                    Some(d.detect(b).is_some_and(|det| crate::whistle::watch_confirms(&h, &det)))
+                };
+                let n12 = 9600;
+                let c: Vec<bool> = band.chunks_exact(n12).filter_map(|b| confirm(&mut t, &mut d, b)).collect();
+                conf.push((c.iter().filter(|v| **v).count(), c.len()));
                 let mut out = vec![];
                 for secs in [0.5, 1.2, 2.0] {
                     let n = (secs * 8000.0) as usize;
@@ -1059,6 +1071,7 @@ mod recorded_calibration_tests {
                     for snr in snrs {
                         let g = (noise_p * 10f64.powf(snr / 10.0) / sig_p0).sqrt();
                         let mut zs = vec![];
+                        let mut cw = (0, 0);
                         for (k, off) in [-900.0, -450.0, 0.0, 450.0, 900.0].into_iter().enumerate() {
                             let sh = ssb_channel(&w[..band.len()], off, crate::whistle::FS, (0.0, 4000.0));
                             let mix: Vec<f64> = band.iter().zip(&sh).map(|(b, s)| b + g * s).collect();
@@ -1067,12 +1080,24 @@ mod recorded_calibration_tests {
                             for b in mix.chunks_exact(n).skip(k * per).take(per) {
                                 zs.push(t.scan(b).filter(|h| (h.offset_hz - off).abs() < 60.0).map(|h| h.z).unwrap_or(f64::MIN));
                             }
+                            // After retuning onto it (offset 0), 1.2 s looks.
+                            if secs == 1.2 && off == 0.0 {
+                                for b in mix.chunks_exact(n12).take(40) {
+                                    if let Some(c) = confirm(&mut t, &mut d, b) {
+                                        cw.0 += usize::from(c);
+                                    }
+                                    cw.1 += 1;
+                                }
+                            }
+                        }
+                        if secs == 1.2 {
+                            conf.push(cw);
                         }
                         found.push((ths.iter().map(|th| zs.iter().filter(|z| **z >= *th).count()).collect::<Vec<_>>(), zs.len()));
                     }
                     out.push((falses, z0.len(), found));
                 }
-                (f.file_name().unwrap().to_string_lossy().to_string(), out)
+                (f.file_name().unwrap().to_string_lossy().to_string(), out, conf)
             })).collect();
             hs.into_iter().map(|h| h.join().unwrap()).collect()
         });
@@ -1081,7 +1106,7 @@ mod recorded_calibration_tests {
             eprintln!("\n{secs} s looks: % of looks over each threshold {ths:?}");
             let mut tot = vec![0; ths.len()];
             let mut looks = 0;
-            for (name, out) in &per {
+            for (name, out, _) in &per {
                 let (f, n, _) = &out[si];
                 eprintln!("  {name:>34}: {}", f.iter().map(|c| format!("{:5.1}", pct(*c, *n))).collect::<Vec<_>>().join(" "));
                 tot.iter_mut().zip(f).for_each(|(t, c)| *t += c);
@@ -1092,7 +1117,7 @@ mod recorded_calibration_tests {
                 let mut tot = vec![0; ths.len()];
                 let mut tries = 0;
                 let mut worst = vec![100.0f64; ths.len()];
-                for (_, out) in &per {
+                for (_, out, _) in &per {
                     let (c, n) = &out[si].2[k];
                     tot.iter_mut().zip(c).for_each(|(t, c)| *t += c);
                     tries += n;
@@ -1100,6 +1125,22 @@ mod recorded_calibration_tests {
                 }
                 eprintln!("  {:>34}: {}   (worst band {})", format!("WHISTLE {snr:+} dB found"), tot.iter().map(|c| format!("{:5.1}", pct(*c, tries))).collect::<Vec<_>>().join(" "), worst.iter().map(|w| format!("{w:.0}")).collect::<Vec<_>>().join(" "));
             }
+        }
+        // The search's check after retuning: of the 1.2 s looks over
+        // `found`, those the watch's test (chirps line up, or SURE_Z) takes.
+        eprintln!("\n1.2 s looks over found(): confirmed by the watch's test (lined up or SURE_Z)");
+        let mut tot = vec![(0, 0); 1 + snrs.len()];
+        for (name, _, conf) in &per {
+            eprintln!("  {name:>34}: band alone {} of {} hits", conf[0].0, conf[0].1);
+            tot.iter_mut().zip(conf).for_each(|(t, c)| {
+                t.0 += c.0;
+                t.1 += c.1;
+            });
+        }
+        eprintln!("  {:>34}: {} of {} hits ({:.0} %)", "BAND ALONE, ALL", tot[0].0, tot[0].1, pct(tot[0].0, tot[0].1));
+        for (k, snr) in snrs.into_iter().enumerate() {
+            let (c, n) = tot[k + 1];
+            eprintln!("  {:>34}: {c} of {n} looks found and confirmed ({:.0} %)", format!("WHISTLE {snr:+} dB, on it"), pct(c, n));
         }
     }
 }
