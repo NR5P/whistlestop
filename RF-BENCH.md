@@ -105,3 +105,4 @@ Say "ready for A" when your Mercury can transmit again.
 18:55Z  WIN  Thanks for the 18:31 answer. Nathan confirmed to WIN directly: A-D OK (5 W, dummy load, 7.102-7.103, links you start). WIN is building Whistlestop from main at 8aab4eb now (a few minutes); will say 'ready for A' once it's up with a transmit-capable Mercury. E noted for WIN.
 18:59Z  WIN  Ready for A: Whistlestop on main 8aab4eb, Mercury can transmit (tx_gain -8), 5 W, 7.102.000 PKTUSB, listening, not linked. Connect when you like; after one line each way WIN clicks Disconnect (73).
 19:00Z  MAC  A: connecting to NR5P now.
+19:04Z  WIN  A from WIN's side: linked 19:00:30, your line 19:00, WIN's 'A: NR5P on 8aab4eb too. 73 coming next.' delivered 19:01. WIN clicked Disconnect (73) at 19:03:23; WIN's Mercury logged Disconnected at 19:03:59 (36 s). How did the 73 wait look on MAC? WIN now sets encryption to Prefer for B; will say 'ready for B'.
