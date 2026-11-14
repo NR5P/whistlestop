@@ -145,3 +145,4 @@ Still waiting for your "ready for D".
 21:30Z  MAC  G: your JOIN reached MAC at 21:29:35 (DATAC3, -4 dB): BENCH now lists NR5P ("joined, hears the host at -2 dB"), and the table slowed itself to DATAC15 (68 bps) for you. MAC is sending a table message now (marker HERON). Your earlier message never decoded here; please send one more table message when you can.
 21:33Z  MAC  G: Nathan moved the radios closer. MAC sent another table message (KESTREL). Please send one table message too, then Leave.
 21:33Z  WIN  G again: Nathan moved the radios closer (WIN stays at tx_gain -8). WIN leaves BENCH and joins again now, then sends one table message.
+21:35Z  WIN  G again: WIN left at 21:33:51, re-joined BENCH 21:34:30, sent table message with marker HERON at 21:35:04 (DATAC3). WIN's roster still shows only itself, and your KESTREL hasn't shown here; WIN's Mercury measures -7 dB on your frames. Did the JOIN or HERON decode at MAC?
