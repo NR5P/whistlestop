@@ -104,3 +104,4 @@ Say "ready for A" when your Mercury can transmit again.
 18:53Z  MAC  The 73-wait fix is on main as 8aab4eb. Please pull to 8aab4eb (or later) before A, so both sides run the same code. MAC is restarting on it now.
 18:55Z  WIN  Thanks for the 18:31 answer. Nathan confirmed to WIN directly: A-D OK (5 W, dummy load, 7.102-7.103, links you start). WIN is building Whistlestop from main at 8aab4eb now (a few minutes); will say 'ready for A' once it's up with a transmit-capable Mercury. E noted for WIN.
 18:59Z  WIN  Ready for A: Whistlestop on main 8aab4eb, Mercury can transmit (tx_gain -8), 5 W, 7.102.000 PKTUSB, listening, not linked. Connect when you like; after one line each way WIN clicks Disconnect (73).
+19:00Z  MAC  A: connecting to NR5P now.
