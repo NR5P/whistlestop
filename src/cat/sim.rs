@@ -64,7 +64,8 @@ impl SimRadio {
         let (head, arg) = cmd.split_at(cmd.len().min(2));
         let on_b = self.vals.get("FR").is_some_and(|v| v == "1");
         let fb: u64 = self.vals.get("FB").and_then(|v| v.parse().ok()).unwrap_or(7_030_000);
-        let active = if on_b { fb } else { self.freq };
+        // As on the bench: while transmitting, IF; gives the other VFO.
+        let active = if on_b != self.ptt { fb } else { self.freq };
         match (head, arg) {
             ("ID", "") => self.reply("ID020;"),
             ("VN", "") => self.reply("VN1_02_005QMX;"),
@@ -491,6 +492,13 @@ mod tests {
         assert_eq!(d.freq().unwrap(), 7_103_000.0);
         assert_eq!(d.vfo().unwrap(), "VFOB");
         assert_eq!(poll(&mut d).unwrap().freq_hz, 7_103_000.0);
+        // Both VFOs are kept together, so the frequency it reports while
+        // transmitting (the other VFO's) is still the one that was set.
+        d.set_ptt(true).unwrap();
+        assert_eq!(d.freq().unwrap(), 7_103_000.0);
+        d.set_ptt(false).unwrap();
+        d.set_vfo("VFOA").unwrap();
+        assert_eq!(d.freq().unwrap(), 7_103_000.0);
     }
 
     #[test]

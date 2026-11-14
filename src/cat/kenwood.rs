@@ -125,7 +125,11 @@ impl Kenwood {
             sm,
             qmx,
         };
-        k.freq().map_err(|e| anyhow!("{}: {e}", k.name))?;
+        let hz = k.freq().map_err(|e| anyhow!("{}: {e}", k.name))?;
+        if k.qmx {
+            // Bring its two VFOs together from the start (see set_freq).
+            k.set_freq(hz)?;
+        }
         Ok(k)
     }
 
@@ -275,7 +279,16 @@ impl Driver for Kenwood {
         // B would change nothing you can hear.
         let on_b = self.v == Variant::Plain && self.q("FR;", "FR").is_ok_and(|r| r.ends_with('1'));
         let vfo = if on_b { 'B' } else { 'A' };
-        self.s(&format!("F{vfo}{:011};", hz.round() as u64))
+        self.s(&format!("F{vfo}{:011};", hz.round() as u64))?;
+        // A QMX (firmware 1_02_005) reports the other VFO's frequency in
+        // IF; while it transmits, whatever its VFO mode: keep the two
+        // VFOs together, so what it reports, and whichever it really
+        // sends on, is the frequency that was asked for.
+        if self.qmx {
+            let other = if on_b { 'A' } else { 'B' };
+            self.s(&format!("F{other}{:011};", hz.round() as u64))?;
+        }
+        Ok(())
     }
 
     fn mode(&mut self) -> Result<(String, i64)> {
@@ -386,6 +399,14 @@ impl Driver for Kenwood {
                 Ok(())
             }
             (true, _) => self.s("TX;"),
+            // In USB/LSB a QMX stays in transmit for as long as audio is
+            // arriving (its SSB VOX), whatever RX; says, and drops when the
+            // audio stops: still transmitting a moment after RX; is no
+            // failure there (Mercury unkeys between two frames it sends
+            // back to back).
+            (false, _) if self.qmx && matches!(self.q("MD;", "MD").ok().and_then(|r| r.chars().nth(2)), Some('1' | '2')) => {
+                self.s("RX;")
+            }
             // Confirmed: see `unkey_confirmed`.
             (false, _) => unkey_confirmed(self, |k| k.s("RX;")),
         }
