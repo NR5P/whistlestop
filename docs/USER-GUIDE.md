@@ -194,7 +194,7 @@ There are three ways to find a calling station: searching with your one radio, t
 **Search for whistles** steps your radio through the digital segment of a band, listening on each channel:
 
 - **Current band**: the segment(s) of the band you're on.
-- **All bands**: every configured segment, band after band. A pass takes much longer, so callers would need very long whistles: use it for monitoring.
+- **All bands**: every configured segment, band after band. A pass takes much longer (the default segments, 80 to 10 m, are 75 channels and about **50 s** a pass on the air), so a caller is found only with a whistle about that long: on the RF bench a 60 s whistle on 30 m was found in the first cycle, and 6 s ones were missed for five cycles. Use it for monitoring, or agree long whistles with the caller.
 - **Search band** with the band list: one chosen band.
 
 On each channel the radio settles (0.15 s), listens for **0.5 s**, and checks for a whistle. Channels are **2000 Hz** apart, so every caller in the segment is within ±1100 Hz of some channel. A 20 m pass takes about 6–8 s.
