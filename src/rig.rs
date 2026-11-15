@@ -247,10 +247,11 @@ pub enum Rig {
 
 /// The simulated radio's ALC for Mercury at `db`: an FTDX3000 at 5 W on
 /// the air (2026-11-14) read 0.54 at 0 dB, 0.45 at -5, 0.36 at -8 and 0.22
-/// at -10; straight lines between, and on past the ends.
+/// at -10; straight lines between, none below -13 dB (where that slope
+/// reaches zero), and on past 0 dB.
 pub fn sim_alc(db: f32) -> f32 {
-    const PTS: [(f32, f32); 4] = [(-10.0, 0.22), (-8.0, 0.36), (-5.0, 0.45), (0.0, 0.54)];
-    let seg = PTS.windows(2).find(|w| db <= w[1].0).unwrap_or(&PTS[2..4]);
+    const PTS: [(f32, f32); 5] = [(-13.0, 0.0), (-10.0, 0.22), (-8.0, 0.36), (-5.0, 0.45), (0.0, 0.54)];
+    let seg = PTS.windows(2).find(|w| db <= w[1].0).unwrap_or(&PTS[3..5]);
     let ((x0, y0), (x1, y1)) = (seg[0], seg[1]);
     (y0 + (db - x0) * (y1 - y0) / (x1 - x0)).clamp(0.0, 1.0)
 }

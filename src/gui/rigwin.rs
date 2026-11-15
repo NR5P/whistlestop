@@ -187,6 +187,16 @@ impl RigWindow {
                             };
                             ui.add_sized([110.0, 20.0], egui::Label::new(RichText::new(now).monospace().color(DIM))).help(&help::RC_TXLEVEL_NOW);
                         });
+                        // The whistle (Whistlestop's own audio) follows the
+                        // same choice; always one line, fixed width.
+                        ui.horizontal(|ui| {
+                            ui.add_sized([110.0, 20.0], egui::Label::new(RichText::new("Whistle").color(TEXT)));
+                            let w = match s.rig_ext.whistle_level {
+                                Some(v) => format!("{v:+5.1} dB"),
+                                None => "usual level".into(),
+                            };
+                            ui.add_sized([110.0, 20.0], egui::Label::new(RichText::new(w).monospace().color(DIM))).help(&help::RC_TXLEVEL_WHISTLE);
+                        });
                         // Always one line (empty until Mercury connects), so
                         // nothing below moves when it fills in.
                         let note = if s.rig_ext.tx_level_note.is_empty() { " " } else { s.rig_ext.tx_level_note.as_str() };

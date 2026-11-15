@@ -287,6 +287,11 @@ pub const ST_DEMO: Topic = (
     "Simulated radio, band, Mercury and the K7BOT demo station. Nothing is transmitted. Untick to use your radio, Mercury and rigctld.",
     "Quick start: Demo mode",
 );
+pub const RC_TXLEVEL_WHISTLE: Topic = (
+    "Whistle level",
+    "The CQ whistle is Whistlestop's own audio, so Mercury's level doesn't change it: it follows the same choice instead. Mercury's own: its usual level. Set here: the same dB as Mercury. Auto: its own Auto, from the radio's ALC while it plays, by the same rule (barely ticking). Shown in dB from its usual level.",
+    "Transmit level",
+);
 pub const ST_MERCURY_UI: Topic = (
     "Mercury UI port",
     "Mercury's WebSocket port, open when Mercury is started with -G (10000 unless -U sets another). Whistlestop uses it only to set the transmit level (Radio controls → Transmit level).",
@@ -369,7 +374,7 @@ pub const RC_ALC: Topic = (
 );
 pub const RC_TXLEVEL: Topic = (
     "Transmit level",
-    "Who sets Mercury's transmit audio level. Mercury's own: tx_gain_db in its mercury.ini, untouched. Set here: the level beside. Auto: starts at that level and turns down 2 dB after each transmission whose ALC reads above 45%, back up 1 dB when it reads below 15%. Set here and Auto need Mercury started with -G.",
+    "Who sets Mercury's transmit audio level. Mercury's own: tx_gain_db in its mercury.ini, untouched. Set here: the level beside. Auto: starts at that level and turns it down after each transmission whose ALC reads more than a bar or two (2 dB above 30%, 1 dB above 12%), back up 1 dB after 3 transmissions in a row where the ALC doesn't move at all. For data the ALC should barely tick. Set here and Auto need Mercury started with -G.",
     "Transmit level",
 );
 pub const RC_TXLEVEL_DB: Topic = (

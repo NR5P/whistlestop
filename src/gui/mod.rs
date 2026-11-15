@@ -1432,12 +1432,22 @@ impl App {
             ui.horizontal_wrapped(|ui| {
                 ui.label(RichText::new("At the table:").color(DIM));
                 ui.label(RichText::new(format!("{} (you)", s.mycall)).strong());
-                let mut members: Vec<_> = t.members.iter().collect();
+                // A member hears the host's speed frames, but the host is in
+                // `members` only once it sends a message: show it anyway (a
+                // member saw only itself while the host was quiet).
+                let host = t.host_call.clone().filter(|_| !t.host);
+                let mut members: Vec<_> = t.members.iter().map(|(c, m)| (c.clone(), m.snr_of_host)).collect();
+                if let Some(h) = &host
+                    && !t.members.contains_key(h)
+                {
+                    members.push((h.clone(), None));
+                }
                 members.sort_by_key(|m| m.0.clone());
-                for (call, m) in members {
-                    let snr = m.snr_of_host.map(|v| format!(" {v:+}dB")).unwrap_or_default();
+                for (call, snr) in members {
+                    let snr = snr.map(|v| format!(" {v:+}dB")).unwrap_or_default();
+                    let tag = if host.as_ref() == Some(&call) { " (host)" } else { "" };
                     if ui
-                        .add(egui::Button::new(RichText::new(format!("{call}{snr}")).color(TEXT)).small())
+                        .add(egui::Button::new(RichText::new(format!("{call}{tag}{snr}")).color(TEXT)).small())
                         .on_hover_text("Pass the floor")
                         .help(&help::T_MEMBER)
                         .clicked()

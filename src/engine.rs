@@ -292,6 +292,14 @@ const SILENT_NOT_BUSY: Duration = Duration::from_secs(2);
 /// After "the radio's audio is almost silent", it is said to be back only
 /// once it has stayed back this long.
 const RX_BACK_AFTER: Duration = Duration::from_secs(5);
+/// How long the radio's audio must be near-silent before the Log says so:
+/// 10 s at first, but once it has come back (so the radio does send
+/// audio) only a long silence counts. On a dummy load the other station's
+/// frames come and go, and the Log said "almost silent" and "back" with
+/// every CQ it called.
+fn rx_silent_warn_after(came_back: bool) -> Duration {
+    Duration::from_secs(if came_back { 300 } else { 10 })
+}
 /// How long an automatic deliver/collect call waits for a clear channel
 /// (past BUSY_WAIT_MAX, so a stuck detector still lets it go).
 const AUTO_PENDING_MAX: Duration = Duration::from_secs(90);
@@ -476,6 +484,9 @@ pub struct RigExt {
     /// Mercury, or not set yet), and what happened to it last.
     pub tx_level: Option<f32>,
     pub tx_level_note: String,
+    /// The whistle's level (dB from its usual one; None: its usual one, as
+    /// with Mercury's own level).
+    pub whistle_level: Option<f32>,
     /// What the tuner is doing ("Tuning…", "Tuned on 40m at 14:02").
     pub tuner_note: String,
     pub tune_pending: bool,
@@ -666,31 +677,73 @@ fn busy_counts(busy: bool, from: Option<Instant>, own_end: Option<Instant>, sile
 
 /// Auto transmit level: the radio's ALC (0 to 1, as Hamlib scales it) over
 /// one of Mercury's transmissions, by its median (one reading in a burst
-/// doesn't move it). Above `ALC_HIGH` the level comes down 2 dB; below
-/// `ALC_LOW` it goes back up 1 dB, never past the level set in Settings.
-/// On the air (an FTDX3000 at 5 W, 2026-11-14) Mercury at 0 dB read 0.54,
-/// "too high"; -8 dB read 0.36 and -10 dB 0.22.
-const ALC_HIGH: f32 = 0.45;
-const ALC_LOW: f32 = 0.15;
+/// doesn't move it). For data the ALC should barely tick, a bar or two:
+/// above `ALC_HOT` the level comes down 2 dB, above `ALC_TICK` 1 dB; at
+/// `ALC_NONE` or less (not ticking at all) it goes back up 1 dB, never past
+/// the level set in Settings. On the air (an FTDX3000 at 5 W) Mercury at
+/// 0 dB read 0.54, -8 dB 0.36 to 0.48, -10 dB 0.22 to 0.41: all far too
+/// high (an earlier Auto stopped at 0.45, and settled at 33-41 %).
+const ALC_HOT: f32 = 0.30;
+/// Auto turns the level back up only after this many transmissions in a
+/// row whose ALC didn't move: Mercury's frames differ (on the air, its
+/// CQFRAME read 31-38 % and the frame after it 0 % at the same level), and
+/// an up step after each quiet one took Auto up and down every CQ.
+const ALC_QUIET_TXS: u8 = 3;
+const ALC_TICK: f32 = 0.12;
+const ALC_NONE: f32 = 0.01;
 
-/// The next level, and why, or None to stay. Needs two readings or more.
+/// The next level, and why, or None to stay. `ceiling` is the most it may
+/// go back up to (the level set, or below one that already read high).
+/// Needs two readings or more, not counting a transmission's edges: when
+/// the ALC moved at all, a reading of none was taken as the radio keyed,
+/// before Mercury's audio started, or after it ended (on the air,
+/// 2026-11-15, a 1 s acknowledgement read 0.00 then 0.45, and a median
+/// over such reads would wrongly turn the level up).
 fn auto_level(now: f32, ceiling: f32, alc: &[f32]) -> Option<(f32, String)> {
-    if alc.len() < 2 {
+    let moved = alc.iter().any(|&v| v > ALC_NONE);
+    let mut a: Vec<f32> = alc.iter().copied().filter(|&v| !moved || v > ALC_NONE).collect();
+    if a.len() < 2 {
         return None;
     }
-    let mut a = alc.to_vec();
     a.sort_by(f32::total_cmp);
     let med = a[a.len() / 2];
     let pct = |v: f32| (v * 100.0).round();
-    if med > ALC_HIGH && now > crate::mercury_ui::MIN_DB {
-        let to = (now - 2.0).max(crate::mercury_ui::MIN_DB);
-        Some((to, format!("Auto: the radio's ALC read {}%, above {}%", pct(med), pct(ALC_HIGH))))
-    } else if med < ALC_LOW && now < ceiling {
+    let down = if med > ALC_HOT { 2.0 } else if med > ALC_TICK { 1.0 } else { 0.0 };
+    if down > 0.0 && now > crate::mercury_ui::MIN_DB {
+        let to = (now - down).max(crate::mercury_ui::MIN_DB);
+        Some((to, format!("Auto: the radio's ALC read {}%, more than a bar or two ({}%)", pct(med), pct(ALC_TICK))))
+    } else if med <= ALC_NONE && now + 0.5 <= ceiling {
         let to = (now + 1.0).min(ceiling);
-        Some((to, format!("Auto: the radio's ALC read {}%, back up toward {ceiling:+.1} dB", pct(med))))
+        Some((to, format!("Auto: the radio's ALC didn't move ({}%), back up toward {ceiling:+.1} dB", pct(med))))
     } else {
         None
     }
+}
+
+/// The whistle's highest level: its usual amplitude (0.5) doubled, full
+/// scale.
+const WHISTLE_MAX_DB: f32 = 6.0;
+
+/// Auto's step after one transmission: `auto_level`'s, except that a step
+/// up waits for the `ALC_QUIET_TXS`th transmission in a row whose ALC
+/// didn't move (`quiet` counts them; one that read anything starts over).
+fn auto_step(now: f32, ceiling: f32, alc: &[f32], quiet: &mut u8) -> Option<(f32, String)> {
+    // Quiet or not, whatever the ceiling.
+    match auto_level(now, f32::INFINITY, alc) {
+        Some((to, _)) if to > now => *quiet = quiet.saturating_add(1),
+        Some(_) => *quiet = 0,
+        None if alc.len() >= 2 => *quiet = 0,
+        None => {}
+    }
+    let (to, why) = auto_level(now, ceiling, alc)?;
+    if to < now {
+        return Some((to, why));
+    }
+    if *quiet >= ALC_QUIET_TXS {
+        *quiet = 0;
+        return Some((to, why));
+    }
+    None
 }
 
 /// How long Mercury must have been transmitting before a radio that reads
@@ -887,6 +940,8 @@ struct Station {
     rx_loud_since: Option<Instant>,
     /// "Almost silent" is in the Log (until the audio comes back).
     rx_silent_said: bool,
+    /// The audio came back after an "almost silent".
+    rx_came_back: bool,
     vfo: Arc<Mutex<f64>>,
     sdr_span: Arc<Mutex<f64>>,
     detector: Detector,
@@ -995,6 +1050,17 @@ struct Station {
     /// The radio's ALC during Mercury's own transmission (not a whistle or
     /// a tuning carrier, whose level Mercury's setting doesn't change).
     alc_reads: Vec<f32>,
+    /// Auto: the lowest level whose ALC read high since it started, and
+    /// how many transmissions in a row haven't moved the ALC.
+    tx_level_hot: Option<f32>,
+    tx_level_quiet: u8,
+    /// The whistle's own level for Auto (Whistlestop plays it, so
+    /// Mercury's level doesn't change it), the ALC while it played, and
+    /// the lowest level that read high.
+    whistle_db: f32,
+    whistle_reads: Vec<f32>,
+    whistle_hot: Option<f32>,
+    whistle_quiet: u8,
     tuning_carrier: bool,
     /// Demo mode's stand-in for Mercury's UI port (the transmit level).
     fake_ui: Option<crate::mercury_ui::FakeUi>,
@@ -1233,6 +1299,7 @@ impl Station {
             rx_silent_since: None,
             rx_loud_since: None,
             rx_silent_said: false,
+            rx_came_back: false,
             vfo: vfo.clone(),
             sdr_span: Arc::new(Mutex::new(cfg.sdr.span_hz)),
             peer: None,
@@ -1295,6 +1362,12 @@ impl Station {
             tx_level_job: None,
             tx_level_failed: false,
             alc_reads: Vec::new(),
+            tx_level_hot: None,
+            tx_level_quiet: 0,
+            whistle_db: 0.0,
+            whistle_reads: Vec::new(),
+            whistle_hot: None,
+            whistle_quiet: 0,
             tuning_carrier: false,
             fake_ui: None,
             rig_err: None,
@@ -1733,7 +1806,8 @@ impl Station {
     /// left every pill green while Mercury and the search heard nothing,
     /// and the search chased the converter's last bits. Said once after
     /// 10 s of it (never while transmitting, when radios mute it), and
-    /// again when the audio is back.
+    /// again when the audio is back; after that, only for a long silence
+    /// (`rx_silent_warn_after`).
     fn check_rx_silence(&mut self) {
         let (tx, ok) = {
             let g = self.st.lock().unwrap();
@@ -1748,7 +1822,7 @@ impl Station {
         if crate::whistle::is_silent(&x) {
             self.rx_loud_since = None;
             let since = *self.rx_silent_since.get_or_insert_with(Instant::now);
-            if !self.rx_silent_said && since.elapsed() >= Duration::from_secs(10) {
+            if !self.rx_silent_said && since.elapsed() >= rx_silent_warn_after(self.rx_came_back) {
                 self.rx_silent_said = true;
                 self.log(format!(
                     "⚠ The radio's audio is almost silent ({db:.0} dBFS): it isn't sending receive audio. Check the radio's USB/data output level (a menu setting on many radios) and the recording level in your sound settings. Until then Mercury can't decode and whistles can't be heard"
@@ -1761,6 +1835,7 @@ impl Station {
             let loud = *self.rx_loud_since.get_or_insert_with(Instant::now);
             if loud.elapsed() >= RX_BACK_AFTER {
                 self.rx_silent_said = false;
+                self.rx_came_back = true;
                 self.rx_silent_since = None;
                 self.rx_loud_since = None;
                 self.log(format!("Radio audio: back ({db:.0} dBFS)"));
@@ -1877,6 +1952,13 @@ impl Station {
     /// down from there.
     fn tx_level_start(&mut self) {
         use crate::config::TxLevel;
+        // The whistle follows the same choice: its usual level, the level
+        // set, or Auto from the top.
+        self.whistle_db = self.cfg.tx_level_db.min(WHISTLE_MAX_DB);
+        self.whistle_hot = None;
+        self.whistle_quiet = 0;
+        let w = (self.cfg.tx_level != TxLevel::Mercury).then_some(self.whistle_db);
+        self.set(|g| g.rig_ext.whistle_level = w);
         match self.cfg.tx_level {
             TxLevel::Mercury => {
                 self.tx_level_now = None;
@@ -1888,11 +1970,42 @@ impl Station {
             }
             TxLevel::Set => self.tx_level_want = Some((self.cfg.tx_level_db, "as set".into())),
             TxLevel::Auto => {
+                self.tx_level_hot = None;
+                self.tx_level_quiet = 0;
                 self.tx_level_want = Some((
                     self.cfg.tx_level_db,
                     "Auto: starting at its most, and turned down while the radio's ALC reads high".into(),
                 ))
             }
+        }
+    }
+
+    /// The whistle's level, dB from its usual one.
+    fn whistle_gain_db(&self) -> f32 {
+        match self.cfg.tx_level {
+            crate::config::TxLevel::Mercury => 0.0,
+            _ => self.whistle_db,
+        }
+    }
+
+    /// After a whistle played to the end: Auto's next step for it, from the
+    /// radio's ALC while it played (the same rule as Mercury's level; on
+    /// the air, 2026-11-15, the whistle at its usual level read 62 %).
+    fn whistle_after(&mut self) {
+        let reads = std::mem::take(&mut self.whistle_reads);
+        if self.cfg.tx_level != crate::config::TxLevel::Auto {
+            return;
+        }
+        let most = self.cfg.tx_level_db.min(WHISTLE_MAX_DB);
+        let ceiling = self.whistle_hot.map_or(most, |h| most.min(h - 1.0));
+        let now = self.whistle_db;
+        if let Some((db, why)) = auto_step(now, ceiling, &reads, &mut self.whistle_quiet) {
+            if db < now {
+                self.whistle_hot = Some(self.whistle_hot.map_or(now, |h| h.min(now)));
+            }
+            self.whistle_db = db;
+            self.log(format!("Whistle level: {db:+.1} dB ({})", why.replace("Auto: ", "Auto, whistle: ")));
+            self.set(|g| g.rig_ext.whistle_level = Some(db));
         }
     }
 
@@ -1908,7 +2021,13 @@ impl Station {
             return;
         }
         let Some(now) = self.tx_level_now else { return };
-        if let Some((db, why)) = auto_level(now, self.cfg.tx_level_db, &reads) {
+        // Never back up to a level that already read high: it would only
+        // come down again, every other transmission.
+        let ceiling = self.tx_level_hot.map_or(self.cfg.tx_level_db, |h| self.cfg.tx_level_db.min(h - 1.0));
+        if let Some((db, why)) = auto_step(now, ceiling, &reads, &mut self.tx_level_quiet) {
+            if db < now {
+                self.tx_level_hot = Some(self.tx_level_hot.map_or(now, |h| h.min(now)));
+            }
             self.tx_level_want = Some((db, why));
         }
     }
@@ -1994,6 +2113,15 @@ impl Station {
                 && !self.tuning_carrier
             {
                 self.alc_reads.push(v);
+            }
+            // The whistle (Whistlestop's own audio) on its own.
+            if let Some(v) = alc
+                && self.engine_keyed
+                && !self.mercury_ptt
+                && !self.tuning_carrier
+                && matches!(self.cq.as_ref().map(|c| &c.phase), Some(CqPhase::Whistle { .. }))
+            {
+                self.whistle_reads.push(v);
             }
             self.set(|g| {
                 g.rig_ext.swr = swr;
@@ -3173,9 +3301,24 @@ impl Station {
             o.abort();
         }
         self.cq = None;
-        self.ptt(false).await;
+        self.unkey_own().await;
+        let mercury = self.tx_level_now;
+        if let Some(Rig::Sim(s)) = self.rig.as_mut() {
+            s.drive_db = mercury;
+        }
         self.set(|g| g.cq = CqView::default());
         self.log(why.into());
+    }
+
+    /// Unkeys the radio if Whistlestop keyed it (the whistle), and leaves it
+    /// alone while Mercury is the one transmitting: stopping a CQ during its
+    /// CQFRAME unkeyed the radio under Mercury's frame (on the air,
+    /// 2026-11-15: the frame was cut off, and "Mercury is transmitting but
+    /// the radio isn't keyed" followed). Mercury unkeys it at the frame's end.
+    async fn unkey_own(&mut self) {
+        if self.engine_keyed || self.unkey_owed || !self.mercury_ptt {
+            self.ptt(false).await;
+        }
     }
 
     /// A station is connecting to us (Mercury said PENDING): the CQ goes
@@ -3210,7 +3353,14 @@ impl Station {
             done: done.clone(),
             until: Instant::now() + Duration::from_secs_f64(secs + 5.0),
         };
-        let params = self.whistle_params();
+        let mut params = self.whistle_params();
+        let gain = self.whistle_gain_db();
+        params.amplitude *= 10f64.powf(gain as f64 / 20.0);
+        self.whistle_reads.clear();
+        // The simulated radio's ALC follows what's playing.
+        if let Some(Rig::Sim(s)) = self.rig.as_mut() {
+            s.drive_db = Some(gain);
+        }
         let out = self.output.clone();
         let mon = if self.cfg.demo {
             self.monitor.clone()
@@ -3269,6 +3419,11 @@ impl Station {
         let phase = match &cq.phase {
             CqPhase::Whistle { done, .. } if done.load(Ordering::Relaxed) => {
                 self.ptt(false).await;
+                self.whistle_after();
+                let mercury = self.tx_level_now;
+                if let Some(Rig::Sim(s)) = self.rig.as_mut() {
+                    s.drive_db = mercury;
+                }
                 let me = self.mycall();
                 let arq_bw = self.bw.mercury_arq_bw();
                 // Mercury answers its own CQFRAME transmission with PENDING
@@ -3474,7 +3629,7 @@ impl Station {
                     if let Some(o) = &self.output {
                         o.abort();
                     }
-                    self.ptt(false).await;
+                    self.unkey_own().await;
                     self.set(|g| g.cq = CqView::default());
                 }
                 self.peer = Some(peer.clone());
@@ -7304,6 +7459,14 @@ mod tests {
     /// faint tones, once the silence has lasted 2 s; a station that comes on
     /// ends the silence and counts at once.
     #[test]
+    fn a_silence_after_the_audio_came_back_must_be_long() {
+        assert_eq!(rx_silent_warn_after(false), Duration::from_secs(10));
+        // A dummy load between the other station's CQs (about a minute
+        // apart) isn't reported again.
+        assert!(rx_silent_warn_after(true) > Duration::from_secs(120));
+    }
+
+    #[test]
     fn silent_audio_is_not_a_busy_channel() {
         let t0 = Instant::now();
         let s = |n: u64| t0 + Duration::from_secs(n);
@@ -7319,36 +7482,74 @@ mod tests {
     /// Auto level: down 2 dB while ALC reads high, up 1 dB while it reads
     /// low but never past the level set, and nothing on too few readings.
     #[test]
+    fn auto_level_turns_up_only_after_quiet_transmissions_in_a_row() {
+        let mut q = 0;
+        let step = |now, a: &[f32], q: &mut u8| auto_step(now, 0.0, a, q).map(|(v, _)| v);
+        // The FTDX3000's CQFRAME read hot, the frame after it nothing:
+        // down, no up step, down again.
+        assert_eq!(step(-8.0, &[0.38, 0.39], &mut q), Some(-10.0));
+        assert_eq!(step(-10.0, &[0.0, 0.0], &mut q), None);
+        assert_eq!(step(-10.0, &[0.25, 0.26], &mut q), Some(-11.0));
+        assert_eq!(step(-11.0, &[0.0, 0.0], &mut q), None);
+        // Barely ticking starts the count over.
+        assert_eq!(step(-11.0, &[0.0, 0.0], &mut q), None);
+        assert_eq!(step(-11.0, &[0.05, 0.06], &mut q), None);
+        assert_eq!(q, 0);
+        // Three quiet ones in a row: up 1 dB.
+        assert_eq!(step(-11.0, &[0.0, 0.0], &mut q), None);
+        assert_eq!(step(-11.0, &[0.0, 0.0], &mut q), None);
+        assert_eq!(step(-11.0, &[0.0, 0.0], &mut q), Some(-10.0));
+        assert_eq!(q, 0);
+        // A short frame changes nothing, the count included.
+        assert_eq!(step(-10.0, &[0.0, 0.0], &mut q), None);
+        assert_eq!(step(-10.0, &[0.5], &mut q), None);
+        assert_eq!(q, 1);
+    }
+
+    #[test]
     fn auto_level_follows_the_alc() {
         let to = |now, ceil, a: &[f32]| auto_level(now, ceil, a).map(|(v, _)| v);
-        // The FTDX3000 at 0 dB: 0.54.
+        // The FTDX3000 at 0 dB: 0.54, far too much: down 2 dB.
         assert_eq!(to(0.0, 0.0, &[0.54, 0.55, 0.53]), Some(-2.0));
-        // In the band: stays.
-        assert_eq!(to(-8.0, 0.0, &[0.36, 0.37]), None);
+        // -8 dB read 0.36: still too much.
+        assert_eq!(to(-8.0, 0.0, &[0.36, 0.37]), Some(-10.0));
+        // A few bars: down 1 dB.
+        assert_eq!(to(-10.0, 0.0, &[0.22, 0.21]), Some(-11.0));
+        // Barely ticking (a bar or two): stays.
+        assert_eq!(to(-12.0, 0.0, &[0.06, 0.08, 0.07]), None);
+        assert_eq!(to(-12.0, 0.0, &[0.12, 0.11]), None);
         // One spike in a transmission doesn't move it.
-        assert_eq!(to(-8.0, 0.0, &[0.36, 0.9, 0.35]), None);
-        // Low: back up, but not past the ceiling.
-        assert_eq!(to(-10.0, 0.0, &[0.05, 0.06]), Some(-9.0));
-        assert_eq!(to(-0.5, 0.0, &[0.05, 0.06]), Some(0.0));
+        assert_eq!(to(-12.0, 0.0, &[0.06, 0.9, 0.05]), None);
+        // Not ticking at all: back up 1 dB, but not past the ceiling.
+        assert_eq!(to(-15.0, 0.0, &[0.0, 0.0, 0.0]), Some(-14.0));
+        assert_eq!(to(-0.5, 0.0, &[0.0, 0.0]), Some(0.0));
         assert_eq!(to(0.0, 0.0, &[0.0, 0.0]), None);
+        assert_eq!(to(-13.0, -13.0, &[0.0, 0.0]), None);
         // Not below Mercury's least.
         assert_eq!(to(-19.0, 0.0, &[0.9, 0.9]), Some(-20.0));
         assert_eq!(to(-20.0, 0.0, &[0.9, 0.9]), None);
         // Too few readings (a short frame).
         assert_eq!(to(0.0, 0.0, &[0.9]), None);
         assert_eq!(to(0.0, 0.0, &[]), None);
+        // A transmission's edges (keyed, no audio yet) don't count: the
+        // FTDX3000's 1 s acknowledgement at -10 dB read 0.00 and 0.45.
+        assert_eq!(to(-12.0, -8.0, &[0.0, 0.45]), None);
+        assert_eq!(to(-12.0, -8.0, &[0.0, 0.0, 0.08, 0.0]), None);
+        assert_eq!(to(-12.0, -8.0, &[0.0, 0.07, 0.08, 0.06, 0.0]), None);
     }
 
     /// Auto, end to end in Demo (whose Mercury has a stand-in UI port): the
     /// simulated radio's ALC follows Mercury's level as the FTDX3000's did
-    /// on the air (0.54 at 0 dB), and
-    /// Auto, starting at 0 dB, comes down 2 dB a transmission until the ALC
-    /// is under 45 %: -6 dB (0.42), where it stays.
+    /// on the air (0.54 at 0 dB), and Auto, starting at 0 dB, comes down
+    /// 2 dB a transmission while it reads over 30 %, then 1 dB, until it
+    /// barely ticks: -12 dB (7 %), where it stays. The whistle does the same
+    /// on its own.
     #[test]
     fn auto_level_settles_on_the_simulated_radio() {
         assert!((crate::rig::sim_alc(0.0) - 0.54).abs() < 1e-6);
         assert!((crate::rig::sim_alc(-5.0) - 0.45).abs() < 1e-6);
-        assert!((crate::rig::sim_alc(-12.0) - 0.08).abs() < 1e-5);
+        assert!((crate::rig::sim_alc(-12.0) - 0.0733).abs() < 1e-3);
+        assert_eq!(crate::rig::sim_alc(-14.0), 0.0);
         assert!((crate::rig::sim_alc(5.0) - 0.63).abs() < 1e-5);
         let h = spawn(|| {});
         let mut cfg = Config {
@@ -7356,7 +7557,7 @@ mod tests {
             demo: true,
             demo_real_mercury: false,
             busy_detect: false,
-            whistle_s: 1.0,
+            whistle_s: 2.0,
             cq_listen_s: 1.0,
             cq_cycles: 1,
             tx_level: crate::config::TxLevel::Auto,
@@ -7371,8 +7572,9 @@ mod tests {
             assert!(t.elapsed() < Duration::from_secs(10), "{:#?}", h.state.lock().unwrap().log);
             std::thread::sleep(Duration::from_millis(50));
         }
-        // Short CQs (a 1 s whistle, which doesn't count, and Mercury's
-        // 3.1 s CQ frame) until it has settled, and one more to see it stay.
+        // Short CQs (a 2 s whistle, two or three ALC readings for the
+        // whistle's own level, and Mercury's 3.1 s CQ frame) until both have
+        // settled, and one more to see them stay.
         // The demo's K7BOT answers one: its link's frames count too, and it
         // is hung up before the next CQ.
         let cq = || {
@@ -7397,21 +7599,88 @@ mod tests {
             }
             std::thread::sleep(Duration::from_millis(800));
         };
-        for _ in 0..6 {
+        for _ in 0..14 {
             cq();
-            if h.state.lock().unwrap().rig_ext.tx_level == Some(-6.0) {
+            let g = h.state.lock().unwrap();
+            if g.rig_ext.tx_level == Some(-12.0) && g.rig_ext.whistle_level == Some(-12.0) {
                 break;
             }
         }
         cq();
         let g = h.state.lock().unwrap();
         let steps: Vec<&str> = g.log.iter().filter(|l| l.1.starts_with("Transmit level")).map(|l| l.1.as_str()).collect();
-        assert_eq!(steps.len(), 4, "{steps:#?}");
-        for (s, v) in steps.iter().zip(["+0.0", "-2.0", "-4.0", "-6.0"]) {
+        let want = ["+0.0", "-2.0", "-4.0", "-6.0", "-8.0", "-10.0", "-11.0", "-12.0"];
+        assert_eq!(steps.len(), want.len(), "{steps:#?}");
+        for (s, v) in steps.iter().zip(want) {
             assert!(s.contains(&format!("Mercury {v} dB")), "{steps:#?}");
         }
-        assert_eq!(g.rig_ext.tx_level, Some(-6.0));
-        assert!(g.rig_ext.tx_level_note.contains("ALC read 47%"), "{}", g.rig_ext.tx_level_note);
+        assert_eq!(g.rig_ext.tx_level, Some(-12.0));
+        assert!(g.rig_ext.tx_level_note.contains("ALC read 15%"), "{}", g.rig_ext.tx_level_note);
+        // The whistle (Whistlestop's own audio, which Mercury's level
+        // doesn't touch) comes down the same way, by its own ALC.
+        let whistle: Vec<&str> = g.log.iter().filter(|l| l.1.starts_with("Whistle level")).map(|l| l.1.as_str()).collect();
+        let want = ["-2.0", "-4.0", "-6.0", "-8.0", "-10.0", "-11.0", "-12.0"];
+        assert_eq!(whistle.len(), want.len(), "{whistle:#?}");
+        for (s, v) in whistle.iter().zip(want) {
+            assert!(s.starts_with(&format!("Whistle level: {v} dB")), "{whistle:#?}");
+        }
+        assert_eq!(g.rig_ext.whistle_level, Some(-12.0));
+        drop(g);
+        h.send(Cmd::Stop);
+    }
+
+    /// Stopping a CQ while Mercury sends its CQFRAME leaves the radio keyed
+    /// under Mercury's frame (it used to unkey it, cutting the frame off, and
+    /// the "isn't keyed" warning followed: on the air, 2026-11-15); Mercury
+    /// unkeys it when the frame ends.
+    #[test]
+    fn stopping_a_cq_during_its_frame_leaves_mercury_keyed() {
+        let h = spawn(|| {});
+        let mut cfg = Config {
+            callsign: "N0STOP".into(),
+            demo: true,
+            demo_real_mercury: false,
+            busy_detect: false,
+            whistle_s: 1.0,
+            cq_listen_s: 5.0,
+            cq_cycles: 1,
+            ..Default::default()
+        };
+        cfg.sdr.enabled = false;
+        cfg.sdr.wide_search = false;
+        h.send(Cmd::Start(cfg));
+        let t = Instant::now();
+        while h.state.lock().unwrap().rig.freq_hz == 0.0 {
+            assert!(t.elapsed() < Duration::from_secs(10), "{:#?}", h.state.lock().unwrap().log);
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        h.send(Cmd::CallCq { table: None });
+        let t = Instant::now();
+        loop {
+            let g = h.state.lock().unwrap();
+            if g.cq.phase == "sending CQFRAME" && g.tx && g.rig.ptt {
+                break;
+            }
+            assert!(t.elapsed() < Duration::from_secs(15), "no CQFRAME: {:?} {:#?}", g.cq, g.log);
+            drop(g);
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        h.send(Cmd::StopCq);
+        // The demo's CQ frame keys for 3.1 s: the radio stays keyed under it.
+        std::thread::sleep(Duration::from_millis(1500));
+        {
+            let g = h.state.lock().unwrap();
+            assert!(g.log.iter().any(|l| l.1 == "CQ stopped"), "{:#?}", g.log);
+            assert!(g.rig.ptt, "the radio was unkeyed under Mercury's frame: {:#?}", g.log);
+        }
+        let t = Instant::now();
+        while h.state.lock().unwrap().rig.ptt || h.state.lock().unwrap().tx {
+            assert!(t.elapsed() < Duration::from_secs(10), "left keyed: {:#?}", h.state.lock().unwrap().log);
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        std::thread::sleep(Duration::from_millis(1500));
+        let g = h.state.lock().unwrap();
+        assert!(!g.log.iter().any(|l| l.1.contains("isn't keyed")), "{:#?}", g.log);
         drop(g);
         h.send(Cmd::Stop);
     }
