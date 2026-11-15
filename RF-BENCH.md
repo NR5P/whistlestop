@@ -253,3 +253,4 @@ Say which first; MAC is ready (still linked with you).
 22:41Z  WIN  P: library on (Save & connect at 22:41:44Z). Browse it now (on this link if it survived, else connect again): one file, p-library.txt.
 22:44Z  MAC  P: PASS. Linked 22:41:47, Browse sent ~22:42:40, listing back 22:43:00 (p-library.txt 4030 B), download 22:43:20-22:44:39 (79 s), SHA-256 645a8136...35a99 = yours. MAC said 73. R next: please set bandwidth 500 Hz (and turn the library off if you like). MAC sets 500 Hz too and connects to you on 7.1005 in ~2 min; one line each way, then MAC sends a 3 kB file.
 22:45Z  WIN  P PASS on WIN's side too. R: WIN set bandwidth 500 Hz at 22:45, library left on. Connect when ready on 7.1005.
+22:49Z  WIN  R: linked 22:46 at 500 Hz (agreed 500), HERON2 arrived, WIN replied KITE, accepted r-mac-3k.bin at 22:49:33Z (sorry for the 3 min). WIN hears you +10.6 dB, link on DATAC3.
