@@ -159,6 +159,42 @@ impl RigWindow {
                     });
                     ui.add_space(6.0);
 
+                    // Mercury's transmit level (through its UI port).
+                    card(ui, "Transmit level", |ui| {
+                        use whistlestop::config::TxLevel;
+                        ui.horizontal(|ui| {
+                            for (v, n) in [(TxLevel::Mercury, "Mercury's own"), (TxLevel::Set, "Set here"), (TxLevel::Auto, "Auto (from ALC)")] {
+                                if ui.selectable_value(&mut cfg.tx_level, v, n).help(&help::RC_TXLEVEL).changed() {
+                                    cfg_changed = true;
+                                }
+                            }
+                        });
+                        ui.horizontal(|ui| {
+                            let auto = cfg.tx_level == TxLevel::Auto;
+                            ui.add_sized([110.0, 20.0], egui::Label::new(RichText::new(if auto { "At most" } else { "Level" }).color(TEXT)));
+                            let r = ui
+                                .add_enabled(
+                                    cfg.tx_level != TxLevel::Mercury,
+                                    egui::Slider::new(&mut cfg.tx_level_db, -20.0..=10.0).step_by(0.5).fixed_decimals(1).suffix(" dB"),
+                                )
+                                .help(&help::RC_TXLEVEL_DB);
+                            if r.drag_stopped() || (r.changed() && !r.dragged()) {
+                                cfg_changed = true;
+                            }
+                            let now = match s.rig_ext.tx_level {
+                                Some(v) => format!("now {v:+5.1} dB"),
+                                None => "now    —    ".into(),
+                            };
+                            ui.add_sized([110.0, 20.0], egui::Label::new(RichText::new(now).monospace().color(DIM))).help(&help::RC_TXLEVEL_NOW);
+                        });
+                        // Always one line (empty until Mercury connects), so
+                        // nothing below moves when it fills in.
+                        let note = if s.rig_ext.tx_level_note.is_empty() { " " } else { s.rig_ext.tx_level_note.as_str() };
+                        ui.add(egui::Label::new(RichText::new(note).small().color(DIM)).truncate()).help(&help::RC_TXLEVEL_NOW);
+                        ui.label(RichText::new("Set here and Auto need Mercury started with -G (its UI port: Settings → Mercury modem).").small().color(DIM));
+                    });
+                    ui.add_space(6.0);
+
                     // Antenna tuner.
                     card(ui, "Antenna tuner", |ui| {
                         ui.horizontal(|ui| {

@@ -115,6 +115,9 @@ impl RigctldClient {
 
 pub struct SimRig {
     pub status: RigStatus,
+    /// Mercury's transmit level as Whistlestop set it (Demo): the ALC
+    /// follows it (`sim_alc`). None: a fixed 25 %.
+    pub drive_db: Option<f32>,
     pub levels: std::collections::HashMap<String, f32>,
     pub funcs: std::collections::HashMap<String, bool>,
     pub vfo: String,
@@ -242,11 +245,22 @@ pub enum Rig {
     Sim(SimRig),
 }
 
+/// The simulated radio's ALC for Mercury at `db`: an FTDX3000 at 5 W on
+/// the air (2026-11-14) read 0.54 at 0 dB, 0.45 at -5, 0.36 at -8 and 0.22
+/// at -10; straight lines between, and on past the ends.
+pub fn sim_alc(db: f32) -> f32 {
+    const PTS: [(f32, f32); 4] = [(-10.0, 0.22), (-8.0, 0.36), (-5.0, 0.45), (0.0, 0.54)];
+    let seg = PTS.windows(2).find(|w| db <= w[1].0).unwrap_or(&PTS[2..4]);
+    let ((x0, y0), (x1, y1)) = (seg[0], seg[1]);
+    (y0 + (db - x0) * (y1 - y0) / (x1 - x0)).clamp(0.0, 1.0)
+}
+
 impl Rig {
     pub fn sim(freq_hz: f64, freq_link: std::sync::Arc<std::sync::Mutex<f64>>) -> Self {
         *freq_link.lock().unwrap() = freq_hz;
         Rig::Sim(SimRig {
             freq_link,
+            drive_db: None,
             levels: [
                 ("AF", 0.5),
                 ("RF", 1.0),
@@ -420,7 +434,7 @@ impl Rig {
                 "SWR" => s.swr(),
                 "ALC" => {
                     if s.status.ptt {
-                        0.25
+                        s.drive_db.map_or(0.25, sim_alc)
                     } else {
                         0.0
                     }

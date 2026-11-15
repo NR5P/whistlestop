@@ -8,6 +8,19 @@ use crate::sdr::SdrConfig;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+/// Who sets Mercury's transmit level (see `Config::tx_level`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TxLevel {
+    /// Mercury's own (`tx_gain_db` in its mercury.ini); left alone.
+    #[default]
+    Mercury,
+    /// `tx_level_db`, through Mercury's UI port.
+    Set,
+    /// `tx_level_db` at most, turned down while the radio's ALC reads high
+    /// and back up while it reads low.
+    Auto,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct Config {
@@ -70,6 +83,13 @@ pub struct Config {
     /// `swr_limit` (off by default; tuning transmits a carrier).
     pub auto_tune: bool,
     pub swr_limit: f32,
+    /// Mercury's transmit level: left to Mercury (its mercury.ini), set to
+    /// `tx_level_db`, or Auto (at most `tx_level_db`, turned down while the
+    /// radio's ALC reads high). Set and Auto need Mercury's UI port (Mercury
+    /// started with -G) at `mercury_ui_port`.
+    pub tx_level: TxLevel,
+    pub tx_level_db: f32,
+    pub mercury_ui_port: u16,
     /// Play the radio's audio through the computer's speakers (and your own
     /// CQ in Demo mode). Off by default.
     pub monitor: bool,
@@ -190,6 +210,9 @@ impl Default for Config {
             depot_file: String::new(),
             auto_tune: false,
             swr_limit: 2.0,
+            tx_level: TxLevel::Mercury,
+            tx_level_db: 0.0,
+            mercury_ui_port: 10000,
             monitor: false,
             monitor_volume: 0.7,
             monitor_device: String::new(),
@@ -365,6 +388,7 @@ impl Config {
         num(&mut n, "dwell_s", &mut self.dwell_s, 0.05, 10.0, d.dwell_s);
         num(&mut n, "step_hz", &mut self.step_hz, 100.0, 10_000.0, d.step_hz);
         num32(&mut n, "swr_limit", &mut self.swr_limit, 1.1, 10.0, d.swr_limit);
+        num32(&mut n, "tx_level_db", &mut self.tx_level_db, crate::mercury_ui::MIN_DB, crate::mercury_ui::MAX_DB, d.tx_level_db);
         num32(&mut n, "monitor_volume", &mut self.monitor_volume, 0.0, 1.5, d.monitor_volume);
         num(&mut n, "away_idle_s", &mut self.away_idle_s, 0.5, 86_400.0, d.away_idle_s);
         num(&mut n, "auto_accept_max_mb", &mut self.auto_accept_max_mb, 0.0, 4096.0, d.auto_accept_max_mb);

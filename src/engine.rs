@@ -472,6 +472,10 @@ pub struct RigExt {
     pub swr_last_tx: Option<f32>,
     pub alc: Option<f32>,
     pub power_out: Option<f32>,
+    /// Mercury's transmit level as Whistlestop last set it (None: left to
+    /// Mercury, or not set yet), and what happened to it last.
+    pub tx_level: Option<f32>,
+    pub tx_level_note: String,
     /// What the tuner is doing ("Tuning…", "Tuned on 40m at 14:02").
     pub tuner_note: String,
     pub tune_pending: bool,
@@ -657,6 +661,89 @@ fn busy_counts(busy: bool, from: Option<Instant>, own_end: Option<Instant>, sile
             !(tail && now.saturating_duration_since(e) < OWN_TAIL_HOLD)
         }
         _ => true,
+    }
+}
+
+/// Auto transmit level: the radio's ALC (0 to 1, as Hamlib scales it) over
+/// one of Mercury's transmissions, by its median (one reading in a burst
+/// doesn't move it). Above `ALC_HIGH` the level comes down 2 dB; below
+/// `ALC_LOW` it goes back up 1 dB, never past the level set in Settings.
+/// On the air (an FTDX3000 at 5 W, 2026-11-14) Mercury at 0 dB read 0.54,
+/// "too high"; -8 dB read 0.36 and -10 dB 0.22.
+const ALC_HIGH: f32 = 0.45;
+const ALC_LOW: f32 = 0.15;
+
+/// The next level, and why, or None to stay. Needs two readings or more.
+fn auto_level(now: f32, ceiling: f32, alc: &[f32]) -> Option<(f32, String)> {
+    if alc.len() < 2 {
+        return None;
+    }
+    let mut a = alc.to_vec();
+    a.sort_by(f32::total_cmp);
+    let med = a[a.len() / 2];
+    let pct = |v: f32| (v * 100.0).round();
+    if med > ALC_HIGH && now > crate::mercury_ui::MIN_DB {
+        let to = (now - 2.0).max(crate::mercury_ui::MIN_DB);
+        Some((to, format!("Auto: the radio's ALC read {}%, above {}%", pct(med), pct(ALC_HIGH))))
+    } else if med < ALC_LOW && now < ceiling {
+        let to = (now + 1.0).min(ceiling);
+        Some((to, format!("Auto: the radio's ALC read {}%, back up toward {ceiling:+.1} dB", pct(med))))
+    } else {
+        None
+    }
+}
+
+/// How long Mercury must have been transmitting before a radio that reads
+/// unkeyed counts as a missed key-up (radios take a moment to key, and a
+/// poll can land before they do).
+const MISSED_KEY_AFTER: Duration = Duration::from_millis(1500);
+
+/// Watches for Mercury transmitting while the radio isn't keyed: nothing
+/// goes out, and every frame is wasted (on the air, 2026-11-14: Mercury's
+/// Hamlib PTT had lost the radio's shared port). Only once the radio has
+/// read keyed at least once, since some radios (and some rigctlds) can't
+/// report PTT and always read unkeyed.
+#[derive(Default)]
+struct KeyWatch {
+    read_ok: bool,
+    missed: u8,
+    warned: bool,
+}
+
+#[derive(Debug, PartialEq)]
+enum KeyNote {
+    /// Mercury is transmitting into an unkeyed radio.
+    Missed,
+    /// It keys the radio again, after a `Missed`.
+    Back,
+}
+
+impl KeyWatch {
+    /// One radio poll: `mercury_for` is how long Mercury has been
+    /// transmitting (None when it isn't), `ours` whether Whistlestop has
+    /// the radio keyed itself (a whistle), `radio` what the radio reads.
+    fn poll(&mut self, mercury_for: Option<Duration>, ours: bool, radio: bool) -> Option<KeyNote> {
+        if radio {
+            self.read_ok = true;
+        }
+        let Some(for_) = mercury_for.filter(|_| !ours) else {
+            self.missed = 0;
+            return None;
+        };
+        if radio {
+            self.missed = 0;
+            return std::mem::take(&mut self.warned).then_some(KeyNote::Back);
+        }
+        if for_ < MISSED_KEY_AFTER || !self.read_ok {
+            return None;
+        }
+        // Two polls in a row (1.4 s), so one late reading doesn't count.
+        self.missed = self.missed.saturating_add(1);
+        if self.missed >= 2 && !self.warned {
+            self.warned = true;
+            return Some(KeyNote::Missed);
+        }
+        None
     }
 }
 
@@ -896,6 +983,21 @@ struct Station {
     /// An unkey that failed (CAT upset by RF, rigctld not answering): it's
     /// owed to the radio and retried on every poll until it goes through.
     unkey_owed: bool,
+    /// Mercury transmitting into an unkeyed radio.
+    key_watch: KeyWatch,
+    /// Mercury's transmit level: as last set (None: left to Mercury), the
+    /// next to set and why, the change being made, and whether its last
+    /// failure was logged (said once, until one works).
+    tx_level_now: Option<f32>,
+    tx_level_want: Option<(f32, String)>,
+    tx_level_job: Option<(f32, String, tokio::sync::oneshot::Receiver<anyhow::Result<f32>>)>,
+    tx_level_failed: bool,
+    /// The radio's ALC during Mercury's own transmission (not a whistle or
+    /// a tuning carrier, whose level Mercury's setting doesn't change).
+    alc_reads: Vec<f32>,
+    tuning_carrier: bool,
+    /// Demo mode's stand-in for Mercury's UI port (the transmit level).
+    fake_ui: Option<crate::mercury_ui::FakeUi>,
     /// The last radio error logged, and when: the same one isn't logged
     /// again every poll.
     rig_err: Option<(String, Instant)>,
@@ -1187,6 +1289,14 @@ impl Station {
             mercury_ptt: false,
             mercury_ptt_at: Instant::now(),
             unkey_owed: false,
+            key_watch: KeyWatch::default(),
+            tx_level_now: None,
+            tx_level_want: None,
+            tx_level_job: None,
+            tx_level_failed: false,
+            alc_reads: Vec::new(),
+            tuning_carrier: false,
+            fake_ui: None,
             rig_err: None,
             last_ext_poll: Instant::now(),
             tx_was: false,
@@ -1320,7 +1430,13 @@ impl Station {
             s.log(format!("⚠ Settings file: {p}"));
         }
 
-        // Radio.
+        // Radio. A shared radio port the last station left open stays open
+        // for this one (programs on it stay connected); any other closes.
+        let sharing = cfg.rig_mode == crate::rigsetup::RigMode::Direct
+            && real.is_none()
+            && !cfg.demo
+            && cfg.cat.share_port > 0;
+        crate::rigserve::close_idle(sharing.then_some(cfg.cat.share_port));
         if cfg.demo && real.is_none() {
             s.rig = Some(Rig::sim(14_096_000.0, vfo.clone()));
             s.set(|g| g.rig_ok = true);
@@ -1340,7 +1456,11 @@ impl Station {
                     if cfg.cat.share_port > 0 {
                         match crate::rigserve::serve(h.clone(), cfg.cat.share_port).await {
                             Ok(srv) => {
-                                s.log(format!("Radio shared for Mercury and other programs at {} (Hamlib model 2, NET rigctl)", srv.addr));
+                                s.log(if srv.kept {
+                                    format!("Radio shared at {} again (programs connected to it, Mercury among them, stay connected)", srv.addr)
+                                } else {
+                                    format!("Radio shared for Mercury and other programs at {} (Hamlib model 2, NET rigctl)", srv.addr)
+                                });
                                 s.rig_server = Some(srv);
                             }
                             Err(e) => s.log(format!("⚠ {e}. Mercury won't be able to key the radio; change the sharing port in Settings.")),
@@ -1501,6 +1621,8 @@ impl Station {
                     // Stopped with the station (each restart used to leave
                     // the old one running).
                     s.fake = Some(f);
+                    // Its UI port, so the transmit level can be tried.
+                    s.fake_ui = crate::mercury_ui::fake_ui().await.ok();
                     r
                 }
                 Err(e) => {
@@ -1553,6 +1675,7 @@ impl Station {
                     }
                     let _ = t.send_line("VERSION").await;
                     self.tnc = Some(t);
+                    self.tx_level_start();
                     self.tnc_rx = Some(erx);
                     self.set(|g| {
                         g.mercury_ok = true;
@@ -1586,9 +1709,10 @@ impl Station {
         }
         self.sim_stop.store(true, Ordering::Relaxed);
         self.sdr_stop.store(true, Ordering::Relaxed);
-        // First close the shared radio port, so Mercury can't key the radio
-        // after this (its client's unkey is queued to the radio as it goes),
-        // and stop Mercury listening; then unkey, last, and wait for it.
+        // First take the radio off the shared port, so Mercury can't key it
+        // after this (an unkey is queued to the radio as it goes; the port
+        // stays open for the next station), and stop Mercury listening;
+        // then unkey, last, and wait for it.
         drop(self.rig_server.take());
         if let Some(t) = self.tnc.as_mut() {
             let _ = t.command("LISTEN OFF").await;
@@ -1748,6 +1872,98 @@ impl Station {
 
     /// Transmit meters, the SWR peak of each transmission, and whether the
     /// antenna tuner should be asked to tune afterwards.
+    /// Set Mercury's transmit level as Settings say (on connecting to
+    /// Mercury, and when they change). Auto starts at its ceiling and works
+    /// down from there.
+    fn tx_level_start(&mut self) {
+        use crate::config::TxLevel;
+        match self.cfg.tx_level {
+            TxLevel::Mercury => {
+                self.tx_level_now = None;
+                self.tx_level_want = None;
+                self.set(|g| {
+                    g.rig_ext.tx_level = None;
+                    g.rig_ext.tx_level_note = "Mercury's own (tx_gain_db in its mercury.ini)".into();
+                });
+            }
+            TxLevel::Set => self.tx_level_want = Some((self.cfg.tx_level_db, "as set".into())),
+            TxLevel::Auto => {
+                self.tx_level_want = Some((
+                    self.cfg.tx_level_db,
+                    "Auto: starting at its most, and turned down while the radio's ALC reads high".into(),
+                ))
+            }
+        }
+    }
+
+    /// After one of Mercury's transmissions: Auto's next step, from the
+    /// radio's ALC while it lasted.
+    fn tx_level_after_tx(&mut self) {
+        let reads = std::mem::take(&mut self.alc_reads);
+        if std::mem::take(&mut self.tuning_carrier)
+            || self.cfg.tx_level != crate::config::TxLevel::Auto
+            || self.tx_level_job.is_some()
+            || self.tx_level_want.is_some()
+        {
+            return;
+        }
+        let Some(now) = self.tx_level_now else { return };
+        if let Some((db, why)) = auto_level(now, self.cfg.tx_level_db, &reads) {
+            self.tx_level_want = Some((db, why));
+        }
+    }
+
+    /// Start a wanted level change, or take in the one being made (from
+    /// `tick`): Mercury's UI port is a separate connection that can take
+    /// seconds, so the engine doesn't wait for it.
+    fn tx_level_drive(&mut self) {
+        if let Some((db, why, rx)) = self.tx_level_job.as_mut() {
+            let r = match rx.try_recv() {
+                Ok(r) => r,
+                Err(tokio::sync::oneshot::error::TryRecvError::Empty) => return,
+                Err(_) => Err(anyhow::anyhow!("the change was dropped")),
+            };
+            let (db, why) = (*db, std::mem::take(why));
+            self.tx_level_job = None;
+            match r {
+                // Left to Mercury while it was being set: it took, but
+                // Whistlestop no longer sets it, so it isn't shown as set.
+                Ok(v) if self.cfg.tx_level == crate::config::TxLevel::Mercury => {
+                    self.log(format!("Transmit level: Mercury {v:+.1} dB (set just before it was left to Mercury)"));
+                }
+                Ok(v) => {
+                    self.tx_level_now = Some(v);
+                    self.tx_level_failed = false;
+                    if let Some(Rig::Sim(s)) = self.rig.as_mut() {
+                        s.drive_db = Some(v);
+                    }
+                    let note = format!("{v:+.1} dB ({why})");
+                    self.log(format!("Transmit level: Mercury {note}"));
+                    self.set(|g| {
+                        g.rig_ext.tx_level = Some(v);
+                        g.rig_ext.tx_level_note = note.clone();
+                    });
+                }
+                Err(e) => {
+                    let note = format!("couldn't set {db:+.1} dB: {e}");
+                    if !std::mem::replace(&mut self.tx_level_failed, true) {
+                        self.log(format!("⚠ Transmit level: {note}"));
+                    }
+                    self.set(|g| g.rig_ext.tx_level_note = note.clone());
+                }
+            }
+            return;
+        }
+        let Some((db, why)) = self.tx_level_want.take() else { return };
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let host = self.modem.0.clone();
+        let port = self.fake_ui.as_ref().map_or(self.cfg.mercury_ui_port, |u| u.port);
+        tokio::spawn(async move {
+            let _ = tx.send(crate::mercury_ui::set_tx_gain(&host, port, db).await);
+        });
+        self.tx_level_job = Some((db, why, rx));
+    }
+
     async fn poll_meters(&mut self) {
         let tx = self.st.lock().unwrap().tx;
         let caps = self.rig_caps.clone();
@@ -1771,6 +1987,13 @@ impl Station {
             if let Some(v) = swr {
                 self.swr_peak = self.swr_peak.max(v);
                 self.swr_reads.push(v);
+            }
+            if let Some(v) = alc
+                && self.mercury_ptt
+                && !self.engine_keyed
+                && !self.tuning_carrier
+            {
+                self.alc_reads.push(v);
             }
             self.set(|g| {
                 g.rig_ext.swr = swr;
@@ -1935,6 +2158,18 @@ impl Station {
                 // it (a poll can just miss a key-up): a transmission someone
                 // else made (a hand mic, the tuner) clears when it ends.
                 let tx = status.ptt || self.engine_keyed || self.mercury_ptt;
+                let mercury_for = self.mercury_ptt.then(|| self.mercury_ptt_at.elapsed());
+                match self.key_watch.poll(mercury_for, self.engine_keyed, status.ptt) {
+                    Some(KeyNote::Missed) => self.log(format!(
+                        "⚠ Mercury is transmitting but the radio isn't keyed, so nothing is going out. Check how Mercury keys the radio (its -P, -R and -A options, or [ptt] in mercury.ini{}), then restart Mercury",
+                        match &self.rig_server {
+                            Some(srv) => format!("; for this radio: Hamlib model 2 at {}", srv.addr),
+                            None => String::new(),
+                        }
+                    )),
+                    Some(KeyNote::Back) => self.log("Radio: Mercury is keying it again".into()),
+                    None => {}
+                }
                 if status.ptt && self.unkey_owed && !self.engine_keyed && !self.mercury_ptt {
                     self.log("⚠ The radio is still keyed: unkeying again".into());
                 }
@@ -1984,11 +2219,16 @@ impl Station {
                 let old_call = self.mycall();
                 let busy_was = self.cfg.busy_detect;
                 let busy_now = c.busy_detect;
+                let level_was = (self.cfg.tx_level, self.cfg.tx_level_db, self.cfg.mercury_ui_port);
+                let level_now = (c.tx_level, c.tx_level_db, c.mercury_ui_port);
                 if busy_was && !busy_now {
                     // Off: a BUSY it latched must not hold anything back.
                     self.busy_detect(false).await;
                 }
                 self.cfg = c;
+                if level_now != level_was && self.tnc.is_some() {
+                    self.tx_level_start();
+                }
                 if !busy_was && busy_now && self.peer.is_none() {
                     self.busy_detect(true).await;
                 }
@@ -2034,6 +2274,7 @@ impl Station {
                 }
                 if let Some(t) = self.tnc.as_mut() {
                     t.command(if on { "TUNE -15" } else { "TUNE OFF" }).await?;
+                    self.tuning_carrier = on;
                 }
             }
             Cmd::SetBandwidth(bw) => {
@@ -3498,6 +3739,10 @@ impl Station {
                 }
                 if self.mercury_ptt && !on {
                     self.own_tx_end = Some(Instant::now());
+                    self.tx_level_after_tx();
+                }
+                if on && !self.mercury_ptt {
+                    self.alc_reads.clear();
                 }
                 self.mercury_ptt = on;
                 // One more frame off the air for a waiting speed change.
@@ -5678,6 +5923,7 @@ impl Station {
     // ---------------------------------------------------------------- tick
 
     async fn tick(&mut self) -> anyhow::Result<()> {
+        self.tx_level_drive();
         // The wide receiver stopping (no dongle, its driver, unplugged) was
         // said only in its own panel, which isn't drawn once it has
         // stopped: the SDR pill went red with no reason anywhere.
@@ -7058,6 +7304,141 @@ mod tests {
         assert!(!busy_counts(false, None, None, None, s(5)));
     }
 
+    /// Auto level: down 2 dB while ALC reads high, up 1 dB while it reads
+    /// low but never past the level set, and nothing on too few readings.
+    #[test]
+    fn auto_level_follows_the_alc() {
+        let to = |now, ceil, a: &[f32]| auto_level(now, ceil, a).map(|(v, _)| v);
+        // The FTDX3000 at 0 dB: 0.54.
+        assert_eq!(to(0.0, 0.0, &[0.54, 0.55, 0.53]), Some(-2.0));
+        // In the band: stays.
+        assert_eq!(to(-8.0, 0.0, &[0.36, 0.37]), None);
+        // One spike in a transmission doesn't move it.
+        assert_eq!(to(-8.0, 0.0, &[0.36, 0.9, 0.35]), None);
+        // Low: back up, but not past the ceiling.
+        assert_eq!(to(-10.0, 0.0, &[0.05, 0.06]), Some(-9.0));
+        assert_eq!(to(-0.5, 0.0, &[0.05, 0.06]), Some(0.0));
+        assert_eq!(to(0.0, 0.0, &[0.0, 0.0]), None);
+        // Not below Mercury's least.
+        assert_eq!(to(-19.0, 0.0, &[0.9, 0.9]), Some(-20.0));
+        assert_eq!(to(-20.0, 0.0, &[0.9, 0.9]), None);
+        // Too few readings (a short frame).
+        assert_eq!(to(0.0, 0.0, &[0.9]), None);
+        assert_eq!(to(0.0, 0.0, &[]), None);
+    }
+
+    /// Auto, end to end in Demo (whose Mercury has a stand-in UI port): the
+    /// simulated radio's ALC follows Mercury's level as the FTDX3000's did
+    /// on the air (0.54 at 0 dB), and
+    /// Auto, starting at 0 dB, comes down 2 dB a transmission until the ALC
+    /// is under 45 %: -6 dB (0.42), where it stays.
+    #[test]
+    fn auto_level_settles_on_the_simulated_radio() {
+        assert!((crate::rig::sim_alc(0.0) - 0.54).abs() < 1e-6);
+        assert!((crate::rig::sim_alc(-5.0) - 0.45).abs() < 1e-6);
+        assert!((crate::rig::sim_alc(-12.0) - 0.08).abs() < 1e-5);
+        assert!((crate::rig::sim_alc(5.0) - 0.63).abs() < 1e-5);
+        let h = spawn(|| {});
+        let mut cfg = Config {
+            callsign: "N0AUTO".into(),
+            demo: true,
+            demo_real_mercury: false,
+            busy_detect: false,
+            whistle_s: 1.0,
+            cq_listen_s: 1.0,
+            cq_cycles: 1,
+            tx_level: crate::config::TxLevel::Auto,
+            tx_level_db: 0.0,
+            ..Default::default()
+        };
+        cfg.sdr.enabled = false;
+        cfg.sdr.wide_search = false;
+        h.send(Cmd::Start(cfg));
+        let t = Instant::now();
+        while h.state.lock().unwrap().rig_ext.tx_level != Some(0.0) {
+            assert!(t.elapsed() < Duration::from_secs(10), "{:#?}", h.state.lock().unwrap().log);
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        // Short CQs (a 1 s whistle, which doesn't count, and Mercury's
+        // 3.1 s CQ frame) until it has settled, and one more to see it stay.
+        // The demo's K7BOT answers one: its link's frames count too, and it
+        // is hung up before the next CQ.
+        let cq = || {
+            if h.state.lock().unwrap().link.is_some() {
+                h.send(Cmd::Disconnect);
+                let t = Instant::now();
+                while h.state.lock().unwrap().link.is_some() {
+                    assert!(t.elapsed() < Duration::from_secs(30), "link never ended: {:#?}", h.state.lock().unwrap().log);
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+                std::thread::sleep(Duration::from_millis(800));
+            }
+            h.send(Cmd::CallCq { table: None });
+            let t = Instant::now();
+            while !h.state.lock().unwrap().cq.active {
+                assert!(t.elapsed() < Duration::from_secs(10), "no CQ: {:#?}", h.state.lock().unwrap().log);
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            while h.state.lock().unwrap().cq.active {
+                assert!(t.elapsed() < Duration::from_secs(30), "CQ never ended: {:#?}", h.state.lock().unwrap().log);
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            std::thread::sleep(Duration::from_millis(800));
+        };
+        for _ in 0..6 {
+            cq();
+            if h.state.lock().unwrap().rig_ext.tx_level == Some(-6.0) {
+                break;
+            }
+        }
+        cq();
+        let g = h.state.lock().unwrap();
+        let steps: Vec<&str> = g.log.iter().filter(|l| l.1.starts_with("Transmit level")).map(|l| l.1.as_str()).collect();
+        assert_eq!(steps.len(), 4, "{steps:#?}");
+        for (s, v) in steps.iter().zip(["+0.0", "-2.0", "-4.0", "-6.0"]) {
+            assert!(s.contains(&format!("Mercury {v} dB")), "{steps:#?}");
+        }
+        assert_eq!(g.rig_ext.tx_level, Some(-6.0));
+        assert!(g.rig_ext.tx_level_note.contains("ALC read 47%"), "{}", g.rig_ext.tx_level_note);
+        drop(g);
+        h.send(Cmd::Stop);
+    }
+
+    /// Mercury transmitting into a radio that reads unkeyed is said once,
+    /// after 1.5 s and two polls in a row, and only for a radio whose PTT
+    /// reading works (it has read keyed before); its return is said too.
+    #[test]
+    fn mercury_keying_nothing_is_noticed() {
+        let ms = |n: u64| Some(Duration::from_millis(n));
+        let mut w = KeyWatch::default();
+        // A radio that has never read keyed: can't tell, says nothing.
+        for _ in 0..5 {
+            assert_eq!(w.poll(ms(3000), false, false), None);
+        }
+        // Keyed once (a whistle): its reading works.
+        assert_eq!(w.poll(None, true, true), None);
+        // Mercury's key-up: not before 1.5 s, and not on one poll.
+        assert_eq!(w.poll(ms(700), false, false), None);
+        assert_eq!(w.poll(ms(1400), false, false), None);
+        assert_eq!(w.poll(ms(2100), false, false), None);
+        assert_eq!(w.poll(ms(2800), false, false), Some(KeyNote::Missed));
+        // Once.
+        assert_eq!(w.poll(ms(3500), false, false), None);
+        assert_eq!(w.poll(None, false, false), None);
+        assert_eq!(w.poll(ms(2100), false, false), None);
+        assert_eq!(w.poll(ms(2800), false, false), None);
+        // Keying again ends it, said once.
+        assert_eq!(w.poll(ms(700), false, true), Some(KeyNote::Back));
+        assert_eq!(w.poll(ms(1400), false, true), None);
+        // A late reading between keyed ones isn't a miss.
+        assert_eq!(w.poll(ms(2100), false, false), None);
+        assert_eq!(w.poll(ms(2800), false, true), None);
+        assert_eq!(w.poll(ms(3500), false, false), None);
+        // Whistlestop's own key-up (a whistle) isn't Mercury's.
+        assert_eq!(w.poll(ms(4200), true, false), None);
+        assert_eq!(w.poll(ms(4900), true, false), None);
+    }
+
     /// The search tests run a simulated band in real time and time a
     /// search across it: several at once starve each other of CPU (whistles
     /// heard late, or something heard in the noise). One at a time.
@@ -7656,6 +8037,65 @@ mod tests {
             assert!(t.elapsed() < Duration::from_secs(5), "{:#?}", h.state.lock().unwrap().log);
             std::thread::sleep(Duration::from_millis(50));
         }
+        h.send(Cmd::Stop);
+        drop(rt);
+    }
+
+    /// Transmit level "Set here": set through Mercury's UI port when
+    /// Mercury connects and again when Settings change it, shown with the
+    /// level Mercury confirmed; with no UI port, said once.
+    #[test]
+    fn the_transmit_level_reaches_mercury() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let f = rt.block_on(crate::fake_mercury::FakeMercury::start(FakeOptions::default())).unwrap();
+        let fake = rt.block_on(crate::mercury_ui::fake_ui()).unwrap();
+        let (ui, set) = (fake.port, fake.set.clone());
+        let h = spawn(|| {});
+        let mut cfg = Config {
+            callsign: "N0LVL".into(),
+            demo: false,
+            rigctld: "none".into(),
+            mercury_port: f.port,
+            mercury_bcast_port: f.bcast_port,
+            tx_level: crate::config::TxLevel::Set,
+            tx_level_db: -6.5,
+            mercury_ui_port: ui,
+            ..Default::default()
+        };
+        cfg.sdr.enabled = false;
+        cfg.sdr.wide_search = false;
+        h.send(Cmd::Start(cfg.clone()));
+        let wait = |what: &str, ok: &dyn Fn(&State) -> bool| {
+            let t = Instant::now();
+            while !ok(&h.state.lock().unwrap()) {
+                assert!(t.elapsed() < Duration::from_secs(10), "{what}: {:#?}", h.state.lock().unwrap().log);
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        };
+        wait("set at connect", &|g| g.rig_ext.tx_level == Some(-6.5));
+        cfg.tx_level_db = -9.0;
+        h.send(Cmd::Update(cfg.clone()));
+        wait("set from Settings", &|g| g.rig_ext.tx_level == Some(-9.0));
+        assert_eq!(*set.lock().unwrap(), [-6.5, -9.0]);
+        // An unrelated change doesn't set it again.
+        cfg.swr_limit = 2.5;
+        h.send(Cmd::Update(cfg.clone()));
+        std::thread::sleep(Duration::from_millis(500));
+        assert_eq!(set.lock().unwrap().len(), 2);
+        // Back to Mercury's own: left alone.
+        cfg.tx_level = crate::config::TxLevel::Mercury;
+        h.send(Cmd::Update(cfg.clone()));
+        wait("left to Mercury", &|g| g.rig_ext.tx_level.is_none());
+        // No UI port (Mercury without -G): said once, with what to do.
+        let free = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+        cfg.tx_level = crate::config::TxLevel::Set;
+        cfg.mercury_ui_port = free;
+        h.send(Cmd::Update(cfg.clone()));
+        wait("failure said", &|g| g.log.iter().any(|l| l.1.contains("⚠ Transmit level") && l.1.contains("-G")));
+        cfg.tx_level_db = -3.0;
+        h.send(Cmd::Update(cfg.clone()));
+        wait("second failure noted", &|g| g.rig_ext.tx_level_note.contains("-3.0"));
+        assert_eq!(h.state.lock().unwrap().log.iter().filter(|l| l.1.contains("⚠ Transmit level")).count(), 1);
         h.send(Cmd::Stop);
         drop(rt);
     }

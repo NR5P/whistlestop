@@ -10,6 +10,7 @@ pub mod engine;
 pub mod ether;
 pub mod fake_mercury;
 pub mod library;
+pub mod mercury_ui;
 pub mod modes;
 pub mod protocol;
 pub mod realdemo;

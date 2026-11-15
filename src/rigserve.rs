@@ -6,53 +6,129 @@
 //! Handles what those programs use: frequency, mode, PTT, VFO, split,
 //! levels and functions, `\chk_vfo` and `\dump_state` (the handshake Hamlib's
 //! NET rigctl backend performs when it opens).
+//!
+//! The port stays open across a restart of the station (saving Settings):
+//! Hamlib's NET rigctl connects once, when its program starts, and never
+//! again, so a closed port left Mercury unable to key the radio until it
+//! was restarted (found on the air, 2026-11-14). While no radio is behind
+//! it (between stations, or the radio didn't open) every command gets an
+//! I/O error, and the same connection works again once one is.
 
 use crate::cat::CatHandle;
 use anyhow::Result;
+use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
 
-/// Stops the server when dropped.
-pub struct RigServer {
+/// The radio behind a port, if any.
+type Slot = Arc<Mutex<Option<CatHandle>>>;
+
+/// Open ports, by number, that outlive the station that opened them.
+struct Open {
+    port: u16,
+    slot: Slot,
     task: tokio::task::JoinHandle<()>,
+    addr: String,
+}
+
+static OPEN: Mutex<Vec<Open>> = Mutex::new(Vec::new());
+
+/// Takes the radio off its port when dropped (the port itself stays open
+/// for the next station; port 0, a test's, closes).
+pub struct RigServer {
+    slot: Slot,
+    own: Option<tokio::task::JoinHandle<()>>,
     pub addr: String,
+    /// The port was already open: programs connected to it stay connected.
+    pub kept: bool,
 }
 
 impl Drop for RigServer {
     fn drop(&mut self) {
-        self.task.abort();
+        // Unkey through it as it goes (a client may have keyed), as when
+        // its clients were dropped with it; then let the radio go, so its
+        // serial port is released.
+        if let Some(r) = self.slot.lock().unwrap().take() {
+            r.send(|d| {
+                let _ = d.set_ptt(false);
+            });
+        }
+        if let Some(t) = self.own.take() {
+            t.abort();
+        }
     }
 }
 
+/// Close the open ports no station is using, except `keep` (the one about
+/// to be shared again), so another program (rigctld) can have them.
+pub fn close_idle(keep: Option<u16>) {
+    OPEN.lock().unwrap().retain(|o| {
+        let keep = Some(o.port) == keep || o.slot.lock().unwrap().is_some();
+        if !keep {
+            o.task.abort();
+        }
+        keep && !o.task.is_finished()
+    });
+}
+
 pub async fn serve(radio: CatHandle, port: u16) -> Result<RigServer> {
+    if port != 0 {
+        let mut open = OPEN.lock().unwrap();
+        open.retain(|o| !o.task.is_finished());
+        if let Some(o) = open.iter().find(|o| o.port == port) {
+            let mut slot = o.slot.lock().unwrap();
+            if slot.is_some() {
+                anyhow::bail!("can't share the radio on port {port}: it's already shared");
+            }
+            *slot = Some(radio);
+            return Ok(RigServer {
+                slot: o.slot.clone(),
+                own: None,
+                addr: o.addr.clone(),
+                kept: true,
+            });
+        }
+    }
     let l = TcpListener::bind(("127.0.0.1", port))
         .await
         .map_err(|e| anyhow::anyhow!("can't share the radio on port {port}: {e}"))?;
     let addr = l.local_addr()?.to_string();
+    let slot: Slot = Arc::new(Mutex::new(Some(radio)));
+    let s = slot.clone();
     let task = tokio::spawn(async move {
-        // A JoinSet aborts every client when the server stops, so their
-        // handles on the radio go and its port is released.
+        // A JoinSet aborts every client when the port closes.
         let mut clients = tokio::task::JoinSet::new();
-        while let Ok((s, _)) = l.accept().await {
+        while let Ok((c, _)) = l.accept().await {
             while clients.try_join_next().is_some() {}
-            clients.spawn(client(s, radio.clone()));
+            clients.spawn(client(c, s.clone()));
         }
     });
-    Ok(RigServer { task, addr })
+    if port == 0 {
+        return Ok(RigServer { slot, own: Some(task), addr, kept: false });
+    }
+    OPEN.lock().unwrap().push(Open {
+        port,
+        slot: slot.clone(),
+        task,
+        addr: addr.clone(),
+    });
+    Ok(RigServer { slot, own: None, addr, kept: false })
 }
 
 /// Unkeys the radio when a client that keyed it goes away (closes the
-/// connection, drops it, or the server stops), so a program that crashes
+/// connection, drops it, or the port closes), so a program that crashes
 /// or loses its link mid-transmission doesn't leave the radio on the air.
 struct KeyGuard {
-    radio: CatHandle,
+    slot: Slot,
     keyed: bool,
 }
 
 impl Drop for KeyGuard {
     fn drop(&mut self) {
-        if self.keyed {
-            self.radio.send(|d| {
+        if self.keyed
+            && let Some(r) = self.slot.lock().unwrap().as_ref()
+        {
+            r.send(|d| {
                 let _ = d.set_ptt(false);
             });
         }
@@ -76,12 +152,12 @@ fn ptt_request(line: &str) -> Option<bool> {
     ptt_arg(&it.collect::<Vec<_>>())
 }
 
-async fn client(s: TcpStream, radio: CatHandle) {
+async fn client(s: TcpStream, slot: Slot) {
     let _ = s.set_nodelay(true);
     let (r, mut w) = s.into_split();
     let mut lines = BufReader::new(r).lines();
     let mut guard = KeyGuard {
-        radio: radio.clone(),
+        slot: slot.clone(),
         keyed: false,
     };
     while let Ok(Some(line)) = lines.next_line().await {
@@ -95,7 +171,14 @@ async fn client(s: TcpStream, radio: CatHandle) {
         if ptt == Some(true) {
             guard.keyed = true;
         }
-        let Some(reply) = answer(&radio, line).await else {
+        // The radio behind the port now (none between stations).
+        let radio = slot.lock().unwrap().clone();
+        let reply = match &radio {
+            Some(radio) => answer(radio, line).await,
+            None => idle_answer(line),
+        };
+        drop(radio);
+        let Some(reply) = reply else {
             break;
         };
         if ptt == Some(false) && reply == OK {
@@ -112,6 +195,18 @@ const ENIMPL: &str = "RPRT -4\n";
 const EIO: &str = "RPRT -6\n";
 /// Hamlib RIG_EINVAL: a malformed argument.
 const EINVAL: &str = "RPRT -1\n";
+
+/// The reply while no radio is behind the port: the handshake (so a
+/// program can connect) and an I/O error for the rest.
+fn idle_answer(line: &str) -> Option<String> {
+    let line = line.trim_start_matches(['+', ';', '|', ',']);
+    match line.split_whitespace().next().unwrap_or("") {
+        "q" | "Q" | "\\quit" => None,
+        "\\chk_vfo" | "chk_vfo" => Some("0\n".into()),
+        "\\dump_state" | "dump_state" => Some(dump_state(&[], &[])),
+        _ => Some(EIO.into()),
+    }
+}
 
 /// The reply to one command line, or None to close the connection.
 async fn answer(radio: &CatHandle, line: &str) -> Option<String> {
@@ -132,7 +227,7 @@ async fn answer(radio: &CatHandle, line: &str) -> Option<String> {
     match cmd {
         "q" | "Q" | "\\quit" => None,
         "\\chk_vfo" | "chk_vfo" => Some("0\n".into()),
-        "\\dump_state" | "dump_state" => Some(dump_state(radio)),
+        "\\dump_state" | "dump_state" => Some(dump_state(&radio.caps.preamp_db, &radio.caps.att_db)),
         "\\get_powerstat" | "get_powerstat" => Some("1\n".into()),
         "f" | "\\get_freq" => Some(match radio.call(|d| d.freq()).await {
             Ok(f) => format!("{f:.0}\n"),
@@ -254,7 +349,7 @@ async fn answer(radio: &CatHandle, line: &str) -> Option<String> {
 
 /// The capability report Hamlib's NET rigctl backend reads at open
 /// (protocol 1, in the layout Hamlib's own rigctld uses).
-fn dump_state(radio: &CatHandle) -> String {
+fn dump_state(preamp_db: &[i32], att_db: &[i32]) -> String {
     let modes = "0x1fff"; // AM CW USB LSB RTTY FM WFM CWR RTTYR AMS PKTLSB PKTUSB PKTFM
     let mut s = String::new();
     s += "1\n2\n0\n";
@@ -266,8 +361,8 @@ fn dump_state(radio: &CatHandle) -> String {
     let list = |v: &[i32]| v.iter().map(|x| format!("{x} ")).collect::<String>();
     s += &format!(
         "{}\n{}\n",
-        list(&radio.caps.preamp_db),
-        list(&radio.caps.att_db)
+        list(preamp_db),
+        list(att_db)
     );
     // Functions and levels aren't advertised: clients ask, and get
     // "not implemented" for what this radio can't do.
@@ -379,6 +474,61 @@ mod tests {
         }
     }
 
+    fn kenwood() -> CatHandle {
+        let d = crate::cat::kenwood::Kenwood::new(
+            Box::new(SimRadio::new(Kind::Kenwood("023"))),
+            "023",
+            false,
+            100.0,
+        )
+        .unwrap();
+        CatHandle::start(Box::new(d))
+    }
+
+    /// Saving Settings restarts the station; a program connected to the
+    /// shared port (Mercury's Hamlib PTT, which connects only when Mercury
+    /// starts) stays connected and works again with the next station.
+    #[tokio::test]
+    async fn the_port_outlives_a_station() {
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let srv = serve(kenwood(), port).await.unwrap();
+        assert!(!srv.kept);
+        let mut s = BufReader::new(TcpStream::connect(&srv.addr).await.unwrap());
+        assert_eq!(ask(&mut s, "f", 1).await, ["14074000"]);
+        assert_eq!(ask(&mut s, "T 1", 1).await, ["RPRT 0"]);
+        // The station stops: no radio behind the port, but it's open.
+        drop(srv);
+        assert_eq!(ask(&mut s, "T 1", 1).await, ["RPRT -6"]);
+        assert_eq!(ask(&mut s, "\\chk_vfo", 1).await, ["0"]);
+        close_idle(Some(port));
+        // The next station shares the radio on the same port: the same
+        // connection works.
+        let srv = serve(kenwood(), port).await.unwrap();
+        assert!(srv.kept);
+        assert_eq!(ask(&mut s, "f", 1).await, ["14074000"]);
+        assert_eq!(ask(&mut s, "T 1", 1).await, ["RPRT 0"]);
+        assert_eq!(ask(&mut s, "t", 1).await, ["1"]);
+        // A second share of a port in use is refused.
+        assert!(serve(kenwood(), port).await.is_err());
+        // In use, it isn't closed as idle.
+        close_idle(None);
+        assert_eq!(ask(&mut s, "T 0", 1).await, ["RPRT 0"]);
+        // A station that doesn't share it: closed, the connection with it.
+        drop(srv);
+        close_idle(None);
+        let mut l = String::new();
+        let n = tokio::time::timeout(std::time::Duration::from_secs(5), s.read_line(&mut l))
+            .await
+            .expect("still open")
+            .unwrap_or(0);
+        assert_eq!(n, 0, "{l}");
+        assert!(tokio::net::TcpListener::bind(("127.0.0.1", port)).await.is_ok());
+    }
+
     #[test]
     fn spots_ptt_requests() {
         assert_eq!(ptt_request("T 1"), Some(true));
@@ -417,5 +567,62 @@ mod tests {
         assert_eq!(lines.first(), Some(&"14074000"), "{text}\n{err}");
         assert!(lines.contains(&"14100000"), "{text}\n{err}");
         assert!(lines.contains(&"1"), "PTT read back: {text}\n{err}");
+    }
+
+    /// Hamlib's own NET rigctl, connected once (as Mercury's PTT is), keeps
+    /// working after the station restarts behind the port.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn hamlib_stays_connected_across_a_restart() {
+        use std::io::{BufRead, Write};
+        let Some(rigctl) = crate::rigsetup::hamlib_bin("rigctl") else {
+            eprintln!("Hamlib not installed; skipping");
+            return;
+        };
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let srv = serve(kenwood(), port).await.unwrap();
+        let mut child = std::process::Command::new(rigctl)
+            .args(["-m", "2", "-r", &srv.addr, "-"])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let mut stdin = child.stdin.take().unwrap();
+        let (tx, rx) = std::sync::mpsc::channel::<String>();
+        let out = child.stdout.take().unwrap();
+        std::thread::spawn(move || {
+            for l in std::io::BufReader::new(out).lines().map_while(Result::ok) {
+                let _ = tx.send(l);
+            }
+        });
+        // Each command's reply (rigctl prints a value, or nothing for a set).
+        let mut cmd = |c: &str| {
+            writeln!(stdin, "{c}").unwrap();
+            stdin.flush().unwrap();
+        };
+        let next = |rx: &std::sync::mpsc::Receiver<String>| {
+            rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap_or_default()
+        };
+        cmd("f");
+        assert_eq!(next(&rx), "14074000");
+        drop(srv);
+        let srv = serve(kenwood(), port).await.unwrap();
+        assert!(srv.kept);
+        cmd("F 7074000");
+        cmd("f");
+        assert_eq!(next(&rx), "7074000");
+        cmd("T 1");
+        cmd("t");
+        assert_eq!(next(&rx), "1");
+        cmd("T 0");
+        cmd("q");
+        drop(stdin);
+        let _ = child.wait();
+        drop(srv);
+        close_idle(None);
     }
 }

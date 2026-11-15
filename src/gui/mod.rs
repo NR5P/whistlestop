@@ -2032,6 +2032,9 @@ impl App {
                             ui.label("Broadcast port");
                             ui.add(egui::DragValue::new(&mut c.mercury_bcast_port)).help(&help::ST_MERCURY);
                             ui.end_row();
+                            ui.label("UI port (-G)");
+                            ui.add(egui::DragValue::new(&mut c.mercury_ui_port)).help(&help::ST_MERCURY_UI);
+                            ui.end_row();
                         });
                         ui.label(RichText::new("Set Mercury's radio to Hamlib model 2 (NET rigctl) at the rigctld address below, so both share the radio.").small().color(DIM));
                     });
@@ -2521,6 +2524,8 @@ impl App {
                 new.sdr.wide_auto = self.cfg.sdr.wide_auto;
                 new.auto_tune = self.cfg.auto_tune;
                 new.swr_limit = self.cfg.swr_limit;
+                new.tx_level = self.cfg.tx_level;
+                new.tx_level_db = self.cfg.tx_level_db;
                 // The Remote window's (sharing this station on the LAN).
                 new.remote_serve = self.cfg.remote_serve;
                 new.remote_password = self.cfg.remote_password.clone();

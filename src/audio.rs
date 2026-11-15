@@ -1055,7 +1055,7 @@ mod recorded_calibration_tests {
                 // Of the 1.2 s looks over `found` (the search's check after
                 // retuning): how many the watch's test confirms.
                 let mut conf = vec![];
-                let mut confirm = |t: &mut TrackDetector, d: &mut crate::whistle::Detector, b: &[f64]| -> Option<bool> {
+                let confirm = |t: &mut TrackDetector, d: &mut crate::whistle::Detector, b: &[f64]| -> Option<bool> {
                     let h = t.scan(b).filter(|h| h.z >= found_z)?;
                     Some(d.detect(b).is_some_and(|det| crate::whistle::watch_confirms(&h, &det)))
                 };

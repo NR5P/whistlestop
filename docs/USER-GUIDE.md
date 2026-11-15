@@ -73,6 +73,7 @@ Install Mercury (macOS: drag `Mercury.app` to Applications). Then set it up so i
 - **Radio / PTT**: Hamlib model **2 (NET rigctl)** pointing at `127.0.0.1:4532` (the default for all three ways: Whistlestop's direct-CAT sharing port, the rigctld it runs, or RigHelm's server). Mercury then keys the transmitter through the same server.
 - **Sound card**: the radio's USB audio codec, both directions.
 - **Ports**: leave the TNC port at **8300** (data on 8301) and the broadcast port at **8100**, or set the same numbers in Whistlestop **Settings → Mercury modem**.
+- **Transmit level** (optional): start Mercury with **-G** (its UI port, 10000) and Whistlestop can set Mercury's transmit level for you, by hand or automatically from the radio's ALC. See "Transmit level".
 
 The **Mercury** pill turns green when Whistlestop is connected. Mercury accepts one program at a time on its TNC port, so close VarAC or any other program that uses it. Whistlestop tries Mercury when it starts and doesn't keep retrying (each attempt would take Mercury from a program using it). If you start Mercury afterwards (with direct CAT it has to come second, since it keys the radio through Whistlestop's sharing port), **click the red Mercury pill** to connect; the radio connection stays up.
 
@@ -584,6 +585,7 @@ The top bar's S-meter and frequency display follow the radio, including changes 
 **🎛 Radio controls** opens a separate, movable window with everything your radio offers through Hamlib. Close it when you're done, so the main screen stays uncluttered. Whistlestop asks the radio for its capabilities when it connects and **shows only the controls your radio reports**, so there are no buttons that do nothing. Values are read from the radio about every 1.5 s while the window is open. During a link or a call, the controls that move what the radio hears or sends on (VFO A/B, swap, split, RIT/XIT) are refused ("not while linked…"): the link would be lost.
 
 - **Transmit meters**: **SWR**, **ALC** and **Power out**, read while transmitting, plus the SWR of the last transmission. See "Antenna tuner and SWR".
+- **Transmit level**: who sets Mercury's transmit level (**Mercury's own**, **Set here**, **Auto (from ALC)**), the level, and the level Mercury confirmed. See "Transmit level".
 - **Antenna tuner**: **ATU** (tuner in or out), **⟳ Tune now**, the Mercury **Tune carrier**, and **Auto-tune when SWR is above …** with its limit.
 - **Receive**: **Volume (AF)**, **RF gain**, **Squelch**, **AGC** (Off, Fast, Medium, Slow, Auto), **Preamp** and **Attenuator** (the steps your radio offers), **NB**, **NR** (with level), **Notch**, and **Filter width** (300–4000 Hz).
 - **Transmit**: **Power**, **Mic gain**, **Compression**, and the **Comp**, **VOX** and **Monitor** switches.
@@ -613,7 +615,7 @@ With **Settings → Radio connection → Direct CAT (built in)**, Whistlestop co
 - **or network address**: `host:port` reaches a radio through a serial-over-network bridge (ser2net and similar) or a FlexRadio CAT port. A bridge that doesn't answer is given up on after about 3 s (per address the name resolves to), and a port that won't open is retried for 2 s, so a switched-off bridge never holds Whistlestop up for long.
 - The port is opened with **RTS and DTR held low**, because on many radios those lines key the transmitter. One exception: a **Yaesu**'s own CAT port (the first of the two ports its USB cable shows, recognised by its USB interface number) is opened with **RTS high** and 2 stop bits, because with the radio's **CAT RTS** menu on (often the factory setting) it doesn't answer otherwise. The other port of the pair, which keys the transmitter on RTS, is never used for CAT; a port Whistlestop can't place (chosen by hand on a platform that doesn't report USB interfaces) keeps RTS low, so with it set the radio's CAT RTS to DISABLE.
 
-**Sharing with Mercury.** Only one program can open the serial port, so Whistlestop serves the rigctld protocol on **Share with Mercury on port** (default 4532). Set Mercury to **Hamlib model 2 (NET rigctl)** at `127.0.0.1:4532` and it keys the radio through Whistlestop. Loggers and other programs that speak rigctld can use it too. Turn sharing off only if Mercury keys the radio another way (VOX, or its own PTT port). If a program keys the radio through this port and then disconnects or crashes without unkeying, Whistlestop unkeys the radio for it. Quitting Whistlestop also waits (up to 3 s) until the radio is unkeyed.
+**Sharing with Mercury.** Only one program can open the serial port, so Whistlestop serves the rigctld protocol on **Share with Mercury on port** (default 4532). Set Mercury to **Hamlib model 2 (NET rigctl)** at `127.0.0.1:4532` and it keys the radio through Whistlestop. Loggers and other programs that speak rigctld can use it too. Turn sharing off only if Mercury keys the radio another way (VOX, or its own PTT port). **The port stays open when you save Settings**: Hamlib's NET rigctl connects once, when Mercury starts, and never again, so a port that closed and reopened left Mercury unable to key the radio until it was restarted. Now Mercury stays connected while Whistlestop restarts the radio behind it; for the moment in between, its commands get an error (Mercury can't key the radio then) and the same connection works again as soon as the radio is back. The Log says "Radio shared at 127.0.0.1:4532 again". The port closes if you turn sharing off, change its number, or choose another way to reach the radio. If a program keys the radio through this port and then disconnects or crashes without unkeying, Whistlestop unkeys the radio for it. Quitting Whistlestop also waits (up to 3 s) until the radio is unkeyed.
 
 **Never left transmitting.** Whistlestop keeps the radio from staying keyed when something goes wrong:
 - If the radio's sound output stops taking the whistle (unplugged, or its stream failed), the whistle gives up 3 s after its own length: the radio is unkeyed, the CQ stops, and the Log says "⚠ The whistle didn't finish playing …".
@@ -621,7 +623,7 @@ With **Settings → Radio connection → Direct CAT (built in)**, Whistlestop co
 - If an unkey fails (CAT upset by RF, rigctld not answering), Whistlestop keeps trying on every radio poll (0.7 s) until it goes through ("⚠ Unkeying the radio failed …; trying again", then "Radio unkeyed").
 - The TX lamp shows what the radio reports, or what Whistlestop or Mercury keyed, so a transmission made another way (your mic, the antenna tuner) clears when it ends.
 - On the shared port, a PTT command needs its state as a number (`T 1`, `T 0`, or `T VFOA 0` in rigctld's VFO mode); anything else is refused, never taken as key up.
-- When Whistlestop stops, it closes the shared port first (so Mercury can't key the radio after that), stops Mercury listening, then unkeys the radio, trying up to 3 times.
+- When Whistlestop stops (or restarts the station for a Settings change), it takes the radio off the shared port first (so Mercury can't key the radio after that), stops Mercury listening, then unkeys the radio, trying up to 3 times.
 - With rigctld, a reply that comes too late, or a dropped connection, makes Whistlestop open a fresh connection for the next command, so a late answer is never taken for the next command's; it also reconnects by itself to a rigctld that restarted. The same radio error is logged once (again if it changes, or after a minute), and "Radio: back" when it clears.
 
 **FT-817 family PTT.** Whistlestop checks that the radio did key or unkey, from its acknowledgement or, failing that, its TX status; if it can't confirm, it reports an error instead of assuming the radio is receiving. The PTT readout comes from the radio's own TX status.
@@ -684,6 +686,29 @@ Tick **Auto-tune when SWR is above** in the Radio Controls window to let Whistle
 
 After a tune, the window shows "Tuned on 40m at 14:02". The setting and the limit are saved.
 
+## Transmit level
+
+Mercury's transmit audio level decides how hard it drives the radio. Too much and the radio's **ALC** (automatic level control) squeezes the signal, which distorts data; too little and the signal is weak. For data, ALC should barely move. Mercury keeps its level as **tx_gain_db** in its mercury.ini (0 dB by default, from -20 to +20 dB), read when it starts.
+
+**Radio controls → Transmit level** lets Whistlestop set it while Mercury runs:
+
+- **Mercury's own** (the default): Whistlestop leaves Mercury's level alone.
+- **Set here**: Mercury's level is the one on the slider (**-20 to +10 dB**, steps of 0.5 dB). It's set when Whistlestop connects to Mercury and whenever you move the slider.
+- **Auto (from ALC)**: the slider is the **most** Auto will use. Auto starts there; after each of Mercury's transmissions it looks at the radio's ALC over that transmission (read every 0.7 s, by its median, so one reading doesn't count) and:
+  - above **45 %**: turns the level down **2 dB** (no lower than -20 dB);
+  - below **15 %**: turns it back up **1 dB**, never past the slider;
+  - in between: leaves it.
+
+  It needs two ALC readings or more from the transmission (a short frame has fewer and changes nothing), and a radio that reports ALC (Hamlib's `l ALC`, or direct CAT). The whistle and the tuning carrier don't count: Mercury's level doesn't change them. Auto starts again from the top each time Whistlestop connects to Mercury (when it starts, after **Save & connect**) and when you change the slider or the choice, and finds its level again within a few transmissions.
+
+**Now** shows the level Mercury confirmed last; the line under it says why it was set ("Auto: the radio's ALC read 54%, above 45%") or why it couldn't be. Each change is also in the Log ("Transmit level: Mercury -2.0 dB (…)"). Mercury saves every change in its mercury.ini, so it starts at that level next time too.
+
+**Mercury's UI port.** Set here and Auto talk to Mercury through its WebSocket, which it opens only when started with **-G** (on port 10000; **-U** chooses another, and **Settings → Mercury modem → UI port (-G)** must match). Without it the Log says once "⚠ Transmit level: couldn't set … can't reach Mercury's UI port … start Mercury with -G", and Mercury keeps its own level. The UI port also serves Mercury's web page; it's on the Mercury computer's network like its other ports.
+
+What the numbers mean depends on the radio. On an FTDX3000 at 5 W (2026-11-14), Mercury at 0 dB read ALC 54 %, -5 dB 45 %, -8 dB 36 % and -10 dB 22 %. At low power the radio's ALC is also what holds the power down, so it never reads zero there; at full power it should be near zero.
+
+**Try it in Demo.** Demo mode's Mercury has a stand-in UI port, and the simulated radio's ALC follows Mercury's level along those FTDX3000 numbers. Choose **Auto (from ALC)** at 0 dB and call CQ a few times: Auto comes down to -2, -4 and then **-6 dB** (ALC 42 %), and stays there.
+
 ## Band plan
 
 Searches cover these segments by default (USB, the US automatically-controlled digital segments of 47 CFR 97.221(b), where HF data stations already gather, away from FT8/FT4 and the NCDXF beacons):
@@ -713,6 +738,7 @@ Settings are saved to `~/Library/Application Support/Whistlestop/whistlestop.tom
 | Demo on real Mercury | Demo runs two real Mercury modems when Mercury is installed | on |
 | Mercury engine | Path to the Mercury engine (empty: look in the usual places) | automatic |
 | Mercury host / TNC port / Broadcast port | Where Mercury listens | 127.0.0.1 / 8300 / 8100 |
+| Mercury UI port (-G) | Mercury's WebSocket, for the transmit level | 10000 |
 | Radio connection | Use a running rigctld / RigHelm, let Whistlestop run rigctld, or Direct CAT (built in) | running rigctld |
 | Protocol / Port / Speed / CI-V address | Direct CAT: the radio's control protocol and where it is; Automatic detects | Automatic |
 | Full power | Direct CAT: the radio's maximum output | 100 W |
@@ -732,6 +758,7 @@ Settings are saved to `~/Library/Application Support/Whistlestop/whistlestop.tom
 | Encryption | Off / Prefer / Require (see Encryption) | Off |
 | Auto-tune on high SWR | Start the antenna tuner after a high-SWR transmission, when quiet (Radio Controls window) | off |
 | SWR limit | Above this: red reading, log warning, auto-tune if on | 2.0 : 1 |
+| Transmit level (Radio controls) | Mercury's own, Set here, or Auto (from ALC); the level, -20 to +10 dB | Mercury's own / 0 dB |
 | Download folder | Where received files go | ~/Downloads/Whistlestop |
 | Listen on / Listen volume | Speaker for the 🔈 Listen button, and its level | System default / 70% |
 | Away message | What stations see when they connect while you're away | "Away from the radio…" |
@@ -752,6 +779,10 @@ Settings are saved to `~/Library/Application Support/Whistlestop/whistlestop.tom
 The **Whistle** length and **Answer automatically** are set on the main screen and saved too.
 
 ## Troubleshooting
+
+**Mercury transmits but nothing goes out.**
+
+- **"⚠ Mercury is transmitting but the radio isn't keyed"**: Mercury said it was transmitting (its PTT ON) for over 1.5 s while the radio read unkeyed on two polls in a row, so nothing went out. Mercury's PTT isn't reaching the radio: check its **-P / -R / -A** options or **[ptt]** in mercury.ini (with direct CAT: Hamlib model 2 at the sharing port), then restart Mercury. It's said once, and only for a radio whose PTT reading works (it has read keyed before, for a whistle say); "Radio: Mercury is keying it again" when it's fixed.
 
 **A pill in the top bar is red.**
 

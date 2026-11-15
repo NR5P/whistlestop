@@ -287,6 +287,11 @@ pub const ST_DEMO: Topic = (
     "Simulated radio, band, Mercury and the K7BOT demo station. Nothing is transmitted. Untick to use your radio, Mercury and rigctld.",
     "Quick start: Demo mode",
 );
+pub const ST_MERCURY_UI: Topic = (
+    "Mercury UI port",
+    "Mercury's WebSocket port, open when Mercury is started with -G (10000 unless -U sets another). Whistlestop uses it only to set the transmit level (Radio controls → Transmit level).",
+    "Transmit level",
+);
 pub const ST_MERCURY: Topic = (
     "Mercury address and ports",
     "Where Mercury listens: TNC control port (data is the next port up) and the broadcast port used by Roundtables. Defaults 8300 and 8100 match Mercury's own.",
@@ -361,6 +366,21 @@ pub const RC_ALC: Topic = (
     "ALC",
     "The radio's automatic level control. For data it should barely move: if it climbs, lower the audio drive, or the signal distorts.",
     "Antenna tuner and SWR",
+);
+pub const RC_TXLEVEL: Topic = (
+    "Transmit level",
+    "Who sets Mercury's transmit audio level. Mercury's own: tx_gain_db in its mercury.ini, untouched. Set here: the level beside. Auto: starts at that level and turns down 2 dB after each transmission whose ALC reads above 45%, back up 1 dB when it reads below 15%. Set here and Auto need Mercury started with -G.",
+    "Transmit level",
+);
+pub const RC_TXLEVEL_DB: Topic = (
+    "Level (dB)",
+    "Mercury's transmit audio level, -20 to +10 dB (0 is Mercury's default). With Auto it is the most Auto will use. Changes reach Mercury at once and it saves them in its mercury.ini.",
+    "Transmit level",
+);
+pub const RC_TXLEVEL_NOW: Topic = (
+    "Level now",
+    "The level Mercury confirmed last, and why it was set (or why it couldn't be).",
+    "Transmit level",
 );
 pub const RC_PO: Topic = ("Power out", "Transmit power as the radio measures it, as a fraction of full scale.", "Antenna tuner and SWR");
 pub const RC_ATU: Topic = ("ATU", "Switches the radio's built-in antenna tuner in or out of the antenna line.", "Antenna tuner and SWR");
