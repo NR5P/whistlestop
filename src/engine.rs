@@ -316,6 +316,11 @@ const TABLE_HEARTBEAT: Duration = Duration::from_secs(90);
 /// and a join window) has lost it: it listens in another of the table's
 /// likely speeds until it hears it again.
 const TABLE_LOST_AFTER: Duration = Duration::from_secs(240);
+/// After the floor goes to another station, our routine report waits this
+/// long for it to talk (or until it's heard): on the RF bench (2026-11-15)
+/// a member's report, sent while it couldn't hear the station given the
+/// floor, went out on top of that station's message, which was lost.
+const FLOOR_HOLD: Duration = Duration::from_secs(60);
 /// A member that has heard nothing at all of its table for this long (all
 /// its speeds tried meanwhile) takes it as closed and leaves, so the
 /// station's schedule, Station ID and Depot automation carry on.
@@ -1148,6 +1153,11 @@ struct Station {
     table_unsynced: bool,
     /// Member: our report said we can't copy the current speed (when).
     expect_slowdown: Option<Instant>,
+    /// The floor was just passed to this station (when): until it is heard
+    /// talking, or FLOOR_HOLD has passed, our routine report waits, so it
+    /// doesn't go out on top of the message the table is waiting for (a
+    /// member that can't hear that station wouldn't know it's on the air).
+    floor_passed: Option<(String, Instant)>,
     /// Host: when the last join window ended (or the table started).
     last_join_window: Instant,
     /// Per-station cooldown for notices and automatic connects.
@@ -1432,6 +1442,7 @@ impl Station {
             table_talked: Instant::now(),
             table_announced: None,
             table_unsynced: false,
+            floor_passed: None,
             expect_slowdown: None,
             auto_cooldown: HashMap::new(),
             qsy: None,
@@ -2535,6 +2546,7 @@ impl Station {
                     }
                     .encode(),
                 );
+                self.floor_passed = Some((to.to_uppercase(), Instant::now()));
                 self.set(|g| {
                     if let Some(t) = g.table.as_mut() {
                         t.floor = Some(to.to_uppercase());
@@ -4988,6 +5000,7 @@ impl Station {
         // Nor the last table's speed change, its speed-up backoff, or its
         // frames still queued (its LEAVE, if any, still goes).
         self.pending_speed = None;
+        self.floor_passed = None;
         self.upgrade_wait = UPGRADE_WAIT;
         self.last_upgrade = None;
         self.table_queue
@@ -5300,6 +5313,13 @@ impl Station {
         if self.own_cq_on_air() {
             return Ok(());
         }
+        // Nor on top of someone else: a member's message sent during the
+        // host's CQ whistle for the table was lost whole (RF bench
+        // 2026-11-15: the host never knew it existed, so it couldn't be
+        // asked for again). As for a CQ, after BUSY_WAIT_MAX it goes anyway.
+        if !self.table_queue.is_empty() && !self.clear_to_send("Roundtable message") {
+            return Ok(());
+        }
         let Some(f) = self.table_queue.pop_front() else {
             // Not while we're calling someone either: Mercury answers MODE
             // with BUSY then, and would stay at the table's speed after the
@@ -5513,6 +5533,9 @@ impl Station {
                 total,
                 data,
             } => {
+                if self.floor_passed.as_ref().is_some_and(|(c, _)| *c == from) {
+                    self.floor_passed = None;
+                }
                 self.set(|g| {
                     if let Some(t) = g.table.as_mut() {
                         t.members.entry(from.clone()).or_default().last = Some(Instant::now());
@@ -5595,16 +5618,19 @@ impl Station {
                     }
                 }
             }
-            TableBody::Floor { to } => self.set(|g| {
-                if let Some(t) = g.table.as_mut() {
-                    t.floor = Some(to.clone());
-                    t.lines.push((
-                        Clock::now(),
-                        String::new(),
-                        format!("{from} passes the floor to {to}"),
-                    ));
-                }
-            }),
+            TableBody::Floor { to } => {
+                self.floor_passed = Some((to.clone(), Instant::now()));
+                self.set(|g| {
+                    if let Some(t) = g.table.as_mut() {
+                        t.floor = Some(to.clone());
+                        t.lines.push((
+                            Clock::now(),
+                            String::new(),
+                            format!("{from} passes the floor to {to}"),
+                        ));
+                    }
+                });
+            }
             // The host leaving closes the table: nobody is left to set its
             // speed or let others join.
             TableBody::Leave if is_host => {
@@ -5734,9 +5760,12 @@ impl Station {
             // back more than a minute by a busy one: the host counts on it.
             let quiet = Duration::from_secs_f64(2.0 * mode.frame_s + 2.0);
             let due = self.last_table_report.elapsed();
-            if due >= TABLE_REPORT_EVERY
-                && (self.last_table_heard.elapsed() >= quiet || due >= TABLE_REPORT_EVERY + Duration::from_secs(60))
-            {
+            let me = self.mycall();
+            let floor_elsewhere = self
+                .floor_passed
+                .as_ref()
+                .is_some_and(|(c, at)| *c != me && at.elapsed() < FLOOR_HOLD);
+            if report_now(due, self.last_table_heard.elapsed() >= quiet, floor_elsewhere) {
                 self.send_table_report();
             }
             // Our report said we can't copy this speed and no slow-down
@@ -7231,6 +7260,14 @@ impl Station {
     }
 }
 
+/// A member's routine report, `due` after the last: every
+/// TABLE_REPORT_EVERY, into a quiet table and not while the floor has just
+/// gone to another station; but never held more than a minute past due.
+pub fn report_now(due: Duration, table_quiet: bool, floor_elsewhere: bool) -> bool {
+    due >= TABLE_REPORT_EVERY
+        && ((table_quiet && !floor_elsewhere) || due >= TABLE_REPORT_EVERY + Duration::from_secs(60))
+}
+
 /// Mercury reports a frame once it has ended and been decoded; a retune
 /// in the last HEARD_LAG_S came after it was on the air.
 pub const HEARD_LAG_S: f64 = 2.0;
@@ -8242,6 +8279,19 @@ mod tests {
 
     /// One request that can't be answered (sender gone, an unfillable gap)
     /// doesn't block the others: each round asks the one asked longest ago.
+    /// RF bench 2026-11-15: NR5P-1's report went out on top of NR5P-2's
+    /// message, just after the host gave NR5P-2 the floor.
+    #[test]
+    fn a_report_waits_while_another_station_has_just_been_given_the_floor() {
+        let s = Duration::from_secs;
+        assert!(!report_now(s(100), true, false), "not due yet");
+        assert!(report_now(s(120), true, false));
+        assert!(!report_now(s(120), false, false), "the table is talking");
+        assert!(!report_now(s(150), true, true), "the floor just went elsewhere");
+        assert!(report_now(s(180), true, true), "never more than a minute late");
+        assert!(report_now(s(180), false, false));
+    }
+
     #[test]
     fn a_frame_heard_after_a_retune_keeps_its_frequency() {
         let now = Instant::now();
@@ -8509,6 +8559,62 @@ mod tests {
             assert!(t.elapsed() < Duration::from_secs(5), "no refusal");
             std::thread::sleep(Duration::from_millis(50));
         }
+        h.send(Cmd::Stop);
+        drop(rt);
+    }
+
+    /// A Roundtable message waits while someone else is on the air (the
+    /// host's CQ whistle for the table, on the RF bench 2026-11-15, took a
+    /// member's only message with it), and goes once the channel is clear.
+    #[test]
+    fn a_table_message_waits_for_a_clear_channel() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let f = rt
+            .block_on(crate::fake_mercury::FakeMercury::start(FakeOptions {
+                busy_between: Some((2.0, 9.0)),
+                ..Default::default()
+            }))
+            .unwrap();
+        let h = spawn(|| {});
+        let mut cfg = Config {
+            callsign: "N0WAIT".into(),
+            demo: false,
+            rigctld: "none".into(),
+            mercury_port: f.port,
+            mercury_bcast_port: f.bcast_port,
+            ..Default::default()
+        };
+        cfg.sdr.enabled = false;
+        cfg.sdr.wide_search = false;
+        assert!(cfg.busy_detect);
+        let start = Instant::now();
+        h.send(Cmd::Start(cfg));
+        let wait = |what: &str, secs: u64, ok: &dyn Fn(&State) -> bool| {
+            let t = Instant::now();
+            while !ok(&h.state.lock().unwrap()) {
+                assert!(t.elapsed() < Duration::from_secs(secs), "{what}");
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        };
+        wait("no Mercury", 10, &|g| g.mercury_ok);
+        h.send(Cmd::JoinTable("Quiet Table".into()));
+        wait("didn't join", 10, &|g| g.table.is_some());
+        wait("not busy", 10, &|g| g.channel_busy);
+        h.send(Cmd::TableSay("waits for the channel".into()));
+        let sent = || {
+            crate::fake_mercury::TEST_BCAST_SENT.lock().unwrap().iter().any(|f| {
+                f.from == "N0WAIT" && matches!(&f.body, TableBody::Text { .. })
+            })
+        };
+        std::thread::sleep(Duration::from_secs(3));
+        assert!(!sent(), "sent on top of someone");
+        assert!(h.state.lock().unwrap().log.iter().any(|l| l.1.contains("Roundtable message waits")));
+        let t = Instant::now();
+        while !sent() {
+            assert!(t.elapsed() < Duration::from_secs(15), "never sent once clear");
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert!(start.elapsed() >= Duration::from_secs(9), "went before BUSY OFF");
         h.send(Cmd::Stop);
         drop(rt);
     }

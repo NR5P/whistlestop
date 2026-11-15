@@ -2304,7 +2304,7 @@ impl App {
                             ui.end_row();
                         });
                         ui.checkbox(&mut c.whistle_watch, "Whistle watch while parked on a frequency").help(&help::ST_WATCH);
-                        ui.checkbox(&mut c.busy_detect, "Listen before transmitting (CQ, Station ID, automatic calls)").help(&help::ST_BUSY);
+                        ui.checkbox(&mut c.busy_detect, "Listen before transmitting (CQ, Station ID, automatic calls, Roundtables)").help(&help::ST_BUSY);
                         ui.checkbox(&mut c.auto_ramp, "Roundtable speed ramp-up (host)").help(&help::ST_RAMP);
                     });
                     ui.add_space(6.0);

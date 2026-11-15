@@ -47,6 +47,9 @@ pub struct FakeOptions {
     /// Tests: the bot sends one Station ID 3 s in, saying it holds mail
     /// for this call.
     pub bot_beacon_mail_for: Option<String>,
+    /// Tests: the busy detector reports someone on the air (BUSY ON) from
+    /// the first second to the second, then BUSY OFF.
+    pub busy_between: Option<(f64, f64)>,
 }
 
 impl Default for FakeOptions {
@@ -64,6 +67,7 @@ impl Default for FakeOptions {
             bot_table_leave_after: None,
             bcast_on_air_s: None,
             bot_beacon_mail_for: None,
+            busy_between: None,
         }
     }
 }
@@ -317,6 +321,8 @@ struct Session {
     /// Our last CQ's CALL packet said Roundtable.
     cq_is_table: bool,
     beacon_sent: bool,
+    /// How much of `busy_between` was said: 0 nothing, 1 ON, 2 OFF too.
+    busy_said: u8,
     t0: std::time::Instant,
 }
 
@@ -349,6 +355,7 @@ impl Session {
             answered_cq: false,
             cq_is_table: false,
             beacon_sent: false,
+            busy_said: 0,
             t0: std::time::Instant::now(),
         }
     }
@@ -865,6 +872,15 @@ impl Session {
         let budget = ((speed / 8.0) * dt).ceil() as usize;
         self.air(budget);
 
+        if let Some((on, off)) = self.o.busy_between {
+            if self.busy_said == 0 && self.now >= on {
+                self.busy_said = 1;
+                self.reply("BUSY ON");
+            } else if self.busy_said == 1 && self.now >= off {
+                self.busy_said = 2;
+                self.reply("BUSY OFF");
+            }
+        }
         if let Some(to) = self.o.bot_beacon_mail_for.clone()
             && !self.beacon_sent
             && self.now >= if self.o.fast { 0.03 } else { 3.0 }

@@ -234,7 +234,7 @@ pub const F_ACCEPT: Topic = ("Accept", "Receive this file. If part of it arrived
 pub const F_DECLINE: Topic = ("Decline", "Refuse this file; the sender is told.", "Files");
 pub const ST_BUSY: Topic = (
     "Listen before transmitting",
-    "While not linked, Mercury's busy-channel detector listens: a CQ, Station ID or automatic deliver/collect call waits while someone else is transmitting (at most 60 s, then it goes anyway). What you send by hand goes at once. Turn off if the channel always reads busy (a receive filter narrower than ~1.8 kHz). On by default.",
+    "While not linked, Mercury's busy-channel detector listens: a CQ, Station ID, automatic deliver/collect call or Roundtable frame (your messages included) waits while someone else is transmitting (at most 60 s, then it goes anyway). Other things you send by hand go at once. Turn off if the channel always reads busy (a receive filter narrower than ~1.8 kHz). On by default.",
     "Listen before transmitting",
 );
 pub const F_SHOW: Topic = (
