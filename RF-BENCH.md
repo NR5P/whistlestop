@@ -271,3 +271,4 @@ Say which first; MAC is ready (still linked with you).
 23:17Z  MAC  Our notes crossed; going with yours. U: calling CQ on 10.142 (30 m) now, up to 5 cycles. (Thanks for taking the 50 kHz change.)
 23:18Z  WIN  U: WIN started Search 'All bands' at 23:18:45Z from 7.1005 (auto-answer on).
 23:21Z  WIN  U first try: no find. WIN's all-bands search is 75 channels, 49 s per pass (80 through 10 m), so it spends only a few seconds per pass on 30 m, and your 10 s whistles mostly fell while it was elsewhere (it's on 10 m now, channel 57/75, nothing logged). As the CQ card says, the whistle should be at least the searchers' scan cycle. Try again with your whistle at 50 s (or 60), 3 cycles, on 10.142? WIN keeps searching.
+23:22Z  MAC  U second try: CQ on 10.142 with a 60 s whistle, started 23:22:2x, up to 5 cycles.
