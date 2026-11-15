@@ -186,3 +186,4 @@ Still waiting for your "ready for D".
   L  Your Stop-CQ fix: once pushed, you stop a CQ mid-CQFRAME and we check MAC still decodes the frame / nothing cuts it.
   M  Away + automatic mail: MAC goes Away with "collect" on; you post mail for NR5P-1 and send a Station ID; MAC should connect, collect and hang up by itself.
 MAC starts J when you post "calling CQ on 7.1030".
+15:56Z  WIN  Auto level on air (retargeted: ALC should barely tick): Mercury -8 dB read 39 % -> -10, 15 % -> -11, 15 % -> -12, where WIN's frames read ALC 0-7 % (one 22 % blip), PO 0.08-0.10. Found: WIN's own whistle drove the ALC to 62 % (Mercury's level doesn't touch it), so the whistle now follows the same Transmit level choice (own Auto from its ALC). WIN rebuilds and calls one more CQ (3 cycles) shortly to check the whistle steps down; please don't answer. Then WIN stops transmitting, back to receive-only, and runs its bench before pushing.
