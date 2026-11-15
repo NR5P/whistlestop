@@ -2784,7 +2784,8 @@ impl eframe::App for App {
             None => snap.log.len().min(1),
         };
         self.log_seen = Some(snap.log_seq);
-        let errs: Vec<&String> = snap.log.iter().rev().take(fresh).map(|(_, l)| l).filter(|l| l.starts_with('⚠')).collect();
+        // A file offer waiting for Accept too ("📁").
+        let errs: Vec<&String> = snap.log.iter().rev().take(fresh).map(|(_, l)| l).filter(|l| l.starts_with('⚠') || l.starts_with('📁')).collect();
         if let Some(newest) = errs.first() {
             let t = if errs.len() > 1 { format!("{newest} (and {} more in the Log)", errs.len() - 1) } else { newest.to_string() };
             self.toast(t);

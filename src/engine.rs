@@ -3390,6 +3390,10 @@ impl Station {
             o.abort();
         }
         self.cq = None;
+        // The CQ's CALL frame waits for the CQFRAME to end before it goes to
+        // Mercury: a CQ stopped meanwhile doesn't send it (on the air,
+        // 2026-11-15, it went out 0.2 s after Stop).
+        self.table_queue.retain(|q| !matches!(TableFrame::decode(q).map(|f| f.body), Some(TableBody::Call { .. })));
         self.unkey_own().await;
         let mercury = self.tx_level_now;
         if let Some(Rig::Sim(s)) = self.rig.as_mut() {
@@ -4083,6 +4087,20 @@ impl Station {
         Ok(())
     }
 
+    /// A file offer waiting for Accept: said in the chat too, and as a
+    /// pop-up ("📁" lines), not only as the Files tab's count. On the air
+    /// (2026-11-14 and -15) offers sat unnoticed for minutes, the link idle,
+    /// while the operator watched the chat.
+    fn offer_waits(&mut self, peer: &str, name: &str, size: u64, eta: f64) {
+        let text = format!(
+            "📁 {peer} offers {name} ({}, about {}): Accept or Decline it on the Files tab",
+            modes::human_bytes(size as usize),
+            modes::human_duration(eta)
+        );
+        self.log(text.clone());
+        self.system_line(text);
+    }
+
     fn system_line(&self, text: String) {
         self.set(|g| {
             g.chat.push(ChatLine {
@@ -4433,7 +4451,10 @@ impl Station {
                             modes::human_bytes(size as usize),
                             modes::human_bytes(max as usize)
                         ));
+                        self.offer_waits(&peer, &name, size, eta);
                     }
+                } else {
+                    self.offer_waits(&peer, &name, size, eta);
                 }
             }
             Link::Answer {
@@ -4442,13 +4463,19 @@ impl Station {
                 resume_from,
             } => {
                 if let Some(o) = self.outgoing.iter_mut().find(|o| o.fid == fid) {
+                    // Said in the Log either way: on the air (2026-11-15) a
+                    // sender waited minutes not knowing whether its offer
+                    // had been taken.
+                    let name = o.name.clone();
                     if accept {
                         o.next = Some(resume_from.min(o.data.len() as u64));
                         if resume_from > 0 {
                             self.log(format!(
-                                "{peer} already has {} — resuming",
+                                "{peer} accepted {name}, and already has {} — resuming",
                                 modes::human_bytes(resume_from as usize)
                             ));
+                        } else {
+                            self.log(format!("{peer} accepted {name}: sending"));
                         }
                         self.xfer(Dir::Out, fid, |t| {
                             t.state = XferState::Sending;
@@ -4456,6 +4483,7 @@ impl Station {
                             t.started = Some(Instant::now());
                         });
                     } else {
+                        self.log(format!("{peer} declined {name}"));
                         self.outgoing.retain(|o| o.fid != fid);
                         self.xfer(Dir::Out, fid, |t| t.state = XferState::Declined);
                     }
@@ -7844,6 +7872,15 @@ mod tests {
         let g = h.state.lock().unwrap();
         assert!(!g.log.iter().any(|l| l.1.contains("isn't keyed")), "{:#?}", g.log);
         drop(g);
+        // Nor did the CQ's CALL frame go out after it was stopped (it waits
+        // for the CQFRAME to end; on the air it went 0.2 s after Stop).
+        let calls = crate::fake_mercury::TEST_BCAST_SENT
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|f| f.from == "N0STOP" && matches!(f.body, TableBody::Call { .. }))
+            .count();
+        assert_eq!(calls, 0, "the stopped CQ's CALL went out");
         h.send(Cmd::Stop);
     }
 

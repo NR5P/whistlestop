@@ -164,7 +164,7 @@ The **Call CQ** card:
   2. Mercury sends its **CQFRAME**, a 3-second digital burst carrying your callsign. This is your station identification.
   3. Whistlestop sends a short **CALL** packet saying what the CQ is for (chat or Roundtable, your grid).
   4. It listens for answers (default **20 s**), then repeats, up to **5 cycles**.
-- **Stop CQ** ends it at any point.
+- **Stop CQ** ends it at any point: the whistle stops at once; a CQFRAME already on the air is left to finish (Mercury unkeys the radio at its end, a few seconds), and the short CALL frame that would follow it isn't sent.
 
 When someone answers, Mercury reports the incoming call and the CQ goes on hold at once ("Incoming call: CQ on hold" in the Log): a whistle in progress stops and nothing more is sent, because a whistle or CQFRAME on top of Mercury's answer would make it drop the call. When the link comes up the CQ stops for good and the Chat tab shows "Linked with …". If the call doesn't complete (Mercury gives up after about 45 s), the CQ carries on with its next cycle; the hold lasts at most 60 s.
 
@@ -251,14 +251,14 @@ The **Files** tab sends and receives files over a 1:1 link.
 
 - **+ Files…** picks one or more files; **+ Folder…** picks a folder; or **drop** files and folders anywhere on the window.
 - **Zip before sending** (on by default) packs everything into one zip with maximum compression. Folders are always zipped. Two files with the same name (from different folders) are both kept, the second as `name-1.ext`. Text and logs often shrink to a few percent; photos and already-compressed files don't shrink. A single file that zipping wouldn't make smaller is sent as it is (the Log says "Not zipped: … doesn't get smaller"), so it never goes out bigger than it is.
-- Each transfer is **offered** first: the other station sees the name, size, zip contents and predicted time, and presses **Accept** or **Decline**. Nothing is kept before you accept: pieces a station sends without waiting for your answer are ignored. An empty file (0 bytes) arrives the moment it's accepted.
+- Each transfer is **offered** first: the other station sees the name, size, zip contents and predicted time, and presses **Accept** or **Decline**; the sender's row says "offered, waiting for an answer" until then, and its Log says when it's accepted ("… accepted name: sending") or declined. Nothing is kept before you accept: pieces a station sends without waiting for your answer are ignored. An empty file (0 bytes) arrives the moment it's accepted.
 - Progress shows bytes done, the measured speed, and the time left. **Cancel** stops a transfer on either side. (Each station numbers its own files from a random starting point, so a cancel from either end always names the right one.)
 - If the link ends while an offer is still waiting for an answer, it shows **link ended before you answered**. The sender offers it again the next time the two of you link (with resume).
 - **A file goes only to the station it was for.** A file sent during a link, or one cut off by a dropped link, is offered again (with resume) only on a link with that same station, never to whoever links next (while you're Away, that could be anyone). A file picked while not linked goes to the next station you link with.
 
 ### Receiving
 
-An incoming offer shows the predicted time with **Accept** / **Decline**. Received files go to your **download folder** (Settings → Files; default `~/Downloads/Whistlestop`). **Show** reveals a received file in Finder. File names from the air are cleaned so they can't write anywhere else: only the name itself is kept (no folders), control characters are dropped, characters Windows forbids (`< > : " | ? *`) become `_`, a Windows device name such as `CON` or `NUL` gets a `_` in front, so does a name starting with `.` (it would be hidden, and `.partial` is where unfinished downloads are kept), and a name longer than 200 bytes is shortened (keeping its extension). An existing file is never overwritten (`name-1.ext`, …).
+An incoming offer shows the predicted time with **Accept** / **Decline** on the Files tab (its count on the tab), and is also said in the chat and as a pop-up ("📁 … offers …: Accept or Decline it on the Files tab"), since nothing moves on the link until you answer. Received files go to your **download folder** (Settings → Files; default `~/Downloads/Whistlestop`). **Show** reveals a received file in Finder. File names from the air are cleaned so they can't write anywhere else: only the name itself is kept (no folders), control characters are dropped, characters Windows forbids (`< > : " | ? *`) become `_`, a Windows device name such as `CON` or `NUL` gets a `_` in front, so does a name starting with `.` (it would be hidden, and `.partial` is where unfinished downloads are kept), and a name longer than 200 bytes is shortened (keeping its extension). An existing file is never overwritten (`name-1.ext`, …).
 
 ### Integrity and resume
 
