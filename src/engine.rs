@@ -5131,16 +5131,28 @@ impl Station {
             return Ok(());
         }
         let Some(f) = self.table_queue.pop_front() else {
-            if self.restore_calling_mode
-                && self.peer.is_none()
-                && self.st.lock().unwrap().table.is_none()
-            {
-                self.restore_calling_mode = false;
+            // Not while we're calling someone either: Mercury answers MODE
+            // with BUSY then, and would stay at the table's speed after the
+            // link, deaf to calls and sending its CQs where nobody listens.
+            // Cleared only once Mercury has taken it, so a refusal is retried.
+            let (no_table, calling) = {
+                let g = self.st.lock().unwrap();
+                (g.table.is_none(), g.calling.is_some())
+            };
+            if self.restore_calling_mode && self.peer.is_none() && no_table && !calling {
                 let calling = modes::mode_by_name("DATAC3").expect("DATAC3");
-                self.tnc()?
+                if self
+                    .tnc()?
                     .command(&format!("MODE {}", calling.index))
-                    .await?;
-                self.set(|g| g.listen_mode = Some(calling));
+                    .await
+                    .is_ok()
+                {
+                    self.restore_calling_mode = false;
+                    self.set(|g| g.listen_mode = Some(calling));
+                } else {
+                    // Still busy (a link closing): again in 2 s, quietly.
+                    self.table_busy_until = Instant::now() + Duration::from_secs(2);
+                }
             }
             self.set(|g| {
                 if let Some(t) = g.table.as_mut() {
@@ -8172,6 +8184,67 @@ mod tests {
             assert!(t.elapsed() < Duration::from_secs(5), "no refusal");
             std::thread::sleep(Duration::from_millis(50));
         }
+        h.send(Cmd::Stop);
+        drop(rt);
+    }
+
+    /// Leaving a Roundtable and calling someone right away (the bench's
+    /// Depot call, 2026-11-15): the switch back to the calling mode waits
+    /// until Mercury is free, instead of being refused (BUSY) mid-call and
+    /// forgotten, which left Mercury at the table's speed after the link.
+    #[test]
+    fn calling_mode_comes_back_after_a_call_made_on_leaving_a_table() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let f = rt
+            .block_on(crate::fake_mercury::FakeMercury::start(FakeOptions {
+                bot_e2e: e2e::Policy::Off,
+                // The LEAVE is still going out when the call starts.
+                bcast_on_air_s: Some(3.0),
+                ..Default::default()
+            }))
+            .unwrap();
+        let h = spawn(|| {});
+        let mut cfg = Config {
+            callsign: "N0LEFT".into(),
+            demo: false,
+            rigctld: "none".into(),
+            mercury_port: f.port,
+            mercury_bcast_port: f.bcast_port,
+            ..Default::default()
+        };
+        cfg.sdr.enabled = false;
+        cfg.sdr.wide_search = false;
+        h.send(Cmd::Start(cfg));
+        let wait = |what: &str, secs: u64, ok: &dyn Fn(&State) -> bool| {
+            let t = Instant::now();
+            while !ok(&h.state.lock().unwrap()) {
+                assert!(t.elapsed() < Duration::from_secs(secs), "{what}");
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        };
+        wait("no Mercury", 10, &|g| g.mercury_ok);
+        // Hosting, as on the bench: the host's leaving sends a LEAVE.
+        h.send(Cmd::CallCq { table: Some("Evening Table".into()) });
+        wait("didn't open the table", 15, &|g| g.table.is_some());
+        h.send(Cmd::StopCq);
+        // Mercury says something else meanwhile: the calling mode must be
+        // set again on leaving.
+        h.state.lock().unwrap().listen_mode = modes::mode_by_name("DATAC4");
+        h.send(Cmd::LeaveTable);
+        h.send(Cmd::Connect("K7BOT".into()));
+        wait("no link", 30, &|g| g.link.is_some());
+        h.send(Cmd::Disconnect);
+        wait("link didn't end", 60, &|g| g.link.is_none());
+        wait("calling mode not restored", 10, &|g| {
+            g.listen_mode.map(|m| m.name) == Some("DATAC3")
+        });
+        let g = h.state.lock().unwrap();
+        assert!(
+            !g.log.iter().any(|l| l.1.contains("BUSY")),
+            "Mercury refused a MODE: {:?}",
+            g.log.iter().filter(|l| l.1.contains("BUSY")).collect::<Vec<_>>()
+        );
+        drop(g);
         h.send(Cmd::Stop);
         drop(rt);
     }

@@ -325,14 +325,25 @@ impl Drop for LiveInput {
     }
 }
 
-/// Plays audio (the whistle) to the radio. Owns an output stream on its own
-/// thread; `play` queues samples at the device rate and waits until done.
+/// Plays audio (the whistle) to the radio. A thread of its own opens an
+/// output stream when there is something to play and closes it again
+/// [`OUT_IDLE_CLOSE`] after the last of it; `play` queues samples at the
+/// device rate and waits until done.
+///
+/// Not held open while idle: a QRP Labs QMX that has a USB audio stream
+/// coming in rings (a 1500 Hz "ding", 25 dB over the band noise for about
+/// half a second) each time it comes back to receive, even when the stream
+/// is silence. With the stream closed between sounds it doesn't (RF bench,
+/// 2026-11-15).
 pub struct LiveOutput {
     queue: Arc<Mutex<VecDeque<f32>>>,
     pub rate: u32,
     stop: Arc<AtomicBool>,
     failed: Failure,
 }
+
+/// The output stream closes this long after the last sample went out.
+pub const OUT_IDLE_CLOSE: Duration = Duration::from_millis(500);
 
 impl LiveOutput {
     pub fn start(device_name: &str) -> Result<Self> {
@@ -348,6 +359,7 @@ impl LiveOutput {
                 let cfg = dev.default_output_config()?;
                 let rate = cfg.sample_rate();
                 let ch = cfg.channels() as usize;
+                let (q, fl) = (q.clone(), fl.clone());
                 let stream = dev.build_output_stream::<f32, _, _>(
                     cfg.config(),
                     move |data: &mut [f32], _| {
@@ -363,17 +375,50 @@ impl LiveOutput {
                 stream.play()?;
                 Ok((stream, rate))
             };
-            match built(build) {
+            // Opened once at the start, so a missing device or one that
+            // won't play is said now, and for the device's rate.
+            let rate = match built(build) {
                 Ok((stream, rate)) => {
-                    let _ = ready_tx.send(Ok(rate));
-                    while !st.load(Ordering::Relaxed) {
-                        std::thread::sleep(Duration::from_millis(100));
-                    }
                     drop(stream);
+                    let _ = ready_tx.send(Ok(rate));
+                    rate
                 }
                 Err(e) => {
                     let _ = ready_tx.send(Err(e));
+                    return;
                 }
+            };
+            while !st.load(Ordering::Relaxed) {
+                if q.lock().unwrap().is_empty() {
+                    std::thread::sleep(Duration::from_millis(10));
+                    continue;
+                }
+                let stream = match built(build) {
+                    Ok((stream, r)) if r == rate => stream,
+                    Ok(_) => {
+                        note_failure(&fl, "the radio's audio output", "its sample rate changed");
+                        q.lock().unwrap().clear();
+                        continue;
+                    }
+                    Err(e) => {
+                        note_failure(&fl, "the radio's audio output", e);
+                        q.lock().unwrap().clear();
+                        std::thread::sleep(Duration::from_millis(500));
+                        continue;
+                    }
+                };
+                let mut idle_since: Option<std::time::Instant> = None;
+                while !st.load(Ordering::Relaxed) {
+                    std::thread::sleep(Duration::from_millis(20));
+                    if !q.lock().unwrap().is_empty() {
+                        idle_since = None;
+                    } else if idle_since.get_or_insert_with(std::time::Instant::now).elapsed()
+                        >= OUT_IDLE_CLOSE
+                    {
+                        break;
+                    }
+                }
+                drop(stream);
             }
         });
         let rate = ready_rx

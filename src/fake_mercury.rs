@@ -40,6 +40,10 @@ pub struct FakeOptions {
     /// SPEED (so the member knows who hosts) and closes the table (LEAVE)
     /// this many seconds later.
     pub bot_table_leave_after: Option<f64>,
+    /// Key up (PTT ON, then PTT OFF this many seconds later) for each
+    /// broadcast frame, as real Mercury does while it sends one. Off
+    /// (instant, unkeyed) by default.
+    pub bcast_on_air_s: Option<f64>,
 }
 
 impl Default for FakeOptions {
@@ -55,6 +59,7 @@ impl Default for FakeOptions {
             bot_pushy: false,
             bot_cq_table: None,
             bot_table_leave_after: None,
+            bcast_on_air_s: None,
         }
     }
 }
@@ -277,6 +282,9 @@ struct Session {
     now: f64,
     mycall: String,
     peer: Option<String>,
+    /// A CONNECT is going out (until the link is up or the call ends):
+    /// real Mercury answers MODE with BUSY then, as during a link.
+    calling: bool,
     uplink: VecDeque<u8>,   // us -> bot, waiting to be "sent"
     downlink: VecDeque<u8>, // bot -> us
     last_buffer: usize,
@@ -314,6 +322,7 @@ impl Session {
             now: 0.0,
             mycall: "N0CALL".into(),
             peer: None,
+            calling: false,
             uplink: VecDeque::new(),
             downlink: VecDeque::new(),
             last_buffer: 0,
@@ -392,7 +401,7 @@ impl Session {
             "MODE" => {
                 if w.next().is_some() {
                     // Like real Mercury: no listening-mode change mid-link.
-                    self.reply(if self.peer.is_some() { "BUSY" } else { "OK" });
+                    self.reply(if self.peer.is_some() || self.calling { "BUSY" } else { "OK" });
                 } else {
                     self.reply("MODE 1 DATAC3");
                 }
@@ -422,6 +431,7 @@ impl Session {
                     .nth(2)
                     .unwrap_or("")
                     .to_ascii_uppercase();
+                self.calling = true;
                 // Both are cancelled by a DISCONNECT/ABORT before they're due.
                 if them.eq_ignore_ascii_case(&self.o.bot_call) {
                     self.reply("OK");
@@ -518,6 +528,7 @@ impl Session {
         }
         self.reply("DISCONNECTED");
         self.peer = None;
+        self.calling = false;
         self.ch = None;
         self.dec = LinkDecoder::default();
         self.pending.clear();
@@ -736,6 +747,10 @@ impl Session {
         };
         #[cfg(test)]
         TEST_BCAST_SENT.lock().unwrap().push(fr.clone());
+        if let Some(s) = self.o.bcast_on_air_s {
+            self.reply("PTT ON");
+            self.after(s, Act::Line("PTT OFF".into()));
+        }
         let bot = self.o.bot_call.clone();
         if matches!(fr.body, TableBody::Call { kind: CALL_TABLE, .. }) {
             self.cq_is_table = true;

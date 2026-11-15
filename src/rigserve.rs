@@ -604,20 +604,30 @@ mod tests {
             writeln!(stdin, "{c}").unwrap();
             stdin.flush().unwrap();
         };
-        let next = |rx: &std::sync::mpsc::Receiver<String>| {
-            rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap_or_default()
+        // The value read by command `c`: Hamlib 4.7 prints it alone; 4.6
+        // after the command ("f 14074000"), echoes set commands the same way
+        // ("F 7074000") and adds blank lines.
+        let next = |rx: &std::sync::mpsc::Receiver<String>, c: &str| loop {
+            let Ok(l) = rx.recv_timeout(std::time::Duration::from_secs(5)) else {
+                break String::new();
+            };
+            match l.split_whitespace().collect::<Vec<_>>()[..] {
+                [v] => break v.to_string(),
+                [k, v] if k == c => break v.to_string(),
+                _ => {}
+            }
         };
         cmd("f");
-        assert_eq!(next(&rx), "14074000");
+        assert_eq!(next(&rx, "f"), "14074000");
         drop(srv);
         let srv = serve(kenwood(), port).await.unwrap();
         assert!(srv.kept);
         cmd("F 7074000");
         cmd("f");
-        assert_eq!(next(&rx), "7074000");
+        assert_eq!(next(&rx, "f"), "7074000");
         cmd("T 1");
         cmd("t");
-        assert_eq!(next(&rx), "1");
+        assert_eq!(next(&rx, "t"), "1");
         cmd("T 0");
         cmd("q");
         drop(stdin);
