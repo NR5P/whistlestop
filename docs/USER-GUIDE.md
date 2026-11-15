@@ -380,7 +380,7 @@ Once linked, either station can ask to **move the link** to another frequency, t
 | Accept QSY requests | Agree to requests that meet the rules below | off |
 | Only within the band I'm on | Never leave the current band (where you know the antenna works) | on |
 | Bands | With the above off: which bands a QSY may go to | 40, 30, 20 m |
-| At most … kHz | How far from where you were (0 = anywhere allowed) | 50 kHz |
+| At most … kHz | How far from where you were (0 = anywhere allowed). It applies to a move to another band too: to allow other bands, set it to 0 or to more than the distance to them | 50 kHz |
 | Only inside the digital segments | Only where your configured segments say data is allowed (legal for an unattended station) | on |
 | If SWR stays high there, end the link | A bad SWR sends both stations home | on |
 
@@ -495,7 +495,7 @@ The **Bandwidth** card sets how wide Whistlestop may go, from narrow to wide: **
 
 ### How Mercury picks the speed
 
-On a 1:1 link Mercury starts each direction on the step that the SNR measured at connect supports, then climbs or descends its ladder by itself from what actually gets through, separately in each direction. You don't control the step; you control the limit.
+On a 1:1 link Mercury starts each direction on the step that the SNR measured at connect supports, then climbs or descends its ladder by itself from what actually gets through, separately in each direction. You don't control the step; you control the limit. It climbs on data: a direction that only carries a short chat line now and then can stay on its slowest step however good the signal (on the air, 2026-11-15, a +8 dB link sent its chat lines in MFSK at 63 bps), and the same link climbed to DATAC17 within 30 s once a file was going.
 
 | Mode | Modulation | Carriers | Spacing | Width | Raw rate | Needs about | Error correction |
 |---|---|---|---|---|---|---|---|

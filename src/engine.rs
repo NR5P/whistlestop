@@ -3237,6 +3237,23 @@ impl Station {
                                 }
                                 Unconfirmed::Resume => {
                                     self.log("Whistle not confirmed after retuning; resuming search".into());
+                                    // An SDR hit after which the radio heard
+                                    // nothing at all most likely came as the
+                                    // whistle ended (the SDR needs 2.2 s to
+                                    // be sure): its caller's next whistle
+                                    // may be tried again soon, not only after
+                                    // 2 minutes. One that sounded like
+                                    // something else keeps the 2 minutes.
+                                    if s.scope == WIDE_SCOPE && !heard_something {
+                                        let soon = Instant::now()
+                                            .checked_sub(WIDE_TRY_AGAIN - WIDE_RETRY_SILENT)
+                                            .unwrap_or_else(Instant::now);
+                                        for (f, at) in self.wide_tried.iter_mut() {
+                                            if (*f - target).abs() < 200.0 {
+                                                *at = soon;
+                                            }
+                                        }
+                                    }
                                     next_channel = true;
                                 }
                             },
@@ -7206,8 +7223,7 @@ impl Station {
                 .collect(),
         };
         self.set(|g| g.wide = view);
-        self.wide_tried
-            .retain(|(_, at)| at.elapsed() < Duration::from_secs(120));
+        self.wide_tried.retain(|(_, at)| at.elapsed() < WIDE_TRY_AGAIN);
         // A stepping scan that hasn't found anything yet gives way to an
         // SDR hit (auto-tune or not: searching already means "go to
         // whistles"). One that is measuring a whistle or waiting for its
@@ -7244,26 +7260,37 @@ impl Station {
     }
 
     fn wide_handoff(&mut self, dial: f64, score: f64) {
-        self.wide_tried.push((dial, Instant::now()));
         let _ = score;
+        match self.search.as_ref() {
+            Some(s) if s.scope != WIDE_SCOPE => self.log(format!(
+                "🚂 SDR whistle at {:.3} kHz; pausing the {} search to fine-lock on it",
+                dial / 1e3,
+                s.scope
+            )),
+            Some(Search { resume: Some(r), .. }) => self.log(format!(
+                "🚂 SDR whistle at {:.3} kHz; pausing the {} search to fine-lock on it",
+                dial / 1e3,
+                r.scope
+            )),
+            _ => self.log(format!(
+                "🚂 SDR whistle at {:.3} kHz; tuning the radio there to fine-lock",
+                dial / 1e3
+            )),
+        }
+        self.handoff_to(dial);
+    }
+
+    /// Tune to a whistle at `dial` and fine-lock on it (the wide search's
+    /// verify), pausing a stepping scan meanwhile. Tried at most once in 2
+    /// minutes within 200 Hz.
+    fn handoff_to(&mut self, dial: f64) {
+        self.wide_tried.push((dial, Instant::now()));
         // Pause a stepping scan (or keep the one an earlier hand-off paused).
         let resume = match self.search.take() {
             Some(s) if s.scope != WIDE_SCOPE => Some(Box::new(s)),
             Some(s) => s.resume,
             None => None,
         };
-        if let Some(r) = &resume {
-            self.log(format!(
-                "🚂 SDR whistle at {:.3} kHz; pausing the {} search to fine-lock on it",
-                dial / 1e3,
-                r.scope
-            ));
-        } else {
-            self.log(format!(
-                "🚂 SDR whistle at {:.3} kHz; tuning the radio there to fine-lock",
-                dial / 1e3
-            ));
-        }
         self.search = Some(Search {
             channels: vec![dial],
             idx: 0,
@@ -7361,6 +7388,29 @@ impl Station {
                     score: d.score,
                 })
             });
+            // With the wide search's auto-tune on, a whistle the radio
+            // itself hears off to one side is a hit too, and a better one:
+            // measured on the radio's own audio. An SDR hit can be a few
+            // hundred hertz off (its crystal): its fine-lock may miss, and
+            // the radio was left parked beside a caller it could hear (in
+            // the demo, 240 Hz off: "Whistle heard -240 Hz from here"
+            // twice, and no link).
+            if self.wide_on
+                && self.wide_auto
+                && d.offset_hz.abs() >= WATCH_RETUNE_HZ
+                && self.search.is_none()
+                && !self.at_table_or_joining()
+            {
+                let to = dial + d.offset_hz;
+                if !self.wide_tried.iter().any(|(f, _)| (f - to).abs() < 200.0) {
+                    self.log(format!(
+                        "🚂 Retuning to the whistle at {:.3} kHz (heard {:+.0} Hz from here) to fine-lock",
+                        to / 1e3,
+                        d.offset_hz
+                    ));
+                    self.handoff_to(to);
+                }
+            }
         }
     }
 }
@@ -7372,6 +7422,18 @@ pub fn report_now(due: Duration, table_quiet: bool, floor_elsewhere: bool) -> bo
     due >= TABLE_REPORT_EVERY
         && ((table_quiet && !floor_elsewhere) || due >= TABLE_REPORT_EVERY + Duration::from_secs(60))
 }
+
+/// An SDR frequency is tried again after this long (within 200 Hz), so one
+/// caller can't keep pulling a search away...
+pub const WIDE_TRY_AGAIN: Duration = Duration::from_secs(120);
+/// ...or after this long when the radio heard nothing at all there (the hit
+/// came as the whistle ended): its caller's next whistle is tried.
+pub const WIDE_RETRY_SILENT: Duration = Duration::from_secs(20);
+
+/// With the wide search's auto-tune on, a whistle the parked watch hears at
+/// least this far off retunes the radio to it: Mercury hears a CQFRAME
+/// only within about 55 Hz.
+pub const WATCH_RETUNE_HZ: f64 = 40.0;
 
 /// Mercury reports a frame once it has ended and been decoded; a retune
 /// in the last HEARD_LAG_S came after it was on the air.
@@ -8239,7 +8301,12 @@ mod tests {
                     break;
                 }
             }
-            if t.elapsed() > Duration::from_secs(90) {
+            // A hit that arrives as K7BOT's whistle ends isn't confirmed
+            // after the retune; the next whistle, about 35 s later, is then
+            // tried again (the SDR's hit, or the radio's own whistle watch
+            // hearing it 240 Hz off): one more CQ cycle on a slow or busy
+            // machine (2026-11-15).
+            if t.elapsed() > Duration::from_secs(150) {
                 let g = h.state.lock().unwrap();
                 let log: Vec<_> = g.log.iter().map(|l| l.1.clone()).collect();
                 panic!("no link; wide {:?}\n{}", g.wide, log.join("\n"));
