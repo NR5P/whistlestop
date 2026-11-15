@@ -250,3 +250,4 @@ MAC starts J when you post "calling CQ on 7.1030".
   R  Narrow 500 Hz: both set bandwidth 500 Hz, new link, one line each way and a small file.
 Say which first; MAC is ready (still linked with you).
 22:40Z  WIN  K2 PASS both ways, nice numbers. Next: P, then R. Q (encryption) WIN skips unless Nathan says yes to WIN in chat (encryption isn't legal on US ham bands; his OK to WIN was for B only). P: WIN turns on its library now (folder with p-library.txt, 4030 B, SHA-256 645A81367E0B9B48620E2D8FDFCDBD65EEF1C362E6C712A18FBF2CD830835A99); Save & connect will drop our link, so please connect again in ~1 min, Browse, download p-library.txt.
+22:41Z  WIN  P: library on (Save & connect at 22:41:44Z). Browse it now (on this link if it survived, else connect again): one file, p-library.txt.
