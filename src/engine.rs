@@ -4573,8 +4573,23 @@ impl Station {
             return Ok(());
         }
         let single_file = paths.len() == 1 && paths[0].is_file();
+        let one = single_file.then(|| paths[0].clone());
         let (name, data, zipped, files, original) = if zip || !single_file {
             let z = tokio::task::spawn_blocking(move || ziputil::zip_paths(&paths, None)).await??;
+            // One file that zipping doesn't shrink (random data, photos,
+            // archives): sent as it is, not as a bigger zip.
+            if let Some(path) = one.filter(|_| z.data.len() as u64 >= z.original_bytes) {
+                let data = std::fs::read(&path)?;
+                let name = path.file_name().unwrap().to_string_lossy().into_owned();
+                self.log(format!(
+                    "Not zipped: {name} doesn't get smaller ({:.0}% zipped), so it goes as it is",
+                    100.0 * z.ratio()
+                ));
+                let len = data.len() as u64;
+                let fid = self.next_fid;
+                self.next_fid += 1;
+                return self.offer_data(fid, name, data, false, 1, len).await;
+            }
             self.log(format!(
                 "Zipped {} file(s): {} → {} ({:.0}% of original)",
                 z.files,
@@ -6650,6 +6665,9 @@ impl Station {
             && self.cq.is_none()
             && self.search.is_none()
             && !self.at_table_or_joining();
+        if self.away && self.cfg.auto_deliver && !self.auto_allowed() {
+            self.outside_segments_note("delivering mail to", &call);
+        }
         if self.away
             && self.cfg.auto_deliver
             && quiet
@@ -6679,6 +6697,23 @@ impl Station {
         Ok(())
     }
 
+    /// An automatic delivery or collection held back because a signal from
+    /// this dial would reach outside the automatic-control segments: said
+    /// (once per station and job every 15 minutes), so "📬 … has mail for
+    /// you" isn't followed by silence.
+    fn outside_segments_note(&mut self, what: &str, call: &str) {
+        if !self.cooled(&format!("outside {what} {call}"), 900) {
+            return;
+        }
+        let d = self.dial();
+        self.log(format!(
+            "🤖 Away: not {what} {call}: a signal from {:.3} kHz reaches {:.3} kHz, outside the \
+             automatic-control segments (Settings → Automation). Tune lower in the segment, or do it by hand",
+            d / 1000.0,
+            (d + 2700.0) / 1000.0
+        ));
+    }
+
     /// `call` says it holds mail for us.
     async fn they_have_mail(&mut self, call: &str, count: usize) -> anyhow::Result<()> {
         let call = call.to_uppercase();
@@ -6698,6 +6733,9 @@ impl Station {
             && self.cq.is_none()
             && self.search.is_none()
             && !self.at_table_or_joining();
+        if self.away && self.cfg.auto_collect && !self.auto_allowed() {
+            self.outside_segments_note("collecting your mail from", &call);
+        }
         if self.away
             && self.cfg.auto_collect
             && quiet
@@ -7201,13 +7239,23 @@ pub const HEARD_LAG_S: f64 = 2.0;
 /// (when, from, to): the dial HEARD_LAG_S ago. Small moves (a search's
 /// fine-tuning onto the caller) keep the dial as it is now: that is the
 /// better measurement, and Mercury hears ±55 Hz either way.
+///
+/// A small move just after the frame is itself a fine-tune onto it, and
+/// its new dial the better one, even when a big move follows (a search
+/// that locked on, fine-tuned and moved on while the frame was decoded:
+/// filed 250 Hz low on the bench, off by more than Mercury hears at all).
 pub fn heard_dial(moves: &VecDeque<(Instant, f64, f64)>, now_dial: f64, now: Instant) -> f64 {
     let then = now.checked_sub(Duration::from_secs_f64(HEARD_LAG_S));
-    let was = moves
-        .iter()
-        .find(|(at, _, _)| then.is_none_or(|t| *at > t))
-        .map(|(_, from, _)| *from)
-        .unwrap_or(now_dial);
+    let mut since = moves.iter().filter(|(at, _, _)| then.is_none_or(|t| *at > t)).peekable();
+    let Some(&&(_, mut was, _)) = since.peek() else {
+        return now_dial;
+    };
+    for &(_, from, to) in since {
+        if (to - from).abs() >= 300.0 {
+            break;
+        }
+        was = to;
+    }
     if (was - now_dial).abs() < 300.0 { now_dial } else { was }
 }
 
@@ -8213,6 +8261,14 @@ mod tests {
         // A search's fine-tune onto the caller keeps the better dial.
         let fine: VecDeque<_> = [(ago(0.5), 14_103_073.0, 14_103_150.0)].into();
         assert_eq!(heard_dial(&fine, 14_103_150.0, now), 14_103_150.0);
+        // ... and keeps it when the search then moves on, before Mercury
+        // reports the frame (bench, 2026-11-15: filed at 14102.9).
+        let on: VecDeque<_> = [
+            (ago(1.5), 14_102_900.0, 14_103_150.0),
+            (ago(0.4), 14_103_150.0, 14_097_000.0),
+        ]
+        .into();
+        assert_eq!(heard_dial(&on, 14_097_000.0, now), 14_103_150.0);
     }
 
     #[test]
@@ -8454,6 +8510,114 @@ mod tests {
             std::thread::sleep(Duration::from_millis(50));
         }
         h.send(Cmd::Stop);
+        drop(rt);
+    }
+
+    /// Away with automatic collection on, a station says it holds mail for
+    /// us, but a signal from this dial would leave the automatic-control
+    /// segments: no call, and the Log says why (RF bench 2026-11-15, where
+    /// "📬 NR5P has mail for you" was followed by nothing).
+    #[test]
+    fn mail_not_collected_outside_the_segments_says_why() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let f = rt
+            .block_on(crate::fake_mercury::FakeMercury::start(FakeOptions {
+                bot_beacon_mail_for: Some("N0AWAY".into()),
+                ..Default::default()
+            }))
+            .unwrap();
+        let h = spawn(|| {});
+        let mut cfg = Config {
+            callsign: "N0AWAY".into(),
+            demo: false,
+            rigctld: "none".into(),
+            mercury_port: f.port,
+            mercury_bcast_port: f.bcast_port,
+            auto_collect: true,
+            ..Default::default()
+        };
+        cfg.sdr.enabled = false;
+        cfg.sdr.wide_search = false;
+        assert!(cfg.auto_in_segments_only);
+        h.send(Cmd::Start(cfg));
+        // As on the bench: 7.103 MHz, whose 2300 Hz signal reaches 7.1057,
+        // past the 40 m segment's top (7.105).
+        h.send(Cmd::SetFreq(7_103_000.0));
+        h.send(Cmd::SetAway(true));
+        let t = Instant::now();
+        loop {
+            {
+                let g = h.state.lock().unwrap();
+                if g.log.iter().any(|l| l.1.contains("not collecting your mail from K7BOT")) {
+                    assert!(g.log.iter().any(|l| l.1.contains("📬 K7BOT has mail for you")));
+                    assert!(!g.log.iter().any(|l| l.1.contains("connecting to K7BOT")));
+                    assert!(g.calling.is_none());
+                    break;
+                }
+                let log: Vec<_> = g.log.iter().map(|l| l.1.clone()).collect();
+                assert!(t.elapsed() < Duration::from_secs(10), "nothing said: {log:#?}");
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        h.send(Cmd::Stop);
+        drop(rt);
+    }
+
+    /// A single file that zipping doesn't shrink (random data, as on the
+    /// RF bench 2026-11-15: 19.5 KB zipped to 19.7 KB) goes out as it is;
+    /// one that shrinks is zipped.
+    #[test]
+    fn a_file_zip_does_not_shrink_goes_unzipped() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let f = rt
+            .block_on(crate::fake_mercury::FakeMercury::start(FakeOptions::default()))
+            .unwrap();
+        let h = spawn(|| {});
+        let dir = std::env::temp_dir().join(format!("ws-nozip-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut x: u64 = 0x9E37_79B9_7F4A_7C15;
+        let noise: Vec<u8> = (0..20_000)
+            .map(|_| {
+                x ^= x << 13;
+                x ^= x >> 7;
+                x ^= x << 17;
+                x as u8
+            })
+            .collect();
+        std::fs::write(dir.join("noise.bin"), &noise).unwrap();
+        std::fs::write(dir.join("log.txt"), "QSO log line\n".repeat(400)).unwrap();
+        let mut cfg = Config {
+            callsign: "N0ZIP".into(),
+            demo: false,
+            rigctld: "none".into(),
+            mercury_port: f.port,
+            mercury_bcast_port: f.bcast_port,
+            ..Default::default()
+        };
+        cfg.sdr.enabled = false;
+        cfg.sdr.wide_search = false;
+        h.send(Cmd::Start(cfg));
+        let wait = |what: &str, ok: &dyn Fn(&State) -> bool| {
+            let t = Instant::now();
+            while !ok(&h.state.lock().unwrap()) {
+                assert!(t.elapsed() < Duration::from_secs(10), "{what}");
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        };
+        wait("no Mercury", &|g| g.mercury_ok);
+        for name in ["noise.bin", "log.txt"] {
+            h.send(Cmd::SendFiles { paths: vec![dir.join(name)], zip: true });
+        }
+        wait("both queued", &|g| g.transfers.len() >= 2);
+        {
+            let g = h.state.lock().unwrap();
+            let (a, b) = (&g.transfers[0], &g.transfers[1]);
+            assert_eq!((a.name.as_str(), a.zipped, a.size), ("noise.bin", false, 20_000));
+            assert!(b.zipped && b.name.ends_with(".zip") && b.size < 2000, "{b:?}");
+            assert!(g.log.iter().any(|l| l.1.contains("Not zipped: noise.bin")));
+        }
+        h.send(Cmd::Stop);
+        std::fs::remove_dir_all(&dir).ok();
         drop(rt);
     }
 

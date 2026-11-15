@@ -44,6 +44,9 @@ pub struct FakeOptions {
     /// broadcast frame, as real Mercury does while it sends one. Off
     /// (instant, unkeyed) by default.
     pub bcast_on_air_s: Option<f64>,
+    /// Tests: the bot sends one Station ID 3 s in, saying it holds mail
+    /// for this call.
+    pub bot_beacon_mail_for: Option<String>,
 }
 
 impl Default for FakeOptions {
@@ -60,6 +63,7 @@ impl Default for FakeOptions {
             bot_cq_table: None,
             bot_table_leave_after: None,
             bcast_on_air_s: None,
+            bot_beacon_mail_for: None,
         }
     }
 }
@@ -312,6 +316,7 @@ struct Session {
     answered_cq: bool,
     /// Our last CQ's CALL packet said Roundtable.
     cq_is_table: bool,
+    beacon_sent: bool,
     t0: std::time::Instant,
 }
 
@@ -343,6 +348,7 @@ impl Session {
             table_msg_id: 0,
             answered_cq: false,
             cq_is_table: false,
+            beacon_sent: false,
             t0: std::time::Instant::now(),
         }
     }
@@ -859,6 +865,18 @@ impl Session {
         let budget = ((speed / 8.0) * dt).ceil() as usize;
         self.air(budget);
 
+        if let Some(to) = self.o.bot_beacon_mail_for.clone()
+            && !self.beacon_sent
+            && self.now >= if self.o.fast { 0.03 } else { 3.0 }
+        {
+            self.beacon_sent = true;
+            let id = TableFrame {
+                table: 0,
+                from: self.o.bot_call.clone(),
+                body: TableBody::Beacon { grid: "DN31".into(), away: false, mail_for: vec![to] },
+            };
+            self.bcast_out.push(id.encode());
+        }
         // The bot calls CQ on its frequency; Mercury decodes the CQFRAME only
         // when our radio is tuned within its +/-55 Hz capture window.
         if let Some(rf) = &self.o.rig_freq {

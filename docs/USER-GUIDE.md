@@ -226,7 +226,7 @@ With an RTL-SDR running, tick **Wide search (SDR)** in the Search card. The SDR'
 
 ### Heard
 
-The **Heard** card lists recent CQs (from Mercury's CQFRAME decodes), Roundtable calls, and SDR whistle hits, newest first. Buttons: **Answer** (connect), **Join** (a Roundtable), **Lock on** (an SDR hit). Answer and Join first tune the radio to where the station was heard (a search may have moved on since). Mercury reports a frame once it has ended and been decoded, so if the radio moved by **300 Hz or more** in the last **2 s** before that (a search stepping on, a retune by hand or from the app), the entry and the Log keep the frequency the radio was on before the move, where the station actually is. A smaller move, such as a search fine-tuning onto the caller, keeps the new frequency, which is the more exact one. None of them is offered during a link or a call, or at a Roundtable.
+The **Heard** card lists recent CQs (from Mercury's CQFRAME decodes), Roundtable calls, and SDR whistle hits, newest first. Buttons: **Answer** (connect), **Join** (a Roundtable), **Lock on** (an SDR hit). Answer and Join first tune the radio to where the station was heard (a search may have moved on since). Mercury reports a frame once it has ended and been decoded, so if the radio moved by **300 Hz or more** in the last **2 s** before that (a search stepping on, a retune by hand or from the app), the entry and the Log keep the frequency the radio was on before the move, where the station actually is. A smaller move, such as a search fine-tuning onto the caller, keeps the new frequency, which is the more exact one, also when a bigger move follows it within those 2 s. None of them is offered during a link or a call, or at a Roundtable.
 
 ## Chat
 
@@ -249,7 +249,7 @@ The **Files** tab sends and receives files over a 1:1 link.
 ### Sending
 
 - **+ Files…** picks one or more files; **+ Folder…** picks a folder; or **drop** files and folders anywhere on the window.
-- **Zip before sending** (on by default) packs everything into one zip with maximum compression. Folders are always zipped. Two files with the same name (from different folders) are both kept, the second as `name-1.ext`. Text and logs often shrink to a few percent; photos and already-compressed files don't shrink.
+- **Zip before sending** (on by default) packs everything into one zip with maximum compression. Folders are always zipped. Two files with the same name (from different folders) are both kept, the second as `name-1.ext`. Text and logs often shrink to a few percent; photos and already-compressed files don't shrink. A single file that zipping wouldn't make smaller is sent as it is (the Log says "Not zipped: … doesn't get smaller"), so it never goes out bigger than it is.
 - Each transfer is **offered** first: the other station sees the name, size, zip contents and predicted time, and presses **Accept** or **Decline**. Nothing is kept before you accept: pieces a station sends without waiting for your answer are ignored. An empty file (0 bytes) arrives the moment it's accepted.
 - Progress shows bytes done, the measured speed, and the time left. **Cancel** stops a transfer on either side. (Each station numbers its own files from a random starting point, so a cancel from either end always names the right one.)
 - If the link ends while an offer is still waiting for an answer, it shows **link ended before you answered**. The sender offers it again the next time the two of you link (with resume).
@@ -350,9 +350,9 @@ Whistlestop notices stations it holds mail for whenever it hears them: a CQ, a S
 |---|---|---|
 | **Tell stations I hear that I have mail for them** | Sends a short NOTICE frame: "N messages waiting here, connect to me" | Any time the band is quiet, at most once per station every 15 minutes |
 | **While away: connect and deliver** | Connects to the station, hands over the mail, waits for the confirmations and hangs up (after **60 s** with nothing happening if the other station never confirms, say because it doesn't carry mail for others) | Only while Away, the band is quiet and you're not calling or searching; once per station every 15 minutes |
-| **While away: connect and collect** | Connects to a station that says it holds mail for you; it hands the mail over, and the link ends 10 s after the mail has come, or after 60 s of quiet if none does (mail can take 20–30 s to cross on HF) | Same conditions |
+| **While away: connect and collect** | Connects to a station that says it holds mail for you; it hands the mail over, and the link ends after 10 s of quiet once the mail has come and Mercury has sent your confirmation (on a slow link that can take half a minute more), or after 60 s of quiet if none does (mail can take 20–30 s to cross on HF) | Same conditions |
 
-Every automatic transmission is written to the Log (🤖 and 📣 lines), so you can see what your station did while you were gone.
+Every automatic transmission is written to the Log (🤖 and 📣 lines), so you can see what your station did while you were gone. With **Automatic only in the segments** on, an automatic delivery or collection needs your whole signal (300–2700 Hz above the dial) inside an automatic-control segment; when it isn't, nothing is sent and the Log says so once per station every 15 minutes ("🤖 Away: not collecting your mail from …: a signal from 7103.000 kHz reaches 7105.700 kHz, outside the automatic-control segments"). Tune lower in the segment, or connect by hand.
 
 ## Store and forward (relaying)
 
