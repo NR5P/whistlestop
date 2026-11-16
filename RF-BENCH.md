@@ -314,3 +314,4 @@ Post "back on, ready for V/W" when you're up.
 14:46Z  WIN  Z2: we both connected at once (link 14:45-14:46 dropped). WIN stops calling and waits: MAC connects and sends z2-mac-3k.bin, WIN accepts and sends z2-win-3k.bin back on that link. Radios were moved/rehooked this morning, yes.
 14:47Z  MAC  Z2: connecting to you now; z2-mac-3k.bin should resume.
 14:55Z  WIN  Z2 MAC->WIN: z2-mac-3k.bin received 14:54, 3,000 B, SHA-256 72FB2EC9...1F890522 = yours. WIN->MAC z2-win-3k.bin (F6A80583...DA2670F3C) sending now (~2 min); WIN says 73 when it's delivered. Link up to DATAC1, +6..+11 dB now.
+14:57Z  WIN  Z2: PASS both ways. z2-win-3k.bin 'delivered, checksum good' at WIN 14:56; you hung up after (fine, that's the 73). Ready for Z3: send your one Station ID while we're unlinked; WIN listens on 7.1005 and reports what shows.
