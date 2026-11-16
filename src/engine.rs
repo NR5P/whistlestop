@@ -930,6 +930,16 @@ enum SearchPhase {
         again: bool,
         hops: u8,
         sure: bool,
+        /// The other dial this whistle may be on: right after a scan hit,
+        /// where it would be if the hit was the opposite-sideband image;
+        /// after moving there, the first estimate to go back to.
+        alt: Option<f64>,
+        /// Moved to `alt` already (try each place once).
+        swapped: bool,
+        /// Stepped `SIDESTEP_HZ` aside from this dial to tell a whistle from
+        /// its mirror image (they move opposite ways); done once.
+        sidestep: Option<f64>,
+        tested: bool,
     },
     WaitCq {
         until: Instant,
@@ -3059,6 +3069,10 @@ impl Station {
                                 again: false,
                                 hops: 0,
                                 sure: h.z >= SURE_Z,
+                                alt: Some(image_dial(ch, h.offset_hz, &self.whistle_params())),
+                                swapped: false,
+                                sidestep: None,
+                                tested: false,
                             };
                         }
                         Some(h) if h.z >= TrackDetector::MAYBE && hold_s > dwell => {
@@ -3081,6 +3095,10 @@ impl Station {
                                 again: false,
                                 hops: 0,
                                 sure: h.z >= SURE_Z,
+                                alt: Some(image_dial(ch, h.offset_hz, &self.whistle_params())),
+                                swapped: false,
+                                sidestep: None,
+                                tested: false,
                             };
                         }
                         _ => next_channel = true,
@@ -3094,8 +3112,13 @@ impl Station {
                 again,
                 hops,
                 sure,
+                alt,
+                swapped,
+                sidestep,
+                tested,
             } => {
-                let (target, from, coarse, again, hops, sure) = (*target, *from, *coarse, *again, *hops, *sure);
+                let (target, from, coarse, again, hops, sure, alt, swapped, sidestep, tested) =
+                    (*target, *from, *coarse, *again, *hops, *sure, *alt, *swapped, *sidestep, *tested);
                 let got = if from == 0 {
                     None
                 } else {
@@ -3111,6 +3134,10 @@ impl Station {
                         again,
                         hops,
                         sure,
+                        alt,
+                        swapped,
+                        sidestep,
+                        tested,
                     };
                 } else if let Some(x) = got {
                     // Now within a few tens of hertz: the matched filter
@@ -3179,6 +3206,80 @@ impl Station {
                             target / 1e3
                         ));
                         next_channel = true;
+                    } else if let Some(origin) = sidestep {
+                        let read = v.or_else(|| {
+                            self.tracker
+                                .scan(&x)
+                                .filter(|h| h.z >= TrackDetector::found(secs))
+                                .map(|h| h.offset_hz)
+                        });
+                        match sidestep_says(read) {
+                            Sidestep::Image => {
+                                let real = image_dial(origin, 0.0, &self.whistle_params());
+                                self.log(format!(
+                                    "🚂 It moved the wrong way: a mirror image after all; trying {:.3} kHz",
+                                    real / 1e3
+                                ));
+                                s.phase = SearchPhase::Verify {
+                                    target: real,
+                                    from: 0,
+                                    coarse,
+                                    again: false,
+                                    hops,
+                                    sure,
+                                    alt: None,
+                                    swapped: true,
+                                    sidestep: None,
+                                    tested: true,
+                                };
+                            }
+                            how => {
+                                // The whistle itself (or too unclear to
+                                // say): lock where it was.
+                                let fine = match (how, read) {
+                                    (Sidestep::Direct, Some(r)) => target + r,
+                                    _ => origin,
+                                };
+                                self.tune(fine).await?;
+                                self.log(format!(
+                                    "Locked on {:.3} kHz (first estimate {coarse:+.0} Hz, checked a step aside). Waiting for the CQ…",
+                                    fine / 1e3
+                                ));
+                                s.phase = SearchPhase::WaitCq {
+                                    until: Instant::now() + Duration::from_secs(45),
+                                };
+                            }
+                        }
+                    } else if let Some(other) = alt.filter(|_| {
+                        !swapped
+                            && hops == 0
+                            && looks_like_image(
+                                coarse,
+                                v.or(walk.map(|h| h.offset_hz)),
+                                self.whistle_params().scan_reach_hz(),
+                            )
+                    }) {
+                        // A radio with poor opposite-sideband rejection (or a
+                        // very strong signal) shows a whistle mirrored, too:
+                        // the up/down sweep looks the same, so the scan can't
+                        // tell. Retuning by the hit's offset moves an image
+                        // the other way, which this look just saw.
+                        self.log(format!(
+                            "🚂 That looks like the whistle's mirror image (the radio's other sideband); trying {:.3} kHz",
+                            other / 1e3
+                        ));
+                        s.phase = SearchPhase::Verify {
+                            target: other,
+                            from: 0,
+                            coarse,
+                            again: false,
+                            hops: hops + 1,
+                            sure,
+                            alt: Some(target),
+                            swapped: true,
+                            sidestep: None,
+                            tested,
+                        };
                     } else if let Some(h) = walk {
                         self.log(format!(
                             "🚂 The whistle is {:+.0} Hz further; retuning again",
@@ -3191,6 +3292,10 @@ impl Station {
                             again: false,
                             hops: hops + 1,
                             sure: sure || h.z >= SURE_Z,
+                            alt: None,
+                            swapped,
+                            sidestep: None,
+                            tested,
                         };
                     } else {
                         match v {
@@ -3214,6 +3319,10 @@ impl Station {
                                     // ended meanwhile, wait for its CQ here.
                                     hops: hops + 1,
                                     sure,
+                                    alt,
+                                    swapped,
+                                    sidestep: None,
+                                    tested,
                                 };
                             }
                             // Two looks agree it's that far off: go there and
@@ -3229,6 +3338,33 @@ impl Station {
                                     again: false,
                                     hops: hops + 1,
                                     sure,
+                                    alt: None,
+                                    swapped,
+                                    sidestep: None,
+                                    tested,
+                                };
+                            }
+                            // Found at the other dial: a whistle and its
+                            // mirror image both read 0 Hz where they seem
+                            // to be, but move opposite ways when the radio
+                            // steps aside. Check once before locking.
+                            Some(off) if swapped && !tested => {
+                                let fine = target + off;
+                                self.log(format!(
+                                    "🚂 Found it at {:.3} kHz; stepping {SIDESTEP_HZ:.0} Hz aside to be sure it isn't a mirror image",
+                                    fine / 1e3
+                                ));
+                                s.phase = SearchPhase::Verify {
+                                    target: fine + SIDESTEP_HZ,
+                                    from: 0,
+                                    coarse,
+                                    again: false,
+                                    hops,
+                                    sure,
+                                    alt: None,
+                                    swapped,
+                                    sidestep: Some(fine),
+                                    tested: true,
                                 };
                             }
                             Some(off) => {
@@ -3254,6 +3390,34 @@ impl Station {
                                         again: true,
                                         hops,
                                         sure,
+                                        alt,
+                                        swapped,
+                                        sidestep,
+                                        tested,
+                                    };
+                                }
+                                // Nothing at the mirror-image dial either:
+                                // go back to the first estimate once.
+                                _ if swapped && alt.is_some() => {
+                                    let back = alt.unwrap_or(target);
+                                    self.log(format!(
+                                        "🚂 Not there either; back to {:.3} kHz",
+                                        back / 1e3
+                                    ));
+                                    // The trip there counted as the
+                                    // hop; the first estimate keeps its
+                                    // walk and recheck.
+                                    s.phase = SearchPhase::Verify {
+                                        target: back,
+                                        from: 0,
+                                        coarse,
+                                        again: false,
+                                        hops,
+                                        sure,
+                                        alt: None,
+                                        swapped: true,
+                                        sidestep: None,
+                                        tested,
                                     };
                                 }
                                 Unconfirmed::WaitHere => {
@@ -7344,6 +7508,10 @@ impl Station {
                 again: false,
                 hops: 0,
                 sure: false,
+                alt: None,
+                swapped: false,
+                sidestep: None,
+                tested: false,
             },
             scope: WIDE_SCOPE.into(),
             resume,
@@ -7567,6 +7735,71 @@ enum Unconfirmed {
 /// caller in the whistle's last second or two finds it just as it stops:
 /// on the bench a whistle scored 22, the look after the retune heard
 /// nothing, and the search dropped it, though its CQ came next.
+/// Within this of where a direct whistle or its image would read.
+pub const IMAGE_TOL_HZ: f64 = 60.0;
+
+/// Finds this close to the edge of the scan's reach aren't checked for
+/// being images.
+pub const IMAGE_EDGE_HZ: f64 = 100.0;
+
+/// Where the whistle really is if a scan hit `off` Hz from channel `ch`
+/// was its opposite-sideband image: the image of a caller on `d` reads
+/// `ch - d - (f_lo + f_hi)` (its sweep mirrored about the dial).
+pub fn image_dial(ch: f64, off: f64, p: &crate::whistle::WhistleParams) -> f64 {
+    ch - off - (p.f_lo + p.f_hi)
+}
+
+/// After the first retune onto a scan hit (`shift` Hz from the channel),
+/// whether the look (`off`: where it reads the whistle now, if anywhere)
+/// says the hit was an opposite-sideband image. A direct whistle now reads
+/// near 0 Hz (or near `shift`, in audio from before the retune); an image
+/// moves the other way, to about 2 × `shift`, or out of the detector's
+/// `reach`, leaving nothing, a scrap of the real whistle near the
+/// passband's bottom edge, or a reading at the edge of reach. (Nothing heard could also be a whistle that
+/// just ended: then one look at the other dial costs about 1.4 s.)
+pub fn looks_like_image(shift: f64, off: Option<f64>, reach: f64) -> bool {
+    // A find at the edge of reach is a rough estimate of a whistle further
+    // off (the walk case), not an image: on the RF bench one read +1144 Hz
+    // for +1300, and after the retune +147.
+    if shift.abs() >= reach - IMAGE_EDGE_HZ {
+        return false;
+    }
+    let Some(off) = off else {
+        return (2.0 * shift).abs() > reach;
+    };
+    if off.abs() < RECHECK_HZ || (off - shift).abs() < IMAGE_TOL_HZ {
+        return false;
+    }
+    // In view, an image reads where it should; out of view, whatever is
+    // left (a scrap, or a reading at the edge of reach) is worth one look
+    // at the other dial before walking anywhere.
+    (2.0 * shift).abs() > reach || (off - 2.0 * shift).abs() < IMAGE_TOL_HZ
+}
+
+/// How far the search steps aside to tell a whistle from its image:
+/// inside the stepping search's 150 Hz verify reach, well clear of
+/// `RECHECK_HZ`.
+pub const SIDESTEP_HZ: f64 = 120.0;
+
+#[derive(Debug, PartialEq, Clone, Copy)]
+pub enum Sidestep {
+    /// It read `-SIDESTEP_HZ`: the whistle itself.
+    Direct,
+    /// It read `+SIDESTEP_HZ`: a mirror image, moving with the radio.
+    Image,
+    Unclear,
+}
+
+/// What a look after stepping `SIDESTEP_HZ` up from a whistle that read
+/// 0 Hz says (`read`: where it reads now, if anywhere).
+pub fn sidestep_says(read: Option<f64>) -> Sidestep {
+    match read {
+        Some(r) if (r + SIDESTEP_HZ).abs() < 45.0 => Sidestep::Direct,
+        Some(r) if (r - SIDESTEP_HZ).abs() < 45.0 => Sidestep::Image,
+        _ => Sidestep::Unclear,
+    }
+}
+
 fn unconfirmed(again: bool, heard: bool, hops: u8, sure: bool) -> Unconfirmed {
     if !again && heard {
         Unconfirmed::ListenAgain
@@ -7695,6 +7928,77 @@ fn air_grid(grid: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A QMX on 7.1 MHz heard a whistle on 7100.5 kHz from its 7102.8 kHz
+    /// channel, mirrored by the radio's other sideband (about 8 dB down),
+    /// and the search locked on 7102.15 kHz and missed the CQ. The scan
+    /// can't tell an image from the whistle (the up/down sweep mirrored is
+    /// the same sweep); the retune can: a direct whistle then reads near
+    /// 0 Hz, an image moves the other way. Audio as the simulated band
+    /// makes it (whose SSB keeps a full-strength image, like that QMX).
+    #[test]
+    fn a_whistle_heard_as_its_mirror_image_is_found_where_it_is() {
+        let p = crate::whistle::WhistleParams::default();
+        let w: Vec<f64> = crate::whistle::whistle(3.0, &p).iter().map(|&v| v as f64).collect();
+        let caller = 7_100_500.0;
+        let hear = |dial: f64| -> Option<f64> {
+            let x = crate::whistle::ssb_channel_at(&w, caller - dial, crate::whistle::FS, crate::whistle::PASSBAND, 0.0);
+            let mut det = TrackDetector::new(p);
+            det.scan(&x[..9600]).filter(|h| h.z >= TrackDetector::MAYBE).map(|h| h.offset_hz)
+        };
+        let reach = p.scan_reach_hz();
+        // The channels the QMX measured it from (offsets as measured there).
+        for (ch, measured) in [(7_102_800.0, -690.0), (7_102_600.0, -888.0), (7_103_200.0, -290.0), (7_104_400.0, 912.0)] {
+            let o = hear(ch).unwrap_or_else(|| panic!("nothing heard on {ch}"));
+            assert!((o - measured).abs() < 40.0, "{ch}: reads {o:+.0}, the QMX read {measured:+.0}");
+            let real = image_dial(ch, o, &p);
+            assert!((real - caller).abs() < 40.0, "{ch}: image says {real}");
+            // Retuned by the hit's offset: an image goes the other way.
+            let after = hear(ch + o);
+            assert!(looks_like_image(o, after, reach), "{ch}: after the retune it reads {after:?}");
+            // At the image's dial, the whistle reads near 0 Hz.
+            let there = hear(real).expect("heard at its real dial");
+            assert!(there.abs() < RECHECK_HZ, "{there}");
+        }
+        // The real field case: the hit read -606 Hz on 7102.8, and after
+        // the retune a scrap of the real whistle read -47 Hz.
+        assert!(looks_like_image(-606.0, Some(-47.0), reach));
+        assert!((image_dial(7_102_800.0, -606.0, &p) - caller).abs() < 100.0);
+        // A direct whistle (7101.0 kHz channel, -510 Hz) reads near 0 after
+        // the retune; audio from before the retune still reads near the
+        // hit; nothing heard where an image would still be in view means
+        // it ended.
+        let o = hear(7_101_000.0).unwrap();
+        assert!((o + 500.0).abs() < 25.0, "{o}");
+        assert!(!looks_like_image(o, hear(7_101_000.0 + o), reach));
+        assert!(!looks_like_image(-510.0, Some(-505.0), reach));
+        assert!(!looks_like_image(-510.0, None, reach));
+        // Nothing heard after a retune that would put an image out of view.
+        assert!(looks_like_image(-690.0, None, reach));
+        // A direct hit whose first look caught only the passband's edge
+        // (the walk case: clearly there, 300 Hz further) isn't an image.
+        assert!(!looks_like_image(-200.0, Some(-300.0), reach));
+        // Live: a find at the edge of reach (+1144 Hz for a whistle 1300 Hz
+        // off) read +147 after the retune: rough, not an image.
+        assert!(!looks_like_image(1144.0, Some(147.0), reach));
+        assert!(!looks_like_image(-1050.0, None, reach));
+        // The second field case: a caller on 7097.5 kHz, whose image reads
+        // 0 Hz on 7100.5. Stepping aside tells them apart: the whistle
+        // moves against the step, the image with it.
+        let caller2 = 7_097_500.0;
+        let hear2 = |dial: f64| -> Option<f64> {
+            let x = crate::whistle::ssb_channel_at(&w, caller2 - dial, crate::whistle::FS, crate::whistle::PASSBAND, 0.0);
+            let mut det = TrackDetector::new(p);
+            det.scan(&x[..9600]).filter(|h| h.z >= TrackDetector::MAYBE).map(|h| h.offset_hz)
+        };
+        let at = hear2(7_100_500.0).expect("its image");
+        assert!(at.abs() < RECHECK_HZ, "{at}");
+        assert_eq!(sidestep_says(hear2(7_100_500.0 + at + SIDESTEP_HZ)), Sidestep::Image);
+        assert!((image_dial(7_100_500.0 + at, 0.0, &p) - caller2).abs() < 30.0);
+        assert_eq!(sidestep_says(hear2(caller2 + SIDESTEP_HZ)), Sidestep::Direct);
+        assert_eq!(sidestep_says(hear(caller + SIDESTEP_HZ)), Sidestep::Direct);
+        assert_eq!(sidestep_says(None), Sidestep::Unclear);
+    }
 
     #[test]
     fn unconfirmed_lines_stop_sending_when_the_link_ends() {
