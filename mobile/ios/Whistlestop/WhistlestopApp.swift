@@ -76,11 +76,11 @@ struct StationHeader: View {
                 }
                 Spacer()
                 VStack(alignment: .trailing, spacing: 2) {
-                    Text(Fmt.mhz(s.freqHz))
+                    Text(s.dialKnown == true ? Fmt.mhz(s.freqHz) : "--.---.---")
                         .font(.system(size: 28, weight: .semibold, design: .monospaced))
                         .foregroundStyle(s.tx == true ? Theme.red : Theme.text)
                         .monospacedDigit()
-                        .accessibilityLabel("Dial \(Fmt.dial(s.freqHz)) kilohertz")
+                        .accessibilityLabel(s.dialKnown == true ? "Dial \(Fmt.dial(s.freqHz)) kilohertz" : "Dial not known: type the radio's frequency")
                     Text("MHz · \(s.rig?.mode ?? "—")")
                         .font(.caption2).foregroundStyle(Theme.dim)
                 }

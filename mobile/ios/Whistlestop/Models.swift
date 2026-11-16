@@ -34,6 +34,9 @@ struct EngineState: Decodable {
     /// A Roundtable we'll join as soon as Mercury is free.
     var tablePending: String? = nil
 
+    /// False with no radio control until the frequency is typed in: the dial is made up.
+    var dialKnown: Bool? = nil
+
     var freqHz: Double { rig?.freqHz ?? 0 }
 }
 

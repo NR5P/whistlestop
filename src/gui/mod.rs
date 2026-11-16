@@ -463,12 +463,12 @@ impl App {
                         ui.painter().circle_filled(r.center(), 6.0, lamp);
                         ui.add_sized([24.0, 18.0], egui::Label::new(RichText::new(if s.tx { "TX" } else { "RX" }).monospace().strong().color(lamp)));
                         ui.add_space(4.0);
-                        ui.label(RichText::new(fmt_freq(s.rig.freq_hz)).font(FontId::monospace(28.0)).color(BRASS));
+                        ui.label(RichText::new(if s.dial_known { fmt_freq(s.rig.freq_hz) } else { "--.---.---".into() }).font(FontId::monospace(28.0)).color(BRASS));
                         ui.label(RichText::new("MHz").color(DIM));
                         ui.add_space(6.0);
                         ui.vertical(|ui| {
                             ui.set_width(58.0);
-                            ui.label(RichText::new(bandplan::band_of(s.rig.freq_hz).unwrap_or("—")).strong().color(TEXT));
+                            ui.label(RichText::new(bandplan::band_of(s.rig.freq_hz).filter(|_| s.dial_known).unwrap_or("—")).strong().color(TEXT));
                             ui.label(RichText::new(if s.rig.mode.is_empty() { "—" } else { &s.rig.mode }).small().color(DIM));
                         });
                     });
@@ -2360,7 +2360,7 @@ impl App {
                             ui.horizontal(|ui| {
                                 ui.label("At most").help(&help::ST_QSY_MAX);
                                 ui.add(egui::DragValue::new(&mut c.qsy_max_khz).range(0.0..=30_000.0).suffix(" kHz")).help(&help::ST_QSY_MAX);
-                                ui.label(RichText::new(if c.qsy_max_khz == 0.0 { "(anywhere allowed)" } else { "from where I was" }).color(DIM));
+                                ui.label(RichText::new(if c.qsy_max_khz == 0.0 { "(anywhere in the band)" } else { "from where I was, within a band" }).color(DIM));
                             });
                             ui.checkbox(&mut c.qsy_segments_only, "Only inside the digital segments (band plan / legal)").help(&help::ST_QSY_SEG);
                             ui.checkbox(&mut c.qsy_swr_home, "If SWR stays high there, end the link so we both go home").help(&help::ST_QSY_SWR);
@@ -2676,6 +2676,7 @@ impl eframe::App for App {
                 log_seq: g.log_seq,
                 audio_rows: rows,
                 audio_seq: g.audio_seq,
+                dial_known: g.dial_known,
                 listen_mode: g.listen_mode,
                 est_bps: g.est_bps,
                 wide: g.wide.clone(),

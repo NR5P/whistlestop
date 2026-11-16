@@ -354,7 +354,7 @@ Whistlestop notices stations it holds mail for whenever it hears them: a CQ, a S
 | **While away: connect and deliver** | Connects to the station, hands over the mail, waits for the confirmations and hangs up (after **60 s** with nothing happening if the other station never confirms, say because it doesn't carry mail for others) | Only while Away, the band is quiet and you're not calling or searching; once per station every 15 minutes |
 | **While away: connect and collect** | Connects to a station that says it holds mail for you; it hands the mail over, and the link ends after 10 s of quiet once the mail has come and Mercury has sent your confirmation (on a slow link that can take half a minute more), or after 60 s of quiet if none does (mail can take 20–30 s to cross on HF) | Same conditions |
 
-Every automatic transmission is written to the Log (🤖 and 📣 lines), so you can see what your station did while you were gone. With **Automatic only in the segments** on, an automatic delivery or collection needs your whole signal (300–2700 Hz above the dial) inside an automatic-control segment; when it isn't, nothing is sent and the Log says so once per station every 15 minutes ("🤖 Away: not collecting your mail from …: a signal from 7103.000 kHz reaches 7105.700 kHz, outside the automatic-control segments"). Tune lower in the segment, or connect by hand.
+Every automatic transmission is written to the Log (🤖 and 📣 lines), so you can see what your station did while you were gone. With **Automatic only in the segments** on, an automatic delivery or collection needs your whole signal (300–2700 Hz above the dial) inside an automatic-control segment, and a known dial (with no radio control, type the frequency in); when it isn't, nothing is sent and the Log says so once per station every 15 minutes ("🤖 Away: not collecting your mail from …: a signal from 7103.000 kHz reaches 7105.700 kHz, outside the automatic-control segments"). Tune lower in the segment, or connect by hand.
 
 ## Store and forward (relaying)
 
@@ -380,7 +380,7 @@ Once linked, either station can ask to **move the link** to another frequency, t
 | Accept QSY requests | Agree to requests that meet the rules below | off |
 | Only within the band I'm on | Never leave the current band (where you know the antenna works) | on |
 | Bands | With the above off: which bands a QSY may go to | 40, 30, 20 m |
-| At most … kHz | How far from where you were (0 = anywhere allowed). It applies to a move to another band too: to allow other bands, set it to 0 or to more than the distance to them | 50 kHz |
+| At most … kHz | How far from where you were a move within the same band may go (0 = anywhere in the band). A move to another band you allow above isn't limited by it | 50 kHz |
 | Only inside the digital segments | Only where your configured segments say data is allowed (legal for an unattended station) | on |
 | If SWR stays high there, end the link | A bad SWR sends both stations home | on |
 
@@ -471,7 +471,7 @@ Whistlestop also comes as native phone apps: SwiftUI on the iPhone and iPad (iOS
   - **Protocol** stays on Automatic unless the radio isn't found; then choose its family.
   - **Serial bridge**: a serial-to-network adapter at `host:port` that passes the radio's own CAT through.
   - **rigctld**: a Hamlib `rigctld` on your network, at `host:port`.
-  - **None (VOX)**: no CAT. Whistlestop can't read or tune the dial, so search and QSY need CAT; with VOX keying, calling and answering on the frequency you set by hand still work.
+  - **None (VOX)**: no CAT. Whistlestop can't read or tune the dial, so search and QSY need CAT; with VOX keying, calling and answering on the frequency you set by hand still work. Until you type the radio's frequency into the dial, Whistlestop doesn't know it: the Log says "on the radio's frequency (not known here: no radio control)" instead of a number, and with **Automatic only in the segments** on, nothing automatic (Station ID, mail notices, automatic delivery and collection) is sent, since it can't be checked against the segments; the Log says so. Type the frequency in once (and again whenever you retune by hand).
   - With USB or a serial bridge, Whistlestop shares the radio with the phone's Mercury on `127.0.0.1:4532` (the phone itself only, never the network), and Mercury keys the transmitter through it (Hamlib model 2, NET rigctl). Mercury starts once the radio has connected, waiting up to 30 s for it; if no radio connects, it starts without keying.
   - The line at the bottom of the card shows **Connected:** and the radio, or **Not connected** (the Log says why). Changing the radio connection and tapping **Save** restarts the station.
   - Mercury can't be restarted inside the app. If you change how the radio is reached after the modem has started, the card asks you to close Whistlestop (swipe it away) and open it again, so Mercury keys the radio the new way.

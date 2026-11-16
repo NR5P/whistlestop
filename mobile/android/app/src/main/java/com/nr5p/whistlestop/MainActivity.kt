@@ -204,9 +204,11 @@ private fun StationHeader(station: Station, s: EngineState) {
             }
             Column(horizontalAlignment = Alignment.End) {
                 Text(
-                    Fmt.mhz(s.freqHz), fontFamily = FontFamily.Monospace, fontSize = 28.sp, fontWeight = FontWeight.SemiBold,
+                    if (s.dialKnown) Fmt.mhz(s.freqHz) else "--.---.---", fontFamily = FontFamily.Monospace, fontSize = 28.sp, fontWeight = FontWeight.SemiBold,
                     color = if (s.tx) C.red else C.text,
-                    modifier = Modifier.semantics { contentDescription = "Dial ${Fmt.dial(s.freqHz)} kilohertz" },
+                    modifier = Modifier.semantics {
+                        contentDescription = if (s.dialKnown) "Dial ${Fmt.dial(s.freqHz)} kilohertz" else "Dial not known: type the radio's frequency"
+                    },
                 )
                 Text("MHz · ${s.mode.ifEmpty { "—" }}", color = C.dim, fontSize = 12.sp)
             }

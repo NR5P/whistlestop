@@ -440,6 +440,10 @@ pub struct State {
     pub audio_rows: VecDeque<Vec<f32>>,
     #[serde(skip)]
     pub audio_seq: u64,
+    /// The dial is the radio's real frequency (read by CAT, or typed in);
+    /// with no radio control it's a made-up default until then.
+    #[serde(default)]
+    pub dial_known: bool,
     #[serde(with = "ser::opt_mode")]
     pub listen_mode: Option<&'static Mode>,
     pub est_bps: f64,
@@ -1095,6 +1099,11 @@ struct Station {
     /// Mercury transmitting into an unkeyed radio.
     key_watch: KeyWatch,
     stuck_watch: StuckWatch,
+    /// The dial is the radio's real frequency: read from it (CAT), or typed
+    /// in. With no radio control it starts as a made-up default, which must
+    /// not pass for the radio's frequency (the automatic-control segment
+    /// check, the Log).
+    dial_known: bool,
     /// Mercury's transmit level: as last set (None: left to Mercury), the
     /// next to set and why, the change being made, and whether its last
     /// failure was logged (said once, until one works).
@@ -1418,6 +1427,7 @@ impl Station {
             unkey_owed: false,
             key_watch: KeyWatch::default(),
             stuck_watch: StuckWatch::default(),
+            dial_known: false,
             tx_level_now: None,
             tx_level_want: None,
             tx_level_job: None,
@@ -2003,8 +2013,21 @@ impl Station {
         let from = std::mem::replace(&mut *self.vfo.lock().unwrap(), hz);
         self.note_move(from, hz);
         self.last_tune = Instant::now();
-        self.set(|g| g.rig.freq_hz = hz);
+        self.dial_known = true;
+        self.set(|g| {
+            g.rig.freq_hz = hz;
+            g.dial_known = true;
+        });
         Ok(())
+    }
+
+    /// The dial for the Log: its frequency, or that it isn't known.
+    fn dial_text(&self) -> String {
+        if self.dial_known {
+            format!("{:.3} kHz", self.dial() / 1e3)
+        } else {
+            "the radio's frequency (not known here: no radio control)".into()
+        }
     }
 
     /// Transmit meters, the SWR peak of each transmission, and whether the
@@ -2339,6 +2362,10 @@ impl Station {
         let Some(r) = self.rig.as_mut() else { return };
         match r.poll().await {
             Ok(status) => {
+                if !self.dial_known {
+                    self.dial_known = true;
+                    self.set(|g| g.dial_known = true);
+                }
                 let from = std::mem::replace(&mut *self.vfo.lock().unwrap(), status.freq_hz);
                 if (from - status.freq_hz).abs() > 1.0 {
                     self.note_move(from, status.freq_hz);
@@ -3380,12 +3407,12 @@ impl Station {
             };
         }
         self.log(format!(
-            "Calling CQ{} on {:.3} kHz: {:.0} s whistle, then CQFRAME",
+            "Calling CQ{} on {}: {:.0} s whistle, then CQFRAME",
             table
                 .as_ref()
                 .map(|t| format!(" for Roundtable \"{t}\""))
                 .unwrap_or_default(),
-            self.dial() / 1e3,
+            self.dial_text(),
             self.cfg.whistle_s
         ));
         Ok(())
@@ -6489,6 +6516,11 @@ impl Station {
         if !self.cfg.auto_in_segments_only {
             return true;
         }
+        // No radio control and no frequency typed in: whether we're inside
+        // a segment can't be known, so not.
+        if !self.dial_known {
+            return false;
+        }
         let d = self.dial();
         self.cfg
             .segments
@@ -6857,6 +6889,13 @@ impl Station {
             return;
         }
         let d = self.dial();
+        if !self.dial_known {
+            self.log(format!(
+                "🤖 Away: not {what} {call}: with no radio control the frequency isn't known here, so whether \
+                 it's inside the automatic-control segments can't be checked. Type the radio's frequency in the dial"
+            ));
+            return;
+        }
         self.log(format!(
             "🤖 Away: not {what} {call}: a signal from {:.3} kHz reaches {:.3} kHz, outside the \
              automatic-control segments (Settings → Automation). Tune lower in the segment, or do it by hand",
@@ -7077,7 +7116,11 @@ impl Station {
                 self.send_beacon("scheduled")?;
             } else {
                 self.last_beacon = Instant::now();
-                self.log("Station ID skipped: outside the automatic-control segments".into());
+                self.log(if self.dial_known {
+                    "Station ID skipped: outside the automatic-control segments".into()
+                } else {
+                    "Station ID skipped: the radio's frequency isn't known (no radio control), so it can't be checked against the automatic-control segments; type it in the dial".into()
+                });
             }
         }
         // Hang up quiet links when away, or after an automatic connect has
@@ -7571,7 +7614,10 @@ pub fn qsy_verdict(cfg: &Config, home: f64, hz: f64) -> Result<(), String> {
     } else if !cfg.qsy_bands.iter().any(|b| b.trim().eq_ignore_ascii_case(there)) {
         return Err(format!("{there} isn't one of my QSY bands"));
     }
-    if cfg.qsy_max_khz > 0.0 && (hz - home).abs() > cfg.qsy_max_khz * 1000.0 {
+    // The distance limit is for moves within a band: another band was
+    // allowed by the band list (on the RF bench, 2026-11-15, the default
+    // 50 kHz refused every band change even with other bands ticked).
+    if cfg.qsy_max_khz > 0.0 && Some(there) == here && (hz - home).abs() > cfg.qsy_max_khz * 1000.0 {
         return Err(format!("more than {:.0} kHz from here", cfg.qsy_max_khz));
     }
     if cfg.qsy_segments_only
@@ -8769,6 +8815,64 @@ mod tests {
         drop(rt);
     }
 
+    /// No radio control and no frequency typed in: the dial is a made-up
+    /// default, so it can't pass the automatic-control segment check (it
+    /// used to: 14.096 MHz is inside the 20 m segment), and the CQ line in
+    /// the Log doesn't claim a frequency.
+    #[test]
+    fn an_unknown_dial_never_passes_the_segment_check() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let f = rt
+            .block_on(crate::fake_mercury::FakeMercury::start(FakeOptions {
+                bot_beacon_mail_for: Some("N0DIAL".into()),
+                ..Default::default()
+            }))
+            .unwrap();
+        let h = spawn(|| {});
+        let mut cfg = Config {
+            callsign: "N0DIAL".into(),
+            demo: false,
+            rigctld: "none".into(),
+            mercury_port: f.port,
+            mercury_bcast_port: f.bcast_port,
+            auto_collect: true,
+            ..Default::default()
+        };
+        cfg.sdr.enabled = false;
+        cfg.sdr.wide_search = false;
+        h.send(Cmd::Start(cfg));
+        h.send(Cmd::SetAway(true));
+        let t = Instant::now();
+        loop {
+            {
+                let g = h.state.lock().unwrap();
+                if g.log.iter().any(|l| l.1.contains("not collecting your mail from K7BOT") && l.1.contains("isn't known")) {
+                    assert!(!g.log.iter().any(|l| l.1.contains("connecting to K7BOT")));
+                    break;
+                }
+                let log: Vec<_> = g.log.iter().map(|l| l.1.clone()).collect();
+                assert!(t.elapsed() < Duration::from_secs(10), "nothing said: {log:#?}");
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        h.send(Cmd::SetAway(false));
+        h.send(Cmd::CallCq { table: None });
+        let t = Instant::now();
+        loop {
+            {
+                let g = h.state.lock().unwrap();
+                if let Some(l) = g.log.iter().find(|l| l.1.starts_with("Calling CQ")) {
+                    assert!(l.1.contains("not known here") && !l.1.contains("14096"), "{}", l.1);
+                    break;
+                }
+                assert!(t.elapsed() < Duration::from_secs(10), "no CQ");
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        h.send(Cmd::Stop);
+        drop(rt);
+    }
+
     /// A Roundtable message waits while someone else is on the air (the
     /// host's CQ whistle for the table, on the RF bench 2026-11-15, took a
     /// member's only message with it), and goes once the channel is clear.
@@ -9812,8 +9916,10 @@ mod tests {
                 .contains("kHz from here")
         );
         c.qsy_same_band = false;
+        // Another allowed band: the distance limit is for moves within one.
+        assert!(qsy_verdict(&c, home, 7_102_000.0).is_ok(), "{:?}", qsy_verdict(&c, home, 7_102_000.0));
         assert!(
-            qsy_verdict(&c, home, 7_102_000.0)
+            qsy_verdict(&c, home, 14_200_000.0)
                 .unwrap_err()
                 .contains("kHz from here")
         );

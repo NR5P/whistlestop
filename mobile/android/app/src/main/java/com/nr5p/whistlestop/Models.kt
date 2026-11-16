@@ -33,6 +33,8 @@ data class EngineState(
     val mercuryOk: Boolean = false,
     val audioOk: Boolean = false,
     val freqHz: Double = 0.0,
+    /** False with no radio control until the frequency is typed in: [freqHz] is made up. */
+    val dialKnown: Boolean = false,
     val mode: String = "",
     val tx: Boolean = false,
     val rigDesc: String = "",
@@ -65,6 +67,7 @@ data class EngineState(
                 mercuryOk = s.b("mercury_ok"),
                 audioOk = s.b("audio_ok"),
                 freqHz = rig?.d("freq_hz") ?: 0.0,
+                dialKnown = s.b("dial_known"),
                 mode = rig?.s("mode") ?: "",
                 tx = s.b("tx"),
                 rigDesc = s.s("rig_desc") ?: "",

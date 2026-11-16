@@ -59,7 +59,7 @@ pub const HELP_TOGGLE: Topic = (
 );
 pub const FREQ: Topic = (
     "Frequency display",
-    "The radio's dial frequency (USB), band and mode, read from the radio about once a second, including changes you make on the radio itself. The lamp is green when receiving and red when transmitting.",
+    "The radio's dial frequency (USB), band and mode, read from the radio about once a second, including changes you make on the radio itself. The lamp is green when receiving and red when transmitting. With no radio control it shows --.---.--- until you type the radio's frequency in: Whistlestop can't read it, and the automatic-control segment check needs it.",
     "Rig controls",
 );
 pub const S_METER: Topic = ("S-meter", "The radio's signal strength reading (rigctld STRENGTH), shown as an S-unit. Not all radios report it.", "Rig controls");
@@ -606,7 +606,7 @@ pub const ST_QSY_BANDS: Topic =
     ("QSY bands", "With 'only within this band' off: the bands a QSY may go to. Pick only bands your antenna and tuner can handle.", "QSY (moving a link)");
 pub const ST_QSY_MAX: Topic = (
     "Largest move",
-    "How far from where you were a QSY may go, in kHz (0 = anywhere in the allowed bands). Small moves keep the antenna's SWR close to where it was.",
+    "How far from where you were a QSY within the same band may go, in kHz (0 = anywhere in the band). Small moves keep the antenna's SWR close to where it was. A move to another band you allow isn't limited by this.",
     "QSY (moving a link)",
 );
 pub const ST_QSY_SEG: Topic = (
