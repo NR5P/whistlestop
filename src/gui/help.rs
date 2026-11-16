@@ -682,3 +682,23 @@ pub const RM_SERVE_PW: Topic = (
     "At least 4 characters. Anyone on your LAN who knows it can operate your station (and transmit): pick one others won't guess.",
     "Remote operation",
 );
+pub const LOG_SAVE: Topic = (
+    "Save log",
+    "Saves the Log to a text file to send with a problem report: every line since Whistlestop started (from whistlestop.log beside the settings), each with its date and time in UTC, plus Whistlestop's version and build, the radio, Mercury's version and your settings (the remote-operation password left out). Read it before you send it.",
+    "Reporting a problem",
+);
+pub const LOG_COPY: Topic = (
+    "Copy log",
+    "Copies the same text Save log writes (version, radio, Mercury, settings without the remote-operation password, and this session's Log) so you can paste it into an e-mail or a report.",
+    "Reporting a problem",
+);
+pub const LOG_FILES: Topic = (
+    "Log files",
+    "Shows whistlestop.log in Finder or Explorer: this session's Log, written line by line as it happens. The session before is kept as whistlestop-previous.log, so after a crash, that's the one to send.",
+    "Reporting a problem",
+);
+pub const VERSION: Topic = (
+    "Version",
+    "Whistlestop's version, and in brackets the build it was made from: the beta release (v0.1.0-beta.2), or for a build in between, the last beta, the changes since and the commit. Put it in every report.",
+    "Reporting a problem",
+);

@@ -42,6 +42,12 @@ nearby and can tune to them with one click.
 - **Demo mode**: the whole app with a simulated radio, band, Mercury and a
   demo station (K7BOT). No radio needed.
 
+## Beta
+
+Testers: start with **Getting started on the air**, **Tested radios** and
+**Reporting a problem** in the [User Guide](docs/USER-GUIDE.md) (also in the
+app: 📖 Guide). Building and handing out a beta: [docs/BETA.md](docs/BETA.md).
+
 ## Run
 
 ```bash

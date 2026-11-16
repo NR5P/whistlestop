@@ -4,6 +4,7 @@ mod depot;
 mod guide;
 mod help;
 pub mod icon;
+mod logsave;
 mod remote;
 mod rigwin;
 mod waterfall;
@@ -251,6 +252,8 @@ pub struct App {
     e2e_confirm: Option<Policy>,
     /// WHISTLESTOP_SHOTS=<dir>: a scripted tour of the demo, with screenshots.
     tour: Option<Tour>,
+    /// This computer's Log, written to `whistlestop.log` as it comes.
+    session_log: Option<logsave::SessionLog>,
 }
 
 struct Tour {
@@ -323,6 +326,7 @@ impl App {
             hover_at: None,
             e2e_confirm: None,
             tour: std::env::var_os("WHISTLESTOP_SHOTS").map(|d| Tour { dir: d.into(), step: 0, at: Instant::now(), started: Instant::now() }),
+            session_log: Some(logsave::SessionLog::beside(&whistlestop::config::path())),
         };
         app.start_server();
         if !problems.is_empty() {
@@ -1693,7 +1697,54 @@ impl App {
         });
     }
 
+    /// What Save log… writes and Copy log copies (see `logsave::report`).
+    fn log_report(&self, s: &State) -> String {
+        let screen = || (format!("the newest {} lines shown on the Log tab", s.log.len()), logsave::lines(s.log.iter()));
+        let (source, lines) = if self.client.is_some() {
+            (format!("the radio computer's Log ({} newest lines), operated from here", s.log.len()), logsave::lines(s.log.iter()))
+        } else {
+            match self.session_log.as_ref().and_then(|sl| sl.read().map(|t| (sl.path().display().to_string(), t))) {
+                Some((p, t)) => (format!("this session, from {p}"), t),
+                None => screen(),
+            }
+        };
+        logsave::report(&self.cfg, &s.rig_desc, s.modem_version.as_deref(), &source, &lines)
+    }
+
+    fn save_log(&mut self, s: &State) {
+        let name = format!("whistlestop-log-{}.txt", logsave::file_stamp(engine::chrono_lite::Clock::now().0));
+        let mut d = rfd::FileDialog::new().set_title("Save the Log").set_file_name(&name).add_filter("Text", &["txt"]);
+        if self.cfg.download_dir.is_dir() {
+            d = d.set_directory(&self.cfg.download_dir);
+        }
+        if let Some(p) = d.save_file() {
+            match std::fs::write(&p, self.log_report(s)) {
+                Ok(()) => self.toast(format!("Log saved: {}", p.display())),
+                Err(e) => self.toast(format!("⚠ Couldn't save the Log: {e}")),
+            }
+        }
+    }
+
     fn log_tab(&mut self, ui: &mut Ui, s: &State) {
+        ui.horizontal(|ui| {
+            if ui.button("💾  Save log…").help(&help::LOG_SAVE).clicked() {
+                self.save_log(s);
+            }
+            if ui.button("📋  Copy log").help(&help::LOG_COPY).clicked() {
+                ui.ctx().copy_text(self.log_report(s));
+                self.toast("Log copied: paste it into your report");
+            }
+            let file = self.session_log.as_ref().filter(|sl| sl.is_open()).map(|sl| sl.path().to_path_buf());
+            if ui.add_enabled(file.is_some(), egui::Button::new("📂  Log files")).help(&help::LOG_FILES).clicked()
+                && let Some(p) = file
+            {
+                reveal(&p);
+            }
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                ui.label(RichText::new(logsave::VERSION).monospace().small().color(DIM)).help(&help::VERSION);
+            });
+        });
+        ui.add_space(4.0);
         egui::ScrollArea::vertical().stick_to_bottom(true).auto_shrink([false, false]).show(ui, |ui| {
             for (at, l) in &s.log {
                 ui.horizontal_wrapped(|ui| {
@@ -2596,6 +2647,14 @@ impl eframe::App for App {
         if !dropped.is_empty() {
             self.send(Cmd::SendFiles { paths: dropped, zip: self.zip });
             self.tab = Tab::Files;
+        }
+        // This computer's Log, line by line, to its file (also while
+        // operating another computer: `h` is then that one's).
+        if let Some(sl) = &mut self.session_log {
+            let h = self.local_h.as_ref().unwrap_or(&self.h);
+            if let Ok(g) = h.state.lock() {
+                sl.catch_up(g.log_seq, &g.log);
+            }
         }
         // Remote operation.
         self.poll_connecting();

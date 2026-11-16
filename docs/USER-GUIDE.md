@@ -13,7 +13,7 @@ Whistlestop is an HF keyboard chat, file transfer and group conversation program
 - **Search**: sweep a band's digital segment with your one radio, or watch the whole segment at once with an optional RTL-SDR second receiver.
 - **Honest numbers**: the modem strip shows exactly what the modem is doing (mode, modulation, carriers, bandwidth, speed, error correction, SNR), and every message and file shows how long it will take.
 
-> Whistlestop is new. Its whistle and protocol are tested in simulation and with two real Mercury modems on one computer, but not yet on the air. Treat on-air results as experiments, and report what you find.
+> Whistlestop is new, and in beta. Its whistle and protocol are tested in simulation, with two real Mercury modems on one computer, and between two real radios transmitting into dummy loads, but not yet between stations on real antennas. Treat on-air results as experiments, and report what you find (see "Reporting a problem").
 
 ## Quick start: Demo mode
 
@@ -32,7 +32,157 @@ Try this:
 5. Drop a file on the window to send one back.
 6. Try **Call CQ → Roundtable** to host a table. K7BOT joins.
 
-When you're ready for the air, open **Settings**, enter your callsign, untick **Demo mode**, and follow "Setting up your station" below.
+When you're ready for the air, follow "Getting started on the air" below.
+
+## Getting started on the air
+
+The short path from a new install to a first contact, for beta testers. Each step points to the section with the details. Do it on a **dummy load** first: everything up to step 6 transmits only into it.
+
+### What you need
+
+- A radio with CAT control over USB, and its USB sound card (or an interface such as a SignaLink or DigiRig). See "Tested radios" for the two that have been through the RF bench.
+- A computer running **Windows, macOS or Linux**, with the Whistlestop build for it.
+- **Mercury 1.9.23**, the modem Whistlestop drives (below).
+- Your callsign, and a 20 m or 40 m antenna for step 7.
+
+### 1. Get Mercury
+
+Mercury is Rhizomatica's open-source HF modem. Download **version 1.9.23** from its releases page, `github.com/Rhizomatica/mercury/releases/tag/v1.9.23`:
+
+- **Windows**: `mercury-1.9.23-w64-09f258f8.zip`. Unzip it somewhere permanent; the command-line engine is `mercury.exe`. (The `Setup.exe` installer installs Mercury's own window, `mercury-ui.exe`, which runs the modem inside itself; Whistlestop is tested with `mercury.exe`.)
+- **macOS**: `Mercury-1.9.23-universal.dmg`. The image holds the command-line engine `mercury` beside `Mercury.app`. Copy `mercury` to `/usr/local/bin` (or `~/.local/bin`), where Whistlestop also finds it for Demo mode.
+- **Linux**: build it from the source (Mercury's README, "Compile and Install from Git repository on Linux"), then `sudo make install`.
+
+`mercury -V` prints the version. Both stations of a contact need Mercury **1.9.20 or later** (older ones can't connect to them), but use 1.9.23: the bench, the RF tests and the phone apps all run 1.9.23. **1.9.24** (13 November 2026) changes how Mercury reports a link's end and its calls to programs like Whistlestop, and hasn't been tested with Whistlestop yet.
+
+Run only one program on Mercury at a time: close Mercury's own window (`mercury-ui`), VarAC and anything else that uses its TNC port (8300).
+
+### 2. Set up Whistlestop
+
+1. Open **Settings**. Under **Station**, type your **Callsign** (and name and grid if you like); under **Mode**, untick **Demo mode**.
+2. **Radio connection**: choose **Direct CAT (built in)**, press **🔍 Detect radios**, then **Use** beside your radio. Leave **Protocol** and **Speed** on Automatic, and **Share with Mercury on port** on, at 4532. (Or use Hamlib's rigctld: see "Rig control".)
+3. **Audio in** and **Audio out**: the radio's USB sound card (a QMX shows as **QMX Transceiver**, a Yaesu or Icom as a **USB Audio CODEC**). Leave **Listen on** on the computer's speakers, never the radio.
+4. Press **Save & connect**. The **Radio** pill turns green and the frequency display follows the radio's dial; the **Audio** pill turns green and the **Radio audio** waterfall shows the band's noise.
+
+On the radio: **USB** or its data mode (PKTUSB, DATA-U), a filter of at least **2.4 kHz**, and noise reduction, noise blanker and speech processing **off** (see "Radio settings", and "QRP Labs QMX" for a QMX).
+
+### 3. Start Mercury
+
+With direct CAT, start Mercury **after** Whistlestop: it keys the radio through Whistlestop's sharing port, which is there only once Whistlestop has connected to the radio.
+
+First, find the sound card's id: `mercury -z` lists every device with the id to give Mercury. Then, from the folder Mercury is in (on Windows, `mercury.exe` in a Command Prompt there):
+
+```
+mercury -R 2 -A 127.0.0.1:4532 -i "<capture id>" -o "<playback id>" -G -L mercury.log
+```
+
+- `-R 2 -A 127.0.0.1:4532`: Mercury keys the radio through Hamlib model 2 (NET rigctl) at Whistlestop's sharing port (the same address for the rigctld Whistlestop runs, or RigHelm's server).
+- `-i` and `-o`: the radio's sound card, as `mercury -z` printed it. Leave Mercury's sound system (`-x`) on its default.
+- `-G`: opens Mercury's UI port (10000), so Whistlestop can set its transmit level (see "Transmit level").
+- `-L mercury.log`: Mercury writes its own log there; send it with a problem report.
+- The TNC port (8300, data 8301) and broadcast port (8100) are Mercury's defaults and Whistlestop's: leave them.
+
+Then **click the red Mercury pill** in Whistlestop. It turns green, and the modem strip shows Mercury's version.
+
+**How Mercury keys the radio: `-P`.** `-R` chooses Hamlib keying by itself; `-P` chooses another way:
+
+| `-P` | Keys the radio by | Use it when |
+|---|---|---|
+| `hamlib` (or just `-R 2`) | a CAT command, through Whistlestop's sharing port | normally: every tested setup |
+| `serial` | the RTS line of a serial port, `-A COM7` or `-A /dev/ttyUSB0` (DTR or both: `line` under `[ptt]` in mercury.ini) | an interface keyed by RTS (DigiRig, AIOC). Never the radio's CAT port: Whistlestop has it open |
+| `cm108` | a GPIO pin of a CM108-type USB sound chip (`cm108_gpio` under `[ptt]`, pin 3 by default) | an interface keyed that way (AIOC) |
+| `none` | nothing: Mercury doesn't key | only a radio keyed by its own VOX |
+| `hermes_shm` | HERMES station hardware (Linux only) | not for Whistlestop stations |
+
+Whatever Mercury uses, Whistlestop keys the radio itself for the whistle, through its own radio control. With anything other than `hamlib`, keep **Share with Mercury on port** on anyway if other programs use it, or turn it off.
+
+**Check the keying, into the dummy load:** `mercury -R 2 -A 127.0.0.1:4532 -Q` keys the radio for one second, unkeys it and exits, without starting the modem. If the radio doesn't key, the problem is between Mercury and the sharing port, not in Whistlestop.
+
+### 4. Leave these settings alone at first
+
+Every default has been through the bench. Change these only once the basics work, and say in a report what you changed:
+
+| Leave | At | Why |
+|---|---|---|
+| Bandwidth | 2300 Hz | the full Mercury ladder; narrower settings use the narrow ladder and narrow whistle |
+| Whistle | 10 s | about one search pass of 20 m; agree longer ones with the other station for All bands |
+| Dwell per channel, Channel step | 0.5 s, 2000 Hz | the search's timing is tuned to them |
+| CQ cycles, Listen after CQ | 5, 20 s | |
+| Listen before transmitting, Whistle watch | on | |
+| Roundtable speed ramp-up | on | |
+| Encryption | **Off** | illegal on US amateur bands (see "Encryption (optional)") |
+| Transmit level | Mercury's own | until you've watched the ALC: then try **Auto (from ALC)** (see "Transmit level") |
+| Auto-tune on high SWR | off | |
+| Everything under Automation, QSY requests, File library, Schedule, Remote | off | they transmit or open your station without you |
+| Automatic only in the segments | on | |
+| Search segments (`segments` in the settings file) | the US automatic-control segments | |
+
+### 5. First check, on a dummy load
+
+1. **Radio control**: press a **band button** (20 m). The radio's dial moves; turn the radio's knob and the frequency display follows.
+2. **Keying and level**: press **Tune carrier** in the Radio card. The radio transmits Mercury's 1 kHz tone into the dummy load (it stops by itself after 60 s); the TX lamp turns red; press **Stop**. Watch the radio's power and ALC.
+3. **A CQ**: set the **Whistle** to 4 s and press **Call CQ**. The radio keys for the whistle, then for Mercury's CQFRAME (about 3 s), then the short CALL packet. The ALC should barely move: if it climbs, turn the audio down (see "Transmit level"). Press **Stop CQ**.
+4. **The Log tab**: a **⚠** line here means something to fix first. "⚠ Mercury is transmitting but the radio isn't keyed" means Mercury's keying (step 3) isn't reaching the radio. A CQ that says "CQ waits: someone is transmitting on this frequency" is Mercury's busy detector reading noise: it goes after **60 s** at most.
+5. **Two stations** (two testers in one place, or two radios of your own): with both on dummy loads a few metres apart, each hears the other weakly. One calls CQ; the other presses **Current band** in **Search for whistles**, with **Answer automatically** ticked. The search stops on the whistle, the CQ appears under **Heard**, the stations link, and you can chat and send a small file. A radio with poor image rejection may lock on the wrong side of the dial at such close range: see **Mirror images** under "Search".
+
+### 6. First contact on the air
+
+1. Arrange a schedule with another tester (by e-mail, phone or voice): a time, a band, and who calls. Pick a frequency inside the band's digital segment ("Band plan"), for example 14100.5–14112 kHz on 20 m.
+2. **Listen first**, and check the frequency is clear, on the radio and on the waterfall.
+3. The caller sets the **Whistle** to 20–30 s for the first tries and presses **Call CQ**. The other station presses **Current band** with **Answer automatically** ticked, or tunes to the agreed frequency and waits for the CQ under **Heard**, then **Answer**.
+4. Once linked: chat a few lines, send a small file (a few kB), then **Disconnect (73)**.
+5. Then try it without the schedule's frequency: the caller anywhere in the segment, the other station searching.
+6. Whatever happens, press **💾 Save log…** on the Log tab afterwards and send it (see "Reporting a problem"), from **both** stations if the link misbehaved.
+
+Identify as your licence requires: Mercury's CQFRAME carries your callsign on every CQ, and a link carries both calls (see "Legal and good practice").
+
+### Known limitations in this beta
+
+- **File-offer time estimates can be off**: the time shown with an offer is a prediction, and Mercury's real speed can differ a lot (it climbs its speed ladder only while there's data to send).
+- **A CQ can wait up to 60 s** when Mercury's busy detector reads local noise as a signal (see "Listen before transmitting").
+- **A radio with poor image rejection can fool Search** at close range (see **Mirror images** under "Search").
+- **Roundtables of three or more stations** are only partly tested.
+- **Not yet tested between stations on real antennas**: you're the first.
+
+## Tested radios
+
+These radios have been through the RF bench: two stations transmitting into dummy loads, on 16 November 2026. There, **CQ and answer, chat, 3 kB file transfers, the Station ID, and a search answering a CQ** all worked. Roundtables, the Depot, Away, QSY, the file library and the SDR wide search passed in earlier test sessions.
+
+| Radio | Computer | Radio connection | Mercury keys it by | Notes |
+|---|---|---|---|---|
+| **Yaesu FTDX3000** | Windows | **Direct CAT (built in)**, shared as Hamlib NET rigctl at `127.0.0.1:4532` | `-R 2 -A 127.0.0.1:4532` | CAT is the first of the two USB ports ("Enhanced"); Whistlestop opens it with RTS high, for the radio's CAT RTS menu (see "Direct CAT (built in)"). The ALC reads high even at modest levels (Mercury at 0 dB read 54 % at 5 W, the whistle 62 %): use **Auto (from ALC)** (see "Transmit level"). A keyed FTDX3000 ignores a new frequency, which QSY waits out. |
+| **QRP Labs QMX** | macOS | **Direct CAT (built in)**: a QMX speaks Kenwood TS-480, and the Log names it ("QRP Labs QMX (firmware 1_02_005)") | `-R 2 -A 127.0.0.1:4532`, with the QMX's **SSB VOX** doing the keying | Needs the SSB firmware (1_02_000 or newer), **USB** mode (not DIGI), SSB Input USB and SSB VOX on (see "QRP Labs QMX"). Its opposite-sideband image was only about **8 dB** down on the bench, enough to fool a search at close range (see **Mirror images**). A short 1500 Hz "ding" follows Mercury's transmissions: harmless. |
+
+Any other radio in the "Direct CAT (built in)" table, or any radio Hamlib's rigctld supports, should work the same way, but hasn't been tested with Whistlestop on the air yet. If you use one, a report saying what worked is just as useful as one about a problem. Describe it with:
+
+- **The radio**: make, model and firmware version, and how it's connected (its own USB cable, or an interface: which one).
+- **How Whistlestop reaches it**: Direct CAT (the protocol and speed, and the line the Log shows when it connects, which names the radio), or rigctld (the Hamlib model number).
+- **How Mercury keys it**: the whole Mercury command line, or its `[ptt]` section.
+- **The radio's own settings** for data: mode (USB, DATA-U, PKTUSB…), filter width, CAT speed, any CAT RTS / DTR or "USB send" menu, and its USB audio levels (in and out).
+- **What worked**: tuning from Whistlestop, keying (the TX lamp), the S-meter, SWR, ALC and power readings, the Radio Controls window, and the transmit level that kept the ALC to a bar or two.
+- The saved Log from your first session with it.
+
+## Reporting a problem
+
+A good report lets the problem be found without you there. Send:
+
+1. **The Log**, saved with **💾 Save log…** on the **Log** tab (below), from your station, and from the other station too if it was a link that misbehaved.
+2. **Mercury's log**, if you started Mercury with `-L mercury.log` (see "Start Mercury"): the file of that name in the folder you started it from.
+3. **What you did, what you expected, and what happened**, with the time in **UTC** (the Log's times are UTC), the band and frequency, and the other station's callsign.
+4. **Your radio**, described as in "Tested radios" if it isn't one of the tested ones.
+
+Send it to the address your beta invitation gave you, or open an issue at `github.com/NR5P/whistlestop/issues`.
+
+### The Log tab
+
+The **Log** tab lists what your station did: every transmission, connection, search step, warning (⚠, in red) and automatic action, each with its UTC time. It shows the newest **500** lines. Above them:
+
+- **💾 Save log…** saves a text file (named like `whistlestop-log-20261116-1403Z.txt`; the dialog opens in your download folder, Settings → Files, once that exists) with Whistlestop's **version and build**, your computer's system, when it was saved, your callsign, the radio and Mercury's version, **your settings** (the remote-operation password is left out), and then **every Log line since Whistlestop started**, each with its date and time. Read it before sending it: the settings include your name, grid, away message and folder names.
+- **📋 Copy log** copies the same text, to paste into an e-mail or an issue.
+- **📂 Log files** shows the Log's own file in Finder or Explorer.
+- At the right: the **version**, and in brackets the build (git commit) it was made from, for example `Whistlestop 0.1.0 (v0.1.0-beta.2)` for a beta release; a build made between releases shows the last beta, how many changes since and the commit (`v0.1.0-beta.2-3-g9e7faad1c`). Put it in every report.
+
+**The Log's file.** Whistlestop writes every Log line to `whistlestop.log` beside the settings file as it happens (see "Settings reference" for the folder), so nothing is lost when the tab's 500 lines move on, or if Whistlestop crashes. Each time Whistlestop starts, the last session's file is kept as `whistlestop-previous.log`: **after a crash, send that one** (use **📂 Log files** to find it). A session that writes more than **20 MB** of Log starts the file afresh, keeping the full one as `whistlestop-previous.log`. While you operate another computer (see "Remote operation"), its Log is the one on the tab, and Save log saves its newest 500 lines; this computer's own Log still goes to this computer's file.
 
 ## Setting up your station
 
@@ -68,7 +218,7 @@ Set **rigctld address** to it. Whichever way, the **Radio** pill in the top bar 
 
 ### 2. Mercury
 
-Install Mercury (macOS: drag `Mercury.app` to Applications). Then set it up so it shares the radio:
+Install Mercury: which version and file to download, and the command line to start it with, are in "Getting started on the air" (steps 1 and 3). Set it up so it shares the radio:
 
 - **Radio / PTT**: Hamlib model **2 (NET rigctl)** pointing at `127.0.0.1:4532` (the default for all three ways: Whistlestop's direct-CAT sharing port, the rigctld it runs, or RigHelm's server). Mercury then keys the transmitter through the same server.
 - **Sound card**: the radio's USB audio codec, both directions.
@@ -108,7 +258,7 @@ From top to bottom:
 - **Top bar**: the Whistlestop mark; the **frequency display** (TX/RX lamp, dial frequency, band, radio mode); the **S-meter** and **SNR** meters; **🙋 Here / 🚪 Away** (see "Away"); **🛰 Remote** (see "Remote operation"); **DEMO** when in Demo mode; **🔈 Listen** (the radio's audio on your speakers); **📖 Guide** (this manual, in its own window); the **? Help** toggle; and **Settings**.
 - **Modem strip**: what Mercury is doing right now (see "The modem strip"), and at its right end the **status pills** (Radio, Mercury, Audio, SDR: green means connected).
 - **Left column** (top to bottom): **Call CQ**, **Search for whistles**, **Heard**, **Bandwidth**, **Radio**.
-- **Centre**: tabs for **Chat**, **Roundtable**, **Files**, **Depot** (mail; see "The Depot") and **Log**.
+- **Centre**: tabs for **Chat**, **Roundtable**, **Files**, **Depot** (mail; see "The Depot") and **Log** (with **Save log…**, **Copy log** and the version; see "The Log tab" under "Reporting a problem").
 - **Bottom**: the **Radio audio** waterfall (what your radio hears, 0–3 kHz) and, with an SDR, the **Wide receiver** waterfall. Drag the line above the waterfalls to resize them.
 
 ## Listening on your speakers
@@ -737,7 +887,7 @@ They're stored in the settings file (`segments`), so you can change or add them.
 
 ## Settings reference
 
-Settings are saved to `~/Library/Application Support/Whistlestop/whistlestop.toml` (macOS). **Save & connect** applies them and reconnects. Closing the Settings window without it throws your edits away. If the settings file has a value Whistlestop can't read (edited by hand, say), only that setting falls back to its default: the rest are kept, and the Log names each one ("⚠ Settings file: …"). A value that's out of range (a negative listen time, a whistle of hours, a port of 0…) is set to the nearest sensible value, and the Log says so ("⚠ Settings: …"); the same goes for settings sent by a remote operator. A callsign is trimmed and upper-cased, and characters other than letters, digits, `/` and `-` are removed. A file that can't be read at all is copied to `whistlestop.toml.bad` and the default settings are used. An earlier, different copy is never replaced: the next one is `whistlestop.toml.bad-2`, and so on (starting again with the same unreadable file makes no new copy). If no copy can be made, nothing is saved over the file this session either. A file that's there but can't be opened (its permissions, or another program holding it) is left alone: the default settings are used for this session and nothing is saved over it until it can be opened again. Settings are written to a temporary file first and then moved into place, so a crash mid-save never leaves a cut-short file.
+Settings are saved to `whistlestop.toml` in `~/Library/Application Support/Whistlestop` (macOS), `%APPDATA%\Whistlestop` (Windows) or `~/.config/Whistlestop` (Linux); the Log's file `whistlestop.log` (see "The Log tab") and the Depot's `depot.json` are kept beside it. **Save & connect** applies them and reconnects. Closing the Settings window without it throws your edits away. If the settings file has a value Whistlestop can't read (edited by hand, say), only that setting falls back to its default: the rest are kept, and the Log names each one ("⚠ Settings file: …"). A value that's out of range (a negative listen time, a whistle of hours, a port of 0…) is set to the nearest sensible value, and the Log says so ("⚠ Settings: …"); the same goes for settings sent by a remote operator. A callsign is trimmed and upper-cased, and characters other than letters, digits, `/` and `-` are removed. A file that can't be read at all is copied to `whistlestop.toml.bad` and the default settings are used. An earlier, different copy is never replaced: the next one is `whistlestop.toml.bad-2`, and so on (starting again with the same unreadable file makes no new copy). If no copy can be made, nothing is saved over the file this session either. A file that's there but can't be opened (its permissions, or another program holding it) is left alone: the default settings are used for this session and nothing is saved over it until it can be opened again. Settings are written to a temporary file first and then moved into place, so a crash mid-save never leaves a cut-short file.
 
 | Setting | What it does | Default |
 |---|---|---|

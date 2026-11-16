@@ -294,7 +294,7 @@ mod tests {
     fn guide_has_its_sections() {
         let g = super::Guide::default();
         let titles: Vec<&str> = g.sections.iter().map(|s| s.title.as_str()).collect();
-        for want in ["Welcome", "The whistle", "Calling CQ", "Finding stations", "Files", "Roundtables", "Encryption (optional)", "Troubleshooting", "Glossary"]
+        for want in ["Welcome", "Getting started on the air", "Tested radios", "Reporting a problem", "The whistle", "Calling CQ", "Finding stations", "Files", "Roundtables", "Encryption (optional)", "Troubleshooting", "Glossary"]
         {
             assert!(titles.contains(&want), "missing {want}: {titles:?}");
         }

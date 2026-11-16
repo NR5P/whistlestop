@@ -441,3 +441,41 @@ fn heard_rows_hold_still_under_the_pointer() {
         vec!["NR5P CALL BENCH", "NR5P CQ", "K1ABC CQ", "W2NEW CQ"]
     );
 }
+
+/// The Log tab's Copy log gives the version, the settings without the
+/// remote-operation password, and the session's Log, which is also being
+/// written to its file beside the settings.
+#[test]
+fn log_tab_copies_and_writes_the_log() {
+    let _g = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let mut cfg = demo_cfg("N0LOG");
+    cfg.remote_password = "secret-pw".into();
+    let mut h = app(cfg, 1400.0, 900.0);
+    wait(&mut h, 15.0, "Mercury", |_, s| s.mercury_ok);
+    click_exact(&mut h, "≡  Log");
+    assert!(has_text(&h, logsave::VERSION), "the version beside the buttons");
+    assert!(has_button(&h, "Save log"));
+    let file = temp("config.log");
+    let on_file = std::fs::read_to_string(&file).unwrap();
+    assert!(on_file.contains("Z  "), "dated lines in {}: {on_file}", file.display());
+    let q = |n: &egui_kittest::kittest::AccessKitNode<'_>| n.role() == Role::Button && n.label().is_some_and(|l| l.contains("Copy log"));
+    h.query_all_by(q).next().unwrap().click();
+    h.step();
+    let copied: Vec<String> = h
+        .output()
+        .platform_output
+        .commands
+        .iter()
+        .filter_map(|c| match c {
+            egui::OutputCommand::CopyText(t) => Some(t.clone()),
+            _ => None,
+        })
+        .collect();
+    let t = copied.first().expect("Copy log copies the report");
+    assert!(t.starts_with(logsave::VERSION), "{t}");
+    assert!(t.contains("Station N0LOG, Demo mode"), "{t}");
+    assert!(!t.contains("secret-pw"), "{t}");
+    assert!(t.contains("this session, from"), "{t}");
+    let first_line = on_file.lines().next().unwrap();
+    assert!(t.contains(first_line), "the file's lines are in the report");
+}
