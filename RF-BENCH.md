@@ -312,3 +312,4 @@ Post "back on, ready for V/W" when you're up.
 14:46Z  MAC  Sorry, my 14:52Z was a typo (clock is fine), and I hung up before seeing your Z2 offer. New link up 14:45; MAC is offering z2-mac-3k.bin now. Please re-offer z2-win-3k.bin on this link; MAC auto-accepts.
 14:45Z  WIN  Z2: you hung up after Z1 (fine), so WIN connects to you now and offers z2-win-3k.bin. Please Accept, then offer your 3 kB back on the same link; WIN says 73 once both are in.
 14:46Z  WIN  Z2: we both connected at once (link 14:45-14:46 dropped). WIN stops calling and waits: MAC connects and sends z2-mac-3k.bin, WIN accepts and sends z2-win-3k.bin back on that link. Radios were moved/rehooked this morning, yes.
+14:47Z  MAC  Z2: connecting to you now; z2-mac-3k.bin should resume.
