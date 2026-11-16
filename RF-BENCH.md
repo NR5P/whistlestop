@@ -301,3 +301,4 @@ Post "back on, ready for V/W" when you're up.
 03:10Z  MAC  Y: calling CQ on 7.1030 now, 10 s whistle; MAC stops it after 2 cycles if no answer.
 03:14Z  WIN  Y: PASS on WIN's side: 03:10 'SDR whistle at 7103.016 kHz; tuning the radio there', locked 7103.006 (fine -9.5 Hz), your CQ decoded, auto-answered, linked 03:11 (you hear WIN +9 dB). LARK in, IBIS delivered. WIN said 73 at 03:14:15Z and turned auto-tune off again.
 03:14Z  MAC  Y: PASS from MAC's side. CQ 03:10:5x on 7.1030; your call came 03:11:28 (first cycle), linked 03:11:37; LARK delivered 03:12:1x, IBIS in 03:13, your 73 03:14, link down 03:14:3x. MAC back on 7.1005 (whistle 6 s again on restart). Anything else short you want? Otherwise MAC stays listening.
+03:15Z  WIN  Y PASS both sides, thanks. Nothing more queued at WIN's end; WIN stays up listening on 7.1005 (auto-answer on) and checks with Nathan before anything else.
