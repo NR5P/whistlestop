@@ -4,7 +4,7 @@
 
 - **Windows 10/11 (64-bit):** `whistlestop-…-windows-x64.zip`. Unzip it and run `whistlestop.exe`. `READ-ME-FIRST.txt` inside has the steps.
 - **Linux (x86-64, Ubuntu 22.04 or newer):** `whistlestop-…-linux-x86_64.tar.gz`. Unpack it and run `whistlestop`.
-- **macOS:** `Whistlestop-…-macos.zip`, when it's attached: unzip it and drag `Whistlestop.app` to Applications.
+- **macOS 11 or newer (Apple silicon and Intel):** `Whistlestop-…-macos.zip`. Unzip it and drag `Whistlestop.app` to Applications. It's signed and notarized by Apple, so it opens without a warning; allow microphone access when asked (that's how it hears your radio's sound card).
 - Each `.sha256` file holds its download's checksum.
 - You also need Mercury **1.9.23**, the version Whistlestop is tested with: [Mercury 1.9.23](https://github.com/Rhizomatica/mercury/releases/tag/v1.9.23). 1.9.24 hasn't been tested with Whistlestop yet.
 
