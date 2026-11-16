@@ -805,6 +805,55 @@ impl KeyWatch {
     }
 }
 
+/// The radio reads transmitting this long with nothing here keying it
+/// (neither Whistlestop nor Mercury) before it's called stuck. Long enough
+/// for a hand-keyed transmission or a tuner; on the RF bench (2026-11-15) a
+/// QMX sat keyed for over 20 minutes and nobody was told.
+const STUCK_KEY_AFTER: Duration = Duration::from_secs(30);
+
+/// Watches for the radio keyed by something other than us for too long.
+#[derive(Default)]
+struct StuckWatch {
+    since: Option<Instant>,
+    warned: bool,
+    /// While away: when our one unkey attempt went (its result is told).
+    tried: Option<Instant>,
+}
+
+#[derive(Debug, PartialEq)]
+enum StuckNote {
+    /// Keyed for STUCK_KEY_AFTER with nothing here keying it.
+    Stuck,
+    /// Our unkey (away) didn't take: STUCK_KEY_AFTER later it's still keyed.
+    StillKeyed,
+    /// It's back in receive after a `Stuck`.
+    Cleared,
+}
+
+impl StuckWatch {
+    /// One radio poll: `radio` what the radio reads, `ours` whether
+    /// Whistlestop or Mercury has it keyed.
+    fn poll(&mut self, radio: bool, ours: bool, now: Instant) -> Option<StuckNote> {
+        if !radio || ours {
+            self.since = None;
+            self.tried = None;
+            return std::mem::take(&mut self.warned).then_some(StuckNote::Cleared).filter(|_| !radio);
+        }
+        let since = *self.since.get_or_insert(now);
+        if !self.warned && now.duration_since(since) >= STUCK_KEY_AFTER {
+            self.warned = true;
+            return Some(StuckNote::Stuck);
+        }
+        if let Some(t) = self.tried
+            && now.duration_since(t) >= STUCK_KEY_AFTER
+        {
+            self.tried = None;
+            return Some(StuckNote::StillKeyed);
+        }
+        None
+    }
+}
+
 /// A tiny wall-clock time for display, without a date/time crate.
 pub mod chrono_lite {
     #[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
@@ -1045,6 +1094,7 @@ struct Station {
     unkey_owed: bool,
     /// Mercury transmitting into an unkeyed radio.
     key_watch: KeyWatch,
+    stuck_watch: StuckWatch,
     /// Mercury's transmit level: as last set (None: left to Mercury), the
     /// next to set and why, the change being made, and whether its last
     /// failure was logged (said once, until one works).
@@ -1367,6 +1417,7 @@ impl Station {
             mercury_ptt_at: Instant::now(),
             unkey_owed: false,
             key_watch: KeyWatch::default(),
+            stuck_watch: StuckWatch::default(),
             tx_level_now: None,
             tx_level_want: None,
             tx_level_job: None,
@@ -2307,6 +2358,32 @@ impl Station {
                         }
                     )),
                     Some(KeyNote::Back) => self.log("Radio: Mercury is keying it again".into()),
+                    None => {}
+                }
+                let ours = self.engine_keyed || self.mercury_ptt;
+                match self.stuck_watch.poll(status.ptt, ours, Instant::now()) {
+                    Some(StuckNote::Stuck) => {
+                        self.log(format!(
+                            "⚠ The radio has been transmitting for {} s and nothing here keyed it (not Whistlestop, not Mercury). Check the radio: a stuck key or PTT line, its VOX, or the radio itself (a QMX once locked keyed until it was switched off and on)",
+                            STUCK_KEY_AFTER.as_secs()
+                        ));
+                        // Nobody at the radio: try once to unkey it.
+                        if self.away {
+                            self.stuck_watch.tried = Some(Instant::now());
+                            let ok = match self.rig.as_mut() {
+                                Some(r) => r.ptt(false).await.is_ok(),
+                                None => false,
+                            };
+                            self.log(format!(
+                                "🤖 Away: sent the radio an unkey command{}",
+                                if ok { "" } else { " (it failed)" }
+                            ));
+                        }
+                    }
+                    Some(StuckNote::StillKeyed) => {
+                        self.log("⚠ The radio is still transmitting after the unkey command: it needs someone at the radio (switch it off and on)".into());
+                    }
+                    Some(StuckNote::Cleared) => self.log("Radio: back in receive".into()),
                     None => {}
                 }
                 if status.ptt && self.unkey_owed && !self.engine_keyed && !self.mercury_ptt {
@@ -8290,6 +8367,31 @@ mod tests {
         assert!(!report_now(s(150), true, true), "the floor just went elsewhere");
         assert!(report_now(s(180), true, true), "never more than a minute late");
         assert!(report_now(s(180), false, false));
+    }
+
+    /// The radio keyed by something else for 30 s is called stuck once; a
+    /// failed unkey is told after another 30 s; receive again is told. Our
+    /// own transmissions, however long, never count.
+    #[test]
+    fn a_radio_keyed_by_nothing_here_is_called_stuck() {
+        let t0 = Instant::now();
+        let at = |s: u64| t0 + Duration::from_secs(s);
+        let mut w = StuckWatch::default();
+        assert_eq!(w.poll(true, true, at(0)), None);
+        assert_eq!(w.poll(true, true, at(100)), None, "ours, however long");
+        assert_eq!(w.poll(true, false, at(101)), None);
+        assert_eq!(w.poll(true, false, at(120)), None, "a hand-keyed over");
+        assert_eq!(w.poll(true, false, at(131)), Some(StuckNote::Stuck));
+        assert_eq!(w.poll(true, false, at(140)), None, "said once");
+        w.tried = Some(at(140));
+        assert_eq!(w.poll(true, false, at(169)), None);
+        assert_eq!(w.poll(true, false, at(170)), Some(StuckNote::StillKeyed));
+        assert_eq!(w.poll(true, false, at(250)), None);
+        assert_eq!(w.poll(false, false, at(251)), Some(StuckNote::Cleared));
+        assert_eq!(w.poll(false, false, at(252)), None);
+        // A short one by hand, then back: nothing said.
+        assert_eq!(w.poll(true, false, at(300)), None);
+        assert_eq!(w.poll(false, false, at(310)), None);
     }
 
     #[test]

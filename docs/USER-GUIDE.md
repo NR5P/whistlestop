@@ -791,6 +791,11 @@ The **Whistle** length and **Answer automatically** are set on the main screen a
 
 - **"⚠ Mercury is transmitting but the radio isn't keyed"**: Mercury said it was transmitting (its PTT ON) for over 1.5 s while the radio read unkeyed on two polls in a row, so nothing went out. Mercury's PTT isn't reaching the radio: check its **-P / -R / -A** options or **[ptt]** in mercury.ini (with direct CAT: Hamlib model 2 at the sharing port), then restart Mercury. It's said once, and only for a radio whose PTT reading works (it has read keyed before, for a whistle say); "Radio: Mercury is keying it again" when it's fixed.
 
+**The radio stays in transmit.**
+
+- **"⚠ The radio has been transmitting for 30 s and nothing here keyed it"**: the radio reads keyed while neither Whistlestop nor Mercury is keying it, for **30 s** (long enough for a hand-keyed transmission or a tuner). Said once; "Radio: back in receive" follows when it ends. Check the radio: a stuck key or PTT line, its VOX, or the radio itself (on the RF bench a QMX locked in transmit, at 0 W, until it was switched off and on, and ignored every unkey command).
+- While you're **Away**, Whistlestop also sends the radio one unkey command and says so; if it's still transmitting **30 s** later, the Log says it needs someone at the radio. It doesn't keep trying.
+
 **A pill in the top bar is red.**
 
 - **Radio**: rigctld (or RigHelm's server) isn't running or the address is wrong. Check **Settings → rigctld**.
