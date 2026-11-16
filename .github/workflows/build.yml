@@ -24,7 +24,14 @@ jobs:
       - name: Build
         run: cargo build --release --all-targets
       - name: Test
-        run: cargo test --release
+        # Every test binary runs (--no-fail-fast), and failures become
+        # annotations on the run's page, readable without signing in.
+        shell: bash
+        run: |
+          status=0
+          cargo test --release --no-fail-fast 2>&1 | tee test-output.txt || status=$?
+          if [ "$status" -ne 0 ]; then bash .github/ci/test-failures.sh test-output.txt; fi
+          exit "$status"
       - name: Upload the app
         uses: actions/upload-artifact@v4
         with:
