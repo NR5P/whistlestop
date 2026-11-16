@@ -43,39 +43,38 @@ cargo build --release --bin whistlestop
 
 The program is `whistlestop.exe` in `$env:CARGO_TARGET_DIR\release`.
 
-**macOS**, on the Mac:
+**macOS**, on the Mac: `scripts/macos-app.sh` builds a universal (Apple
+silicon and Intel) `Whistlestop.app`, signs it with the first Developer ID
+in the keychain (or `SIGN_ID`), and zips it as
+`dist/Whistlestop-<version>-macos.zip`. With `NOTARY_PROFILE` set (a
+`xcrun notarytool store-credentials` profile) it is notarized and stapled
+too, so it opens without Gatekeeper's warning. It names the zip after
+`Cargo.toml`'s version (0.1.0), not the beta tag: pass `VERSION=0.1.0-beta.N`
+to name it after the tag. Attach the zip to the release by hand.
 
-```bash
-cargo build --release --bin whistlestop
-```
-
-The program is `target/release/whistlestop`. Built on Apple silicon it runs
-only on Apple silicon. For Intel Macs as well, build both and join them:
-
-```bash
-rustup target add aarch64-apple-darwin x86_64-apple-darwin
-cargo build --release --bin whistlestop --target aarch64-apple-darwin
-cargo build --release --bin whistlestop --target x86_64-apple-darwin
-lipo -create -output whistlestop \
-  target/aarch64-apple-darwin/release/whistlestop \
-  target/x86_64-apple-darwin/release/whistlestop
-```
-
-**Linux**: the same command, with the packages in `README.md`.
+**Linux**: `cargo build --release --bin whistlestop`, with the packages in
+`README.md`.
 
 **CI** (`.github/workflows/build.yml`) builds and tests every push on
-Windows, macOS (Apple silicon) and Linux and keeps the programs as
-artifacts on the run's page. Downloading those needs a GitHub login and
-they expire, so don't send testers there.
+Windows, macOS and Linux and keeps the programs as artifacts on the run's
+page. Downloading those needs a GitHub login and they expire, so don't send
+testers there.
 
-**Releases** (`.github/workflows/release-windows.yml`): pushing a `v*` tag
-builds `whistlestop.exe` on Windows (statically linked, so no Visual C++
-redistributable is needed), zips it with `.github/release/READ-ME-FIRST.txt`,
-`README.md`, `LICENSE` and the User Guide as
-`whistlestop-<tag>-windows-x64.zip` with a `.sha256`, and publishes a GitHub
-release with `.github/release/NOTES.md` as its text. A tag with a `-` in it
-(every beta) is marked as a pre-release. There is no macOS release build
-yet: build it on the Mac (above) and attach it to the release by hand.
+**Releases**:
+
+- `.github/workflows/release-windows.yml`: pushing a `v*` tag builds
+  `whistlestop.exe` on Windows (statically linked, so no Visual C++
+  redistributable is needed), zips it with `.github/release/READ-ME-FIRST.txt`,
+  `README.md`, `LICENSE` and the User Guide as
+  `whistlestop-<tag>-windows-x64.zip` with a `.sha256`, and publishes the
+  GitHub release with `.github/release/NOTES.md` as its text. A tag with a
+  `-` in it (every beta) is marked as a pre-release.
+- `.github/workflows/release.yml`: when a release is published, builds the
+  Linux program on Ubuntu 22.04 and attaches
+  `whistlestop-<version>-linux-x86_64.tar.gz`. (Run it by hand with the tag
+  if it didn't start: a release published by another workflow with
+  `GITHUB_TOKEN` doesn't start workflows.)
+- The Mac zip, by hand (above).
 
 ## What a tester downloads
 
@@ -85,12 +84,16 @@ yet: build it on the Mac (above) and attach it to the release by hand.
      warns the first time: **More info → Run anyway**. A console window
      opens beside the app (the command-line tools print there); closing it
      quits Whistlestop.
-   - macOS (when one is attached): `whistlestop`, a program rather than an
-     `.app`, not signed or notarized. In Terminal:
-     `xattr -d com.apple.quarantine whistlestop`, `chmod +x whistlestop`,
-     then `./whistlestop`. macOS asks for microphone access for Terminal
-     (the program that started it): allow it, or Whistlestop hears nothing.
-   - The User Guide is inside the program (📖 Guide); the zip carries a copy.
+   - macOS: `Whistlestop-<version>-macos.zip`. Unzip it and drag
+     `Whistlestop.app` to Applications. The first time, macOS asks whether
+     Whistlestop may use the microphone (how it hears the radio's USB sound
+     card): allow it. If the app wasn't notarized, macOS refuses it the first
+     time: **System Settings → Privacy & Security → Open Anyway**.
+   - Linux: `whistlestop-<version>-linux-x86_64.tar.gz` (Ubuntu 22.04 or
+     newer); unpack it and run `whistlestop`. Add yourself to the `dialout`
+     group for the radio's serial port.
+   - The User Guide is inside the program (📖 Guide); the Windows and Linux
+     downloads carry a copy too.
 2. **Mercury 1.9.23**, from Rhizomatica's release page (the Guide's
    "Getting started on the air", step 1, says which file).
 3. Their settings, the Depot and the Log's file live in
@@ -120,6 +123,5 @@ yet: build it on the Mac (above) and attach it to the release by hand.
 
 ## Still to do before testers get it
 
-- A macOS build for the release (there's no workflow for it yet).
 - Decide whether the phone apps are part of the beta (the Android app's USB
   radio connection hasn't been tried with a real radio).
