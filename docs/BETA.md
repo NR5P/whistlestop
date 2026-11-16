@@ -49,8 +49,9 @@ in the keychain (or `SIGN_ID`), and zips it as
 `dist/Whistlestop-<version>-macos.zip`. With `NOTARY_PROFILE` set (a
 `xcrun notarytool store-credentials` profile) it is notarized and stapled
 too, so it opens without Gatekeeper's warning. It names the zip after
-`Cargo.toml`'s version (0.1.0), not the beta tag: pass `VERSION=0.1.0-beta.N`
-to name it after the tag. Attach the zip to the release by hand.
+the release tag on the commit (`v0.1.0-beta.2` makes
+`Whistlestop-0.1.0-beta.2-macos.zip`), or `Cargo.toml`'s version on an
+untagged commit; `VERSION=...` overrides it.
 
 **Linux**: `cargo build --release --bin whistlestop`, with the packages in
 `README.md`.
@@ -60,21 +61,25 @@ Windows, macOS and Linux and keeps the programs as artifacts on the run's
 page. Downloading those needs a GitHub login and they expire, so don't send
 testers there.
 
-**Releases**:
+**Releases** (`.github/workflows/release.yml`): pushing a `v*` tag
 
-- `.github/workflows/release-windows.yml`: pushing a `v*` tag builds
-  `whistlestop.exe` on Windows (statically linked, so no Visual C++
-  redistributable is needed), zips it with `.github/release/READ-ME-FIRST.txt`,
-  `README.md`, `LICENSE` and the User Guide as
-  `whistlestop-<tag>-windows-x64.zip` with a `.sha256`, and publishes the
-  GitHub release with `.github/release/NOTES.md` as its text. A tag with a
-  `-` in it (every beta) is marked as a pre-release.
-- `.github/workflows/release.yml`: when a release is published, builds the
-  Linux program on Ubuntu 22.04 and attaches
-  `whistlestop-<version>-linux-x86_64.tar.gz`. (Run it by hand with the tag
-  if it didn't start: a release published by another workflow with
-  `GITHUB_TOKEN` doesn't start workflows.)
-- The Mac zip, by hand (above).
+```bash
+git tag v0.1.0-beta.2 && git push origin v0.1.0-beta.2
+```
+
+builds Windows (statically linked, so no Visual C++ redistributable is
+needed) and Linux (on Ubuntu 22.04, so it runs there and on newer), then
+publishes one GitHub release with `.github/release/NOTES.md` as its text
+and, each with a `.sha256`:
+
+- `whistlestop-<tag>-windows-x64.zip`: `whistlestop.exe`,
+  `.github/release/READ-ME-FIRST.txt`, `README.md`, `LICENSE` and the User Guide;
+- `whistlestop-<tag>-linux-x86_64.tar.gz`: the program, `README.md`,
+  `LICENSE` and the User Guide.
+
+A tag with a `-` in it (every beta) is marked as a pre-release. Then, on the
+Mac, at the same commit: `scripts/macos-app.sh` (it names the zip after the
+tag) and `gh release upload v0.1.0-beta.2 dist/Whistlestop-0.1.0-beta.2-macos.zip`.
 
 ## What a tester downloads
 
@@ -89,11 +94,12 @@ testers there.
      Whistlestop may use the microphone (how it hears the radio's USB sound
      card): allow it. If the app wasn't notarized, macOS refuses it the first
      time: **System Settings → Privacy & Security → Open Anyway**.
-   - Linux: `whistlestop-<version>-linux-x86_64.tar.gz` (Ubuntu 22.04 or
+   - Linux: `whistlestop-<tag>-linux-x86_64.tar.gz` (Ubuntu 22.04 or
      newer); unpack it and run `whistlestop`. Add yourself to the `dialout`
      group for the radio's serial port.
    - The User Guide is inside the program (📖 Guide); the Windows and Linux
-     downloads carry a copy too.
+     downloads carry a copy too, and the release text and `READ-ME-FIRST.txt`
+     point testers to it.
 2. **Mercury 1.9.23**, from Rhizomatica's release page (the Guide's
    "Getting started on the air", step 1, says which file).
 3. Their settings, the Depot and the Log's file live in

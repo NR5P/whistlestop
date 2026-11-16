@@ -3,6 +3,7 @@
 # a Developer ID, and zips it for a release:
 #
 #   scripts/macos-app.sh                 # -> dist/Whistlestop-<version>-macos.zip
+#   gh release upload v<version> dist/Whistlestop-<version>-macos.zip   # onto the tag's release
 #   NOTARY_PROFILE=name scripts/macos-app.sh
 #
 # NOTARY_PROFILE: a `xcrun notarytool store-credentials` profile; when set,
@@ -11,7 +12,12 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-VERSION="${VERSION:-$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)}"
+# The zip is named after the release tag on this commit (v0.1.0-beta.2 ->
+# 0.1.0-beta.2), else Cargo.toml's version; VERSION=... overrides both. The
+# bundle's own version keys take Cargo.toml's (macOS wants numbers there).
+BUNDLE_VERSION="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
+VERSION="${VERSION:-$(git describe --tags --exact-match --match 'v*' 2>/dev/null | sed 's/^v//')}"
+VERSION="${VERSION:-$BUNDLE_VERSION}"
 SIGN_ID="${SIGN_ID:-$(security find-identity -v -p codesigning | sed -n 's/.*"\(Developer ID Application: [^"]*\)".*/\1/p' | head -1)}"
 T=target/rel
 OUT=dist
@@ -43,8 +49,8 @@ cat > "$APP/Contents/Info.plist" <<EOF
   <key>CFBundleName</key><string>Whistlestop</string>
   <key>CFBundleDisplayName</key><string>Whistlestop</string>
   <key>CFBundleIdentifier</key><string>com.nr5p.whistlestop</string>
-  <key>CFBundleVersion</key><string>$VERSION</string>
-  <key>CFBundleShortVersionString</key><string>$VERSION</string>
+  <key>CFBundleVersion</key><string>$BUNDLE_VERSION</string>
+  <key>CFBundleShortVersionString</key><string>$BUNDLE_VERSION</string>
   <key>CFBundleExecutable</key><string>whistlestop</string>
   <key>CFBundleIconFile</key><string>Whistlestop</string>
   <key>CFBundlePackageType</key><string>APPL</string>

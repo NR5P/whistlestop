@@ -3,15 +3,17 @@
 ### Download
 
 - **Windows 10/11 (64-bit):** `whistlestop-…-windows-x64.zip`. Unzip it and run `whistlestop.exe`. `READ-ME-FIRST.txt` inside has the steps.
-- The `.sha256` file holds the zip's checksum.
-- You also need Mercury: [Mercury releases](https://github.com/Rhizomatica/mercury/releases).
+- **Linux (x86-64, Ubuntu 22.04 or newer):** `whistlestop-…-linux-x86_64.tar.gz`. Unpack it and run `whistlestop`.
+- **macOS:** `Whistlestop-…-macos.zip`, when it's attached: unzip it and drag `Whistlestop.app` to Applications.
+- Each `.sha256` file holds its download's checksum.
+- You also need Mercury **1.9.23**, the version Whistlestop is tested with: [Mercury 1.9.23](https://github.com/Rhizomatica/mercury/releases/tag/v1.9.23). 1.9.24 hasn't been tested with Whistlestop yet.
 
 The program isn't signed yet, so SmartScreen will ask you to confirm the first time: click **More info**, then **Run anyway**.
 
 ### Start here
 
 1. Whistlestop opens in **Demo mode**: a simulated radio and band and a demo station, K7BOT. Nothing is transmitted.
-2. When you're ready for the air, follow "Setting up your station" in the built-in **Guide**.
+2. When you're ready for the air, follow **Getting started on the air** in the built-in **Guide**: Mercury's command line, the settings to leave alone at first, a dummy-load check and a first contact.
 3. Make your first transmissions into a **dummy load** at low power.
 
 ### Tested on the air so far
@@ -42,7 +44,6 @@ All of these worked:
 ### Reporting problems
 
 Please [open an issue](https://github.com/NR5P/whistlestop/issues). Include:
-- your radio and how it's connected;
-- the Whistlestop and Mercury versions;
-- what happened;
-- the lines from the Log tab around that time.
+- the Log: **Save log…** on the Log tab saves it with the version and build, the radio, Mercury's version and your settings (no remote-operation password); after a crash, **Log files** shows `whistlestop-previous.log`, the session before;
+- your radio and how it's connected (for a radio not yet tested, see **Tested radios** in the Guide);
+- what you did, what you expected, and what happened, with the time in UTC.

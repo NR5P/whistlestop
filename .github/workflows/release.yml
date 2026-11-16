@@ -1,29 +1,66 @@
-name: Release (Linux build)
+name: Release
 
-# When a release is published on GitHub, build the Linux app and attach it.
-# Ubuntu 22.04, so it runs on that and newer (glibc 2.35+). The Mac app is
-# built, signed and attached by hand: scripts/macos-app.sh.
+# Pushing a version tag (v0.1.0-beta.2, v0.2.0, ...) builds Whistlestop for
+# Windows and Linux and publishes one GitHub release with both, each with
+# its SHA-256. A tag with a "-" in it (a beta) is marked as a pre-release.
+#
+#   git tag v0.1.0-beta.2 && git push origin v0.1.0-beta.2
+#
+# The Mac app is signed with the Developer ID in the Mac's keychain, so it
+# is built there and added to the release by hand (docs/BETA.md):
+#   VERSION=0.1.0-beta.2 scripts/macos-app.sh
+#   gh release upload v0.1.0-beta.2 dist/Whistlestop-0.1.0-beta.2-macos.zip
+
 on:
-  release:
-    types: [published]
-  workflow_dispatch:
-    inputs:
-      tag:
-        description: Release tag to build and attach to
-        required: true
+  push:
+    tags: ["v*"]
 
 permissions:
   contents: write
 
 jobs:
-  linux:
-    runs-on: ubuntu-22.04
+  windows:
+    runs-on: windows-latest
     env:
-      TAG: ${{ github.event.release.tag_name || inputs.tag }}
+      # The C runtime linked in, so the exe runs on a PC without the Visual
+      # C++ redistributable.
+      RUSTFLAGS: -C target-feature=+crt-static
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ env.TAG }}
+          # All of history and the tags, so build.rs's `git describe` names
+          # the tag the app is built from (shown on its Log tab).
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build
+        run: cargo build --release --bin whistlestop
+      - name: Package
+        shell: pwsh
+        run: |
+          $name = "whistlestop-${{ github.ref_name }}-windows-x64"
+          New-Item -ItemType Directory $name | Out-Null
+          Copy-Item target/release/whistlestop.exe $name/
+          Copy-Item .github/release/READ-ME-FIRST.txt $name/
+          Copy-Item README.md, LICENSE $name/
+          Copy-Item docs/USER-GUIDE.md $name/
+          Compress-Archive -Path $name -DestinationPath "$name.zip"
+          $hash = (Get-FileHash "$name.zip" -Algorithm SHA256).Hash.ToLower()
+          "$hash  $name.zip" | Out-File -Encoding ascii "$name.zip.sha256"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: |
+            whistlestop-${{ github.ref_name }}-windows-x64.zip
+            whistlestop-${{ github.ref_name }}-windows-x64.zip.sha256
+
+  linux:
+    # Ubuntu 22.04, so it runs on that and newer (glibc 2.35+).
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
       - name: Linux libraries (sound, USB serial, windowing)
         run: |
@@ -34,14 +71,32 @@ jobs:
         run: cargo build --release --bin whistlestop
       - name: Package
         run: |
-          V="${TAG#v}"
-          D="whistlestop-$V-linux-x86_64"
+          D="whistlestop-${{ github.ref_name }}-linux-x86_64"
           mkdir "$D"
-          cp target/release/whistlestop LICENSE README.md "$D/"
-          cp docs/USER-GUIDE.md "$D/"
+          cp target/release/whistlestop LICENSE README.md docs/USER-GUIDE.md "$D/"
           tar czf "$D.tar.gz" "$D"
-          echo "ASSET=$D.tar.gz" >> "$GITHUB_ENV"
-      - name: Attach to the release
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: gh release upload "$TAG" "$ASSET" --clobber
+          sha256sum "$D.tar.gz" > "$D.tar.gz.sha256"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux
+          path: |
+            whistlestop-${{ github.ref_name }}-linux-x86_64.tar.gz
+            whistlestop-${{ github.ref_name }}-linux-x86_64.tar.gz.sha256
+
+  publish:
+    # One release, made once both builds are there.
+    needs: [windows, linux]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Publish the release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: Whistlestop ${{ github.ref_name }}
+          body_path: .github/release/NOTES.md
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          files: dist/*

@@ -29,18 +29,23 @@ to have every control explain itself when you point at it.
 
 3. Set up your station
 ----------------------
-Follow "Setting up your station" in the Guide. In short:
+Follow "Getting started on the air" in the Guide: it goes step by step
+from installing Mercury to a first contact. In short:
 
-- Install the Mercury modem: https://github.com/Rhizomatica/mercury/releases
-  (the Windows installer or zip).
+- Get Mercury 1.9.23 (the version Whistlestop is tested with):
+  https://github.com/Rhizomatica/mercury/releases/tag/v1.9.23
+  Take mercury-1.9.23-w64-09f258f8.zip, unzip it, and use mercury.exe.
 - In Whistlestop's Settings: your callsign, untick Demo mode, and choose a
   radio connection. "Direct CAT (built in)" needs nothing else and shares
   the radio with Mercury at 127.0.0.1:4532.
-- Set Mercury's radio to Hamlib model 2 (NET rigctl) at 127.0.0.1:4532,
-  its sound card to the radio's USB audio, ports 8300 and 8100. Start it
-  with -G so Whistlestop can set the transmit level.
-- Start Mercury after Whistlestop, then click the red Mercury pill to
-  connect.
+- Start Mercury after Whistlestop, in a Command Prompt in its folder
+  ("mercury.exe -z" lists the sound cards and their ids):
+
+    mercury.exe -R 2 -A 127.0.0.1:4532 -i "<capture id>" -o "<playback id>" -G -L mercury.log
+
+  -R 2 -A 127.0.0.1:4532: Mercury keys the radio through Whistlestop.
+  -G: lets Whistlestop set the transmit level. -L: Mercury's own log.
+- Then click the red Mercury pill in Whistlestop to connect.
 
 First test into a DUMMY LOAD at low power. Watch the ALC: it should barely
 move (a bar or two). Then try the air.
@@ -52,9 +57,14 @@ Encryption is OFF by default. It is NOT legal on amateur bands in the US
 4. Report problems
 ------------------
 https://github.com/NR5P/whistlestop/issues
+("Reporting a problem" in the Guide says more.)
 
-Please say:
+Please send:
+- the Log: on the Log tab, press "Save log..." and attach the file. It has
+  the Whistlestop version and build, your radio, Mercury's version, your
+  settings (without the remote-operation password) and every Log line since
+  Whistlestop started. If Whistlestop crashed, press "Log files" and send
+  whistlestop-previous.log instead;
+- mercury.log from Mercury's folder (with -L, above);
 - your radio and how it's connected;
-- the Whistlestop and Mercury versions;
-- what you did, what you expected, and what happened;
-- the lines from the Log tab around that time.
+- what you did, what you expected, and what happened, with the time in UTC.
