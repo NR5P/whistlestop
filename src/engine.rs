@@ -9204,6 +9204,24 @@ mod tests {
         };
         cfg.sdr.enabled = false;
         cfg.sdr.wide_search = false;
+        // No sound card: an "ether" that sends nothing. The computer's own
+        // input (CI's macOS runner has a silent one) would be near-silent
+        // audio, and busy readings are rightly set aside over that
+        // ("Silent audio doesn't count"), so the message never waited.
+        let ether = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let ether_port = ether.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            for s in ether.incoming() {
+                let Ok(mut s) = s else { return };
+                std::thread::spawn(move || {
+                    use std::io::Read;
+                    let mut b = [0u8; 8192];
+                    while matches!(s.read(&mut b), Ok(n) if n > 0) {}
+                });
+            }
+        });
+        cfg.audio_in = format!("ether:127.0.0.1:{ether_port}");
+        cfg.audio_out = cfg.audio_in.clone();
         assert!(cfg.busy_detect);
         h.send(Cmd::Start(cfg));
         let wait = |what: &str, secs: u64, ok: &dyn Fn(&State) -> bool| {
