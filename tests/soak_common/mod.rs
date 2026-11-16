@@ -391,9 +391,10 @@ pub fn link_up(stn: &Stn, secs: f64) -> f64 {
 
 /// Disconnect and wait for a clean idle state. Returns the time taken.
 pub fn link_down(stn: &Stn, secs: f64) -> f64 {
-    // Let K7BOT's last replies cross first: a packet still in flight when
-    // the link ends is kept and replayed into the next link (a bug, see
-    // soak_e2e.rs hangup_race_does_not_poison_the_next_link).
+    // Let K7BOT's last replies cross first, so a soak test's next link
+    // starts clean. (A packet still in flight when the link ends is set
+    // aside, not taken into the next link: soak_e2e.rs
+    // hangup_race_does_not_poison_the_next_link checks that.)
     std::thread::sleep(Duration::from_millis(300));
     stn.send(Cmd::Disconnect);
     let t = stn.wait("link down", secs, |s| s.link.is_none());

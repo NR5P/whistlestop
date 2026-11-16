@@ -171,12 +171,14 @@ fn links_cut_during_key_exchange() {
 
 /// A packet from K7BOT still in flight when the link ends (here: its
 /// RECEIVED for a chat typed just before Disconnect) arrives after
-/// Mercury's DISCONNECTED line: the data and control ports are separate
-/// sockets, read by separate tasks (tnc.rs). The engine keeps it in
-/// `early` and replays it into the NEXT link, whoever that is with. Under
-/// encryption the next link dies at once ("encrypted packet, but no keys
-/// were agreed"); in plain text the old station's packet would be taken
-/// as the new one's.
+/// Mercury's DISCONNECTED line, or even after the next link's CONNECTED:
+/// the data and control ports are separate sockets, read by separate tasks
+/// (tnc.rs). It must not reach the NEXT link, whoever that is with: under
+/// encryption that link would die at once ("encrypted packet, but no keys
+/// were agreed"), and in plain text the old station's packet would be
+/// taken as the new one's. A link's first packet from the other station is
+/// its HELLO, so the engine sets aside whatever comes before it (CI on
+/// Windows, 2026-11-16: 14 of 30 links were killed before that).
 #[test]
 fn hangup_race_does_not_poison_the_next_link() {
     let stn = fast("N0RAC", bot(Policy::Prefer), |c| c.e2e = Policy::Prefer);

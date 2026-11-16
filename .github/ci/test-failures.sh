@@ -19,9 +19,9 @@ awk -v q="'" -v os="$os" '
     n = split($0, a, q); name = (n > 2) ? a[2] : "?"
     loc = $0; sub(/.* panicked at /, "", loc); sub(/:$/, "", loc)
     # The message, and what the test printed with it (its Log, say), up to
-    # 40 lines or the next blank line after "note:".
+    # 200 lines, or until the next test's output.
     msg = ""; k = 0
-    while (k < 40 && (getline line) > 0) {
+    while (k < 200 && (getline line) > 0) {
       gsub(/\r/, "", line)
       if (line ~ /^note: run with/ || line ~ /^---- .* stdout ----$/ || line ~ / panicked at /) break
       gsub(/%/, "%25", line)

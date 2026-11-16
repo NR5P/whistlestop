@@ -1029,6 +1029,19 @@ struct Station {
     last_data_in: Instant,
     /// Packets that arrived before Mercury's CONNECTED line, with when.
     early: Vec<(Instant, Vec<u8>)>,
+    /// The other station's HELLO has come on this link. Its HELLO is the
+    /// first packet it sends on any link, so whatever comes before it is
+    /// the last link's: a reply still in flight when that link ended, which
+    /// Mercury's data port can deliver after the DISCONNECTED line and even
+    /// after the next link's CONNECTED.
+    peer_hello: bool,
+    /// Packets set aside for that, not yet said in the Log.
+    stale_dropped: usize,
+    /// When the coming link began: our CONNECT went to Mercury, or Mercury
+    /// said a station is calling (PENDING). Its data can't come before
+    /// that, so anything older waiting in `early` is an ended link's (a
+    /// link cut moments after it began can leave even its HELLO behind).
+    link_attempt: Option<Instant>,
     /// Application packets, waiting for the modem (and for keys).
     hi_queue: VecDeque<Link>,
     outgoing: Vec<Outgoing>,
@@ -1386,6 +1399,9 @@ impl Station {
             e2e: None,
             ctl_queue: VecDeque::new(),
             early: vec![],
+            peer_hello: false,
+            stale_dropped: 0,
+            link_attempt: None,
             last_data_in: Instant::now(),
             hi_queue: VecDeque::new(),
             outgoing: vec![],
@@ -2572,6 +2588,7 @@ impl Station {
                     self.set(|g| g.calling = None);
                 }
                 let me = self.mycall();
+                self.link_attempt = Some(Instant::now());
                 self.tnc()?.command(&format!("CONNECT {me} {call}")).await?;
                 self.set(|g| g.calling = Some(call.clone()));
                 self.quiet_watch();
@@ -2809,6 +2826,7 @@ impl Station {
                 self.ready_to_call(&call).await?;
                 self.stop_search("connecting");
                 let me = self.mycall();
+                self.link_attempt = Some(Instant::now());
                 self.tnc()?.command(&format!("CONNECT {me} {call}")).await?;
                 self.set(|g| g.calling = Some(call.clone()));
                 self.quiet_watch();
@@ -3892,6 +3910,21 @@ impl Station {
     async fn on_bodies(&mut self, bodies: Vec<Vec<u8>>) -> anyhow::Result<()> {
         for body in bodies {
             // None: the link is being dropped; ignore the rest.
+            if self.e2e.is_none() {
+                break;
+            }
+            if !self.peer_hello {
+                if body.first() == Some(&crate::protocol::T_HELLO) {
+                    self.peer_hello = true;
+                    let n = std::mem::take(&mut self.stale_dropped);
+                    if n > 0 {
+                        self.log(format!("Set aside {n} packet(s) from the last link that arrived after it ended"));
+                    }
+                } else {
+                    self.stale_dropped += 1;
+                    continue;
+                }
+            }
             let Some(ch) = self.e2e.as_mut() else { break };
             match ch.on_body(&body) {
                 Ok(step) => {
@@ -3934,6 +3967,8 @@ impl Station {
                     self.set(|g| g.cq = CqView::default());
                 }
                 self.peer = Some(peer.clone());
+                self.peer_hello = false;
+                self.stale_dropped = 0;
                 self.est = ThroughputEstimator::default();
                 self.mercury_buffer = 0;
                 self.mercury_reported = 0;
@@ -4016,12 +4051,15 @@ impl Station {
                     self.system_line(format!("(away) sent: {text}"));
                 }
                 self.pump().await?;
-                // Only what came just before this CONNECTED belongs to this
-                // link: older bytes are the last link's leftovers (its
-                // replies can arrive after its DISCONNECTED).
+                // Only what came just before this CONNECTED can belong to
+                // this link: older bytes are the last link's leftovers (its
+                // replies can arrive after its DISCONNECTED). Of the rest,
+                // on_bodies keeps only the other station's HELLO and what
+                // follows it.
+                let began = self.link_attempt.take();
                 let early: Vec<Vec<u8>> = std::mem::take(&mut self.early)
                     .into_iter()
-                    .filter(|(at, _)| at.elapsed() < Duration::from_secs(3))
+                    .filter(|(at, _)| at.elapsed() < Duration::from_secs(3) && began.is_none_or(|b| *at >= b))
                     .map(|(_, b)| b)
                     .collect();
                 self.on_bodies(early).await?;
@@ -4041,6 +4079,9 @@ impl Station {
                 self.e2e = None;
                 self.ctl_queue.clear();
                 self.early.clear();
+                self.peer_hello = false;
+                self.stale_dropped = 0;
+                self.link_attempt = None;
                 self.dec = LinkDecoder::default();
                 self.mercury_reported = 0;
                 self.hangup_at = None;
@@ -4123,6 +4164,7 @@ impl Station {
                     return Ok(());
                 }
                 self.quiet_watch();
+                self.link_attempt = Some(Instant::now());
                 self.set(|g| g.incoming_call = true);
                 if self.cq.is_some() {
                     self.hold_cq().await;
@@ -5232,6 +5274,7 @@ impl Station {
         let still = self.st.lock().unwrap().calling.as_deref() == Some(call.as_str());
         if still && self.peer.is_none() {
             let cmd = format!("CONNECT {} {call}", self.mycall());
+            self.link_attempt = Some(Instant::now());
             let sent = match self.tnc() {
                 Ok(t) => t.command(&cmd).await.map(|_| ()),
                 Err(e) => Err(e),
@@ -7136,6 +7179,7 @@ impl Station {
         }
         self.auto_pending = None;
         let me = self.mycall();
+        self.link_attempt = Some(Instant::now());
         self.tnc()?.command(&format!("CONNECT {me} {call}")).await?;
         self.auto_call = Some(Instant::now());
         self.quiet_watch();
