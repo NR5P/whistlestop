@@ -18,8 +18,16 @@ awk -v q="'" -v os="$os" '
   / panicked at / {
     n = split($0, a, q); name = (n > 2) ? a[2] : "?"
     loc = $0; sub(/.* panicked at /, "", loc); sub(/:$/, "", loc)
-    msg = ""; if ((getline line) > 0) msg = line
-    gsub(/%/, "%25", msg); gsub(/\r/, "", msg)
+    # The message, and what the test printed with it (its Log, say), up to
+    # 40 lines or the next blank line after "note:".
+    msg = ""; k = 0
+    while (k < 40 && (getline line) > 0) {
+      gsub(/\r/, "", line)
+      if (line ~ /^note: run with/ || line ~ /^---- .* stdout ----$/ || line ~ / panicked at /) break
+      gsub(/%/, "%25", line)
+      msg = (k == 0) ? line : msg "%0A" line
+      k++
+    }
     # A title ends at "::" and its properties at ",": escape them in the
     # thread name (engine::tests::x).
     gsub(/%/, "%25", name); gsub(/:/, "%3A", name); gsub(/,/, "%2C", name)

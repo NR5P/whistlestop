@@ -50,6 +50,9 @@ pub struct FakeOptions {
     /// Tests: the busy detector reports someone on the air (BUSY ON) from
     /// the first second to the second, then BUSY OFF.
     pub busy_between: Option<(f64, f64)>,
+    /// Tests: set to end `busy_between`'s busy spell (BUSY OFF) at once,
+    /// whatever its second number says.
+    pub busy_release: Option<Arc<std::sync::atomic::AtomicBool>>,
 }
 
 impl Default for FakeOptions {
@@ -68,6 +71,7 @@ impl Default for FakeOptions {
             bcast_on_air_s: None,
             bot_beacon_mail_for: None,
             busy_between: None,
+            busy_release: None,
         }
     }
 }
@@ -890,7 +894,10 @@ impl Session {
             if self.busy_said == 0 && self.now >= on {
                 self.busy_said = 1;
                 self.reply("BUSY ON");
-            } else if self.busy_said == 1 && self.now >= off {
+            } else if self.busy_said == 1
+                && (self.now >= off
+                    || self.o.busy_release.as_ref().is_some_and(|r| r.load(std::sync::atomic::Ordering::Relaxed)))
+            {
                 self.busy_said = 2;
                 self.reply("BUSY OFF");
             }

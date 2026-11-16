@@ -9183,9 +9183,13 @@ mod tests {
     #[test]
     fn a_table_message_waits_for_a_clear_channel() {
         let rt = tokio::runtime::Runtime::new().unwrap();
+        // Busy from 2 s until the test lets it go: a fixed end raced a slow
+        // runner (the busy spell was over before the message was said).
+        let release = Arc::new(AtomicBool::new(false));
         let f = rt
             .block_on(crate::fake_mercury::FakeMercury::start(FakeOptions {
-                busy_between: Some((2.0, 9.0)),
+                busy_between: Some((2.0, 1e6)),
+                busy_release: Some(release.clone()),
                 ..Default::default()
             }))
             .unwrap();
@@ -9219,13 +9223,12 @@ mod tests {
                 f.from == "N0WAIT" && matches!(&f.body, TableBody::Text { .. })
             })
         };
-        wait("the message didn't say it waits", 5, &|g| g.log.iter().any(|l| l.1.contains("Roundtable message waits")));
-        // It goes only once Mercury has said BUSY OFF. (The fake's 9 s count
-        // from its first tick: on a fast machine its BUSY OFF came 8.9 s
-        // after the station started, and a check against 9 s failed. On a
-        // slow one, a check that nothing went in the 3 s after speaking
-        // failed when BUSY OFF fell inside them: the fake now notes what
-        // reaches it while it says busy, whenever that is.)
+        wait("the message didn't say it waits", 20, &|g| g.log.iter().any(|l| l.1.contains("Roundtable message waits")));
+        std::thread::sleep(Duration::from_secs(1));
+        assert!(!sent(), "sent on top of someone");
+        // It goes only once Mercury has said BUSY OFF. The fake also notes
+        // any table frame that reaches it while it says busy.
+        release.store(true, Ordering::Relaxed);
         let t = Instant::now();
         while !sent() {
             assert!(t.elapsed() < Duration::from_secs(20), "never sent once clear");
