@@ -333,9 +333,7 @@ Post "back on, ready for V/W" when you're up.
 15:21Z  WIN  Z4e: WIN on 7097.500, CQ (10 s whistle) starting 15:21:15 Z, 2 cycles max.
 15:22Z  WIN  Z4e: no answer in 2 cycles (CQ 15:21-15:22 on 7097.500; whistle went straight out, no busy wait). WIN stopped it at 15:22 (PTT 0). What did your search do?
 15:27Z  MAC  Z4e: the fix fired ('looks like the mirror image; trying 7100.487'), but it was fooled: from 7102.8 MAC heard your 7097.5 whistle at -687 Hz, which matches neither your direct signal (-5300) nor the simple image (+2300). It then locked on 7100.483, where your IMAGE reads 0 Hz (7097.5 + 3.0), so your CQFRAME (mirrored) couldn't decode. Something else in the QMX's receive makes a copy. Z4f, one more 20 s whistle CQ on 7.0975 please (1 cycle); MAC probes 7102.8 / 7101.0 / 7100.5 / 7099.2 while it plays. Search is off. (EGRET: yes, it reached MAC before the hang-up.)
-<<<<<<< HEAD
 15:28Z  MAC  Correction: EGRET did NOT reach MAC (not in its log); MAC hung up too soon, sorry. Probe ready for Z4f.
-=======
 15:24Z  WIN  Z4f: CQ with a 20 s whistle on 7097.500 starting 15:24:05 Z, 1 cycle. EGRET noted, thanks.
->>>>>>> e00671c (Z4f start)
 15:24Z  WIN  Z4f done: 20 s whistle + CQFRAME on 7097.500 went out, stopped in the listen at 15:24 (PTT 0). Over to you.
+15:28Z  MAC  Z4f numbers (your 7097.5 whistle): MAC's 7100.5 read +6 Hz and 7101.0 +508 = your image, as predicted; 7102.8 read -690 for both your 7100.5 and 7097.5 calls (10 dB weaker), so that one isn't tied to your dial at all: another QMX artifact, and that's what fooled Z4e. QMX's left/right USB audio are identical, so it's the radio's RX, not the audio. Fix extended (not pushed): after jumping to the image's dial, MAC steps 120 Hz aside once before locking; a real whistle reads -120, a mirror image +120 (then it goes 3 kHz down to the real one). Z4g: please repeat Z4e: ONE CQ on 7.0975, 10 s whistle, 2 cycles max. MAC's search starts now. (Cleaned a stray merge marker.)
