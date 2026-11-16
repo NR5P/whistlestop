@@ -1,0 +1,49 @@
+name: Release (Windows)
+
+# Pushing a version tag (v0.1.0-beta.1, v0.2.0, ...) builds the Windows app
+# and publishes it as a GitHub release with a zip and its SHA-256. A tag with
+# a "-" in it (a beta) is marked as a pre-release.
+#
+#   git tag v0.1.0-beta.1 && git push origin v0.1.0-beta.1
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    env:
+      # The C runtime linked in, so the exe runs on a PC without the Visual
+      # C++ redistributable.
+      RUSTFLAGS: -C target-feature=+crt-static
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build
+        run: cargo build --release --bin whistlestop
+      - name: Package
+        shell: pwsh
+        run: |
+          $name = "whistlestop-${{ github.ref_name }}-windows-x64"
+          New-Item -ItemType Directory $name | Out-Null
+          Copy-Item target/release/whistlestop.exe $name/
+          Copy-Item .github/release/READ-ME-FIRST.txt $name/
+          Copy-Item README.md, LICENSE $name/
+          Copy-Item docs/USER-GUIDE.md $name/
+          Compress-Archive -Path $name -DestinationPath "$name.zip"
+          $hash = (Get-FileHash "$name.zip" -Algorithm SHA256).Hash.ToLower()
+          "$hash  $name.zip" | Out-File -Encoding ascii "$name.zip.sha256"
+      - name: Publish the release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: Whistlestop ${{ github.ref_name }}
+          body_path: .github/release/NOTES.md
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          files: |
+            whistlestop-${{ github.ref_name }}-windows-x64.zip
+            whistlestop-${{ github.ref_name }}-windows-x64.zip.sha256

@@ -1,0 +1,60 @@
+Whistlestop for Windows (beta)
+==============================
+
+HF keyboard chat, file transfer and group Roundtables over the Mercury
+modem, with the "whistle" CQ. This is a beta: please report what goes wrong.
+
+Needs: Windows 10 or 11 (64-bit). Nothing to install for Whistlestop itself.
+
+
+1. Start it
+-----------
+Unzip this folder anywhere and run whistlestop.exe.
+
+- Windows SmartScreen may say "Windows protected your PC" because the
+  program isn't signed. Click "More info", then "Run anyway".
+- A console window opens beside the app. Leave it open: closing it closes
+  Whistlestop.
+- Settings are kept in %APPDATA%\Whistlestop (whistlestop.toml).
+
+
+2. Try Demo mode first
+----------------------
+Whistlestop starts in Demo mode: a simulated radio, band, modem and a demo
+station, K7BOT. Nothing is transmitted. Call CQ, search, chat and send a
+file with K7BOT to learn the screen. Press "Guide" in the top bar for the
+full manual (USER-GUIDE.md in this folder is the same text), and "? Help"
+to have every control explain itself when you point at it.
+
+
+3. Set up your station
+----------------------
+Follow "Setting up your station" in the Guide. In short:
+
+- Install the Mercury modem: https://github.com/Rhizomatica/mercury/releases
+  (the Windows installer or zip).
+- In Whistlestop's Settings: your callsign, untick Demo mode, and choose a
+  radio connection. "Direct CAT (built in)" needs nothing else and shares
+  the radio with Mercury at 127.0.0.1:4532.
+- Set Mercury's radio to Hamlib model 2 (NET rigctl) at 127.0.0.1:4532,
+  its sound card to the radio's USB audio, ports 8300 and 8100. Start it
+  with -G so Whistlestop can set the transmit level.
+- Start Mercury after Whistlestop, then click the red Mercury pill to
+  connect.
+
+First test into a DUMMY LOAD at low power. Watch the ALC: it should barely
+move (a bar or two). Then try the air.
+
+Encryption is OFF by default. It is NOT legal on amateur bands in the US
+(47 CFR 97.113(a)(4)) and most other countries: leave it off.
+
+
+4. Report problems
+------------------
+https://github.com/NR5P/whistlestop/issues
+
+Please say:
+- your radio and how it's connected;
+- the Whistlestop and Mercury versions;
+- what you did, what you expected, and what happened;
+- the lines from the Log tab around that time.
