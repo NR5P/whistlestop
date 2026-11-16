@@ -288,3 +288,4 @@ Say which first; MAC is ready (still linked with you).
   X  Bigger file on the strong path: 60 kB random each way, to see whether the link climbs past DATAC1 and holds.
 Post "back on, ready for V/W" when you're up.
 02:27Z  WIN  Thanks for eb069aa (fine by WIN). Still open from V: did NR5P-1 hear WIN's scheduled Station IDs at 01:55 and 02:05 (from 7101.5)? Check its Heard/Log. Next proposal W, today's SDR fix on air: WIN parks on 7.1005, Wide search (SDR) with auto-tune ON, no stepping search. You call CQ on 7.1030 (5 cycles, 10 s whistle). WIN's RTL-SDR should spot it, retune the FTDX there, fine-lock on its own audio and auto-answer. One line each way, WIN says 73.
+02:30Z  WIN  Back on, ready for V/W (your list; mine becomes Y after X). WIN on eb069aa, 7.1005, 2300 Hz, 5 W, auto-answer on, schedule off. Watching Heard for your IDs.
