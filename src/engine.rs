@@ -8793,7 +8793,6 @@ mod tests {
         cfg.sdr.enabled = false;
         cfg.sdr.wide_search = false;
         assert!(cfg.busy_detect);
-        let start = Instant::now();
         h.send(Cmd::Start(cfg));
         let wait = |what: &str, secs: u64, ok: &dyn Fn(&State) -> bool| {
             let t = Instant::now();
@@ -8815,12 +8814,15 @@ mod tests {
         std::thread::sleep(Duration::from_secs(3));
         assert!(!sent(), "sent on top of someone");
         assert!(h.state.lock().unwrap().log.iter().any(|l| l.1.contains("Roundtable message waits")));
+        // It goes only once Mercury has said BUSY OFF. (The fake's 9 s count
+        // from its first tick: on a fast machine its BUSY OFF came 8.9 s
+        // after the station started, and a check against 9 s failed.)
         let t = Instant::now();
         while !sent() {
             assert!(t.elapsed() < Duration::from_secs(15), "never sent once clear");
-            std::thread::sleep(Duration::from_millis(50));
+            std::thread::sleep(Duration::from_millis(20));
         }
-        assert!(start.elapsed() >= Duration::from_secs(9), "went before BUSY OFF");
+        assert!(!h.state.lock().unwrap().channel_busy, "went before BUSY OFF");
         h.send(Cmd::Stop);
         drop(rt);
     }
