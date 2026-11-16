@@ -20,7 +20,10 @@ awk -v q="'" -v os="$os" '
     loc = $0; sub(/.* panicked at /, "", loc); sub(/:$/, "", loc)
     msg = ""; if ((getline line) > 0) msg = line
     gsub(/%/, "%25", msg); gsub(/\r/, "", msg)
-    printf "::error title=%s: %s panicked::%s (at %s)\n", os, name, msg, loc
+    # A title ends at "::" and its properties at ",": escape them in the
+    # thread name (engine::tests::x).
+    gsub(/%/, "%25", name); gsub(/:/, "%3A", name); gsub(/,/, "%2C", name)
+    printf "::error title=%s panic in %s::%s (at %s)\n", os, name, msg, loc
   }' "$out" | head -20
 
 # A test binary that crashed or was killed.

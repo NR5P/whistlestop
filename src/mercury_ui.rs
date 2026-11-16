@@ -28,7 +28,10 @@ pub async fn set_tx_gain(host: &str, port: u16, db: f32) -> Result<f32> {
     let db = db.clamp(MIN_DB, MAX_DB);
     let mut s = tokio::time::timeout(CONNECT, TcpStream::connect((host, port)))
         .await
-        .map_err(|_| anyhow!("Mercury's UI port {host}:{port} didn't answer"))?
+        // On Windows a port nobody listens on isn't refused at once: the
+        // connection is retried for about 2 s, so a Mercury started without
+        // -G looks like this rather than a refusal.
+        .map_err(|_| anyhow!("Mercury's UI port {host}:{port} didn't answer; start Mercury with -G"))?
         .map_err(|e| anyhow!("can't reach Mercury's UI port {host}:{port} ({e}); start Mercury with -G"))?;
     let _ = s.set_nodelay(true);
     tokio::time::timeout(CONFIRM, async {

@@ -13,7 +13,7 @@
 //!   uplink is always empty again by the time it would), and the engine's
 //!   pump needs those reports to send more than two file pieces.
 //!   Audio goes to a TCP "ether" stub (silence in, discard out); there is
-//!   no radio (rigctld points at a closed port).
+//!   no radio (`rigctld = "none"`).
 
 #![allow(dead_code)]
 
@@ -218,7 +218,10 @@ pub fn fast(call: &str, opts: FakeOptions, f: impl FnOnce(&mut Config)) -> Stn {
     cfg.mercury_host = "127.0.0.1".into();
     cfg.mercury_port = port;
     cfg.mercury_bcast_port = fake.bcast_port;
-    cfg.rigctld = "127.0.0.1:1".into();
+    // No radio. Not a closed rigctld port: Windows takes about 2 s to refuse
+    // a connection to one, so every (re)start stalled the engine that long,
+    // and a storm of restarts held up the commands behind them.
+    cfg.rigctld = "none".into();
     cfg.audio_in = format!("ether:127.0.0.1:{ether}");
     cfg.audio_out = cfg.audio_in.clone();
     cfg.whistle_s = 1.0;

@@ -171,7 +171,14 @@ fn listing_order_hidden_files_and_cap() {
 #[test]
 fn unicode_names() {
     let l = lib("uni");
-    for name in ["Ünïcødé.txt", "日本語.txt", "emoji 🛰.txt", "with space.txt", "a\\b.txt"] {
+    // A backslash is an ordinary character in a Unix file name, but on
+    // Windows it separates folders, so no file can be called that there.
+    let files: &[&str] = if cfg!(windows) {
+        &["Ünïcødé.txt", "日本語.txt", "emoji 🛰.txt", "with space.txt"]
+    } else {
+        &["Ünïcødé.txt", "日本語.txt", "emoji 🛰.txt", "with space.txt", "a\\b.txt"]
+    };
+    for &name in files {
         std::fs::write(l.root.join(name), name).unwrap();
         assert_eq!(read(&l.root, name, 1 << 20).unwrap().1, name.as_bytes(), "{name}");
     }

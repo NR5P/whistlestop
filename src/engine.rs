@@ -9219,17 +9219,26 @@ mod tests {
                 f.from == "N0WAIT" && matches!(&f.body, TableBody::Text { .. })
             })
         };
-        std::thread::sleep(Duration::from_secs(3));
-        assert!(!sent(), "sent on top of someone");
-        assert!(h.state.lock().unwrap().log.iter().any(|l| l.1.contains("Roundtable message waits")));
+        wait("the message didn't say it waits", 5, &|g| g.log.iter().any(|l| l.1.contains("Roundtable message waits")));
         // It goes only once Mercury has said BUSY OFF. (The fake's 9 s count
         // from its first tick: on a fast machine its BUSY OFF came 8.9 s
-        // after the station started, and a check against 9 s failed.)
+        // after the station started, and a check against 9 s failed. On a
+        // slow one, a check that nothing went in the 3 s after speaking
+        // failed when BUSY OFF fell inside them: the fake now notes what
+        // reaches it while it says busy, whenever that is.)
         let t = Instant::now();
         while !sent() {
-            assert!(t.elapsed() < Duration::from_secs(15), "never sent once clear");
+            assert!(t.elapsed() < Duration::from_secs(20), "never sent once clear");
             std::thread::sleep(Duration::from_millis(20));
         }
+        assert!(
+            !crate::fake_mercury::TEST_BCAST_WHILE_BUSY
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|f| f.from == "N0WAIT" && matches!(&f.body, TableBody::Text { .. })),
+            "sent on top of someone"
+        );
         assert!(!h.state.lock().unwrap().channel_busy, "went before BUSY OFF");
         h.send(Cmd::Stop);
         drop(rt);

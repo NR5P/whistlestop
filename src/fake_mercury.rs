@@ -38,7 +38,7 @@ pub struct FakeOptions {
     pub bot_pushy: bool,
     /// Tests: as host of `bot_cq_table`, the bot answers a JOIN with its
     /// SPEED (so the member knows who hosts) and closes the table (LEAVE)
-    /// this many seconds later.
+    /// this many seconds later (real seconds, also with `fast`).
     pub bot_table_leave_after: Option<f64>,
     /// Key up (PTT ON, then PTT OFF this many seconds later) for each
     /// broadcast frame, as real Mercury does while it sends one. Off
@@ -759,7 +759,13 @@ impl Session {
             return;
         };
         #[cfg(test)]
-        TEST_BCAST_SENT.lock().unwrap().push(fr.clone());
+        {
+            TEST_BCAST_SENT.lock().unwrap().push(fr.clone());
+            // Between the BUSY ON and BUSY OFF it said (`busy_between`).
+            if self.busy_said == 1 {
+                TEST_BCAST_WHILE_BUSY.lock().unwrap().push(fr.clone());
+            }
+        }
         if let Some(s) = self.o.bcast_on_air_s {
             self.reply("PTT ON");
             self.after(s, Act::Line("PTT OFF".into()));
@@ -795,7 +801,15 @@ impl Session {
                         from: bot.clone(),
                         body: TableBody::Leave,
                     };
-                    self.after(2.0 + after, Act::BotBcast(leave.encode()));
+                    // `after` is real seconds, also with `fast`: shrunk 100x,
+                    // 6 s left the member 60 ms between learning who hosts
+                    // and the host leaving, too short to see on a slow
+                    // machine (CI, macOS, 2026-11-16).
+                    self.later.push(Later {
+                        at: self.delay(2.0) + after,
+                        what: Act::BotBcast(leave.encode()),
+                        epoch: None,
+                    });
                     return;
                 }
                 // Tests may give the bot its own report (SNR, bandwidth).
@@ -1027,6 +1041,11 @@ pub fn test_bot_table(_mycall: &str) -> Option<String> {
 /// pick theirs out by callsign).
 #[cfg(test)]
 pub static TEST_BCAST_SENT: std::sync::Mutex<Vec<TableFrame>> = std::sync::Mutex::new(Vec::new());
+
+/// Tests: the table frames that reached a fake Mercury while it was saying
+/// the channel is busy (`busy_between`), i.e. sent on top of someone.
+#[cfg(test)]
+pub static TEST_BCAST_WHILE_BUSY: std::sync::Mutex<Vec<TableFrame>> = std::sync::Mutex::new(Vec::new());
 
 /// Tests: demo stations started with this callsign get a K7BOT whose JOIN
 /// reports this SNR and bandwidth code.
