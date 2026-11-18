@@ -4,7 +4,7 @@ mod depot;
 mod guide;
 mod help;
 pub mod icon;
-mod logsave;
+pub mod logsave;
 mod remote;
 mod rigwin;
 mod waterfall;

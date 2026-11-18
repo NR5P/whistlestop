@@ -16,6 +16,9 @@ Unzip this folder anywhere and run whistlestop.exe.
 - A console window opens beside the app. Leave it open: closing it closes
   Whistlestop.
 - Settings are kept in %APPDATA%\Whistlestop (whistlestop.toml).
+- No screen at the radio? "whistlestop.exe serve" in a Command Prompt
+  runs the station with no window; operate it from Whistlestop on another
+  computer with "Remote". See "Remote operation" in the Guide.
 
 
 2. Try Demo mode first

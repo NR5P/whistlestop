@@ -2,6 +2,7 @@
 //! with the CQ whistle that scanning stations stop for.
 
 mod gui;
+mod headless;
 
 use anyhow::Context;
 use clap::{Parser, Subcommand};
@@ -18,6 +19,21 @@ struct Cli {
 enum Command {
     /// Open the app (the default).
     Gui,
+    /// Run the station with no window (a Raspberry Pi or other computer with
+    /// no screen) and share it on the LAN: operate it from Whistlestop on
+    /// another computer (Remote). Uses the same settings file as the app.
+    Serve {
+        /// The port to share on (default: the settings' remote port, 7373).
+        #[arg(long)]
+        port: Option<u16>,
+        /// Ask for the remote-access password, save it in the settings,
+        /// then start.
+        #[arg(long)]
+        set_password: bool,
+        /// Don't print the Log (it's still written to whistlestop.log).
+        #[arg(long)]
+        quiet: bool,
+    },
     /// Write the CQ whistle to a WAV file, to hear what it sounds like.
     WhistleWav {
         #[arg(default_value = "whistle.wav")]
@@ -76,6 +92,7 @@ fn main() -> anyhow::Result<()> {
             };
             eframe::run_native("Whistlestop", options, Box::new(|cc| Ok(Box::new(gui::App::new(cc))))).map_err(|e| anyhow::anyhow!("{e}"))
         }
+        Command::Serve { port, set_password, quiet } => headless::run(headless::Opts { port, set_password, quiet }),
         Command::WhistleWav { path, seconds, profile: name } => {
             let p: WhistleParams = profile(&name).with_fs(48_000);
             let audio = whistle(seconds, &p);

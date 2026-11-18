@@ -596,6 +596,58 @@ The window then shows the address to connect to, for example `192.168.1.20:7373`
 
 **Security.** Only computers with private (home network) addresses can connect: 192.168.x.x, 10.x.x.x, 172.16–31.x.x, link-local and IPv6 unique-local. The password is never sent: the radio computer sends a fresh challenge and the other computer answers with an HMAC-SHA256 of it. A wrong password is refused, slowly, and after **10 wrong passwords within a minute** from one computer, that computer's logins are refused for **5 minutes**, the right password included; the radio computer's Log says so and names it. Other computers (yours) can still log in, so a stranger guessing can't lock you out. A backstop covers someone changing address to get round that: after **30 wrong passwords within 10 minutes** from all computers together, logins from computers that haven't logged in since Whistlestop started are refused for **5 minutes**; one that has logged in (yours) still can. At most **8** connections are accepted at once, at most **2** of them logins still in progress from one computer, and a login must finish within **15 s**. An operator whose computer stops answering (an app that hung, Wi-Fi gone) is dropped once the radio computer can't send to it for **30 s**. While **Connect** is reaching the radio computer the window stays usable and shows **Connecting…** (a wrong address gives up within about 15 s). The stream itself isn't encrypted, so **don't forward the port to the internet**; use a VPN to reach home from outside. Anyone who knows the password can transmit with your station, under your callsign: choose it accordingly. On macOS, allow incoming connections for Whistlestop when the firewall asks.
 
+### With no window (headless)
+
+A radio computer doesn't need a screen. On a Raspberry Pi, a small server or any computer beside the radio, run:
+
+```
+whistlestop serve
+```
+
+It runs the same station the app does, with the same settings file (see "Settings reference"), but with no window, and shares it on the LAN as above. You operate it from Whistlestop on another computer with **🛰 Remote**, exactly as above. Everything else in this section applies, the security rules included.
+
+- **Sharing is always on** in this mode, since it's the only way in, whatever **Share this station on my LAN** says. It needs a password of at least 4 characters. If the settings have none, it stops and says how to set one: `whistlestop serve --set-password` asks for one twice (it shows as you type), saves it in the settings, then starts. Or give it in the environment as `WHISTLESTOP_REMOTE_PASSWORD`, which is used for that run only and never saved.
+- **Port**: the settings' remote port (7373 by default), or `--port N`.
+- **When it starts**, it prints the address to connect to (for example `192.168.1.20:7373`), where the settings and the Log file are, and how many settings couldn't be read, if any.
+- **The Log** is printed as it comes, each line with its date and time (UTC), for a terminal or the system log (journald). It's also written to `whistlestop.log` beside the settings, as in the app (see "The Log tab"). `--quiet` stops the printing but not the file.
+- **Where the program is**: on Linux, `whistlestop` from the download (or your own build); on Windows, `whistlestop.exe serve` in a Command Prompt in its folder; on macOS, `/Applications/Whistlestop.app/Contents/MacOS/whistlestop serve` in Terminal.
+- **Stopping**: Ctrl-C, SIGTERM (what `systemctl stop` sends) or SIGHUP (the terminal closing) stops the station the way quitting the app does: remote operators are disconnected, then it waits up to **3 s** for the radio to be unkeyed.
+- **Settings** a remote operator changes are saved on this computer, as with the app. `serve` never writes the settings file itself, except a password you set with `--set-password`.
+
+**Setting up the radio connection.** A remote operator can't change what belongs to the radio computer: the radio connection, Mercury, Demo mode, folders, and sound devices other than those it lists. So set those up on that computer before you rely on `serve`. You can run the app there once (on a Pi, its desktop or a screen plugged in), or edit `whistlestop.toml` by hand. `whistlestop devices` lists the sound devices by the names the settings use. With no settings file, the defaults are used, and those are **Demo mode**: the station runs, but on no radio.
+
+**Running it at boot (Linux).** A systemd service keeps it running and restarts it if it stops. For example, `/etc/systemd/system/whistlestop.service`:
+
+```
+[Unit]
+Description=Whistlestop (no window)
+After=network-online.target sound.target
+Wants=network-online.target
+
+[Service]
+User=pi
+ExecStart=/usr/local/bin/whistlestop serve
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Then run `sudo systemctl enable --now whistlestop`, and use `journalctl -u whistlestop -f` to watch its Log. Run it as the user whose settings it should use (here `pi`), and add that user to the `dialout` and `audio` groups so it can reach the radio's USB serial port and sound card.
+
+Mercury is its own program here too, started with the same command as with the app (see "3. Start Mercury"). With direct CAT, it must start **after** `whistlestop serve`. A second service does that: the same file named `mercury.service`, with `ExecStart=` set to your Mercury command (full paths) and `After=whistlestop.service` added under `[Unit]`.
+
+**Raspberry Pi.** Use a Pi 4 or Pi 5 with 64-bit Raspberry Pi OS (Lite, with no desktop, is enough). There are no ready-made ARM downloads yet, so build it on the Pi itself:
+
+1. The libraries the Linux build needs, even with no screen (it's the same program as the app): `sudo apt install git pkg-config libasound2-dev libudev-dev libxkbcommon-dev libwayland-dev libx11-dev libxcursor-dev libxrandr-dev libxi-dev libgl1-mesa-dev`
+2. Rust, from rustup.rs: `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh`
+3. The source and the build: `git clone https://github.com/NR5P/whistlestop && cd whistlestop && cargo build --release`. The first build takes a while on a Pi.
+4. Install it where the service above expects it: `sudo install target/release/whistlestop /usr/local/bin/`
+5. Set the password (`whistlestop serve --set-password`), set up the radio connection (above), then enable the service.
+
+To update later, run `git pull && cargo build --release` in that folder, install it again (step 4), then `sudo systemctl restart whistlestop`. Run the same Whistlestop version on the Pi and on the computers that operate it. Mercury also has to be built for the Pi from Rhizomatica's source (its releases have no ARM download either). Check Mercury's CPU use at the speeds you want, on a dummy load, before you rely on the Pi.
+
 ## Phone apps (iPhone and Android)
 
 Whistlestop also comes as native phone apps: SwiftUI on the iPhone and iPad (iOS 17 or newer), Jetpack Compose on Android (8.0 or newer). The screens are the phone's own, but underneath they run **the same Whistlestop engine** as the desktop, so a phone finds, calls and talks to a desktop station exactly as two desktops do: the same whistle, search, CQ, link, chat and Depot.

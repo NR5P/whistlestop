@@ -80,6 +80,14 @@ cargo run --release -- whistle-wav whistle.wav
 writes the whistle to a WAV file so you can hear it (`docs/whistle-demo.wav`
 is a 6 s sample).
 
+```bash
+cargo run --release -- serve
+```
+
+runs the station with no window (a Raspberry Pi or a server beside the
+radio), shared on the LAN: operate it from Whistlestop on another computer
+with **🛰 Remote**. See the User Guide, "Remote operation → With no window".
+
 ## On the air
 
 1. Start **rigctld** (`rigctld -m <model> -r <port>`) or enable RigHelm's

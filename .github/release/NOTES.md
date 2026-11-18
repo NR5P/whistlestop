@@ -8,7 +8,9 @@
 - Each `.sha256` file holds its download's checksum.
 - You also need Mercury **1.9.23**, the version Whistlestop is tested with: [Mercury 1.9.23](https://github.com/Rhizomatica/mercury/releases/tag/v1.9.23). 1.9.24 hasn't been tested with Whistlestop yet.
 
-The program isn't signed yet, so SmartScreen will ask you to confirm the first time: click **More info**, then **Run anyway**.
+The Windows program isn't signed yet, so SmartScreen will ask you to confirm the first time: click **More info**, then **Run anyway**.
+
+**No screen at the radio?** `whistlestop serve` runs the station with no window, for example on a Raspberry Pi 4 or 5 beside the radio, and you operate it from Whistlestop on another computer with **🛰 Remote**. There's no ARM download yet: build it on the Pi (see **Remote operation → With no window** in the Guide).
 
 ### Start here
 

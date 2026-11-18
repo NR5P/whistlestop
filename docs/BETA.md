@@ -54,7 +54,16 @@ the release tag on the commit (`v0.1.0-beta.2` makes
 untagged commit; `VERSION=...` overrides it.
 
 **Linux**: `cargo build --release --bin whistlestop`, with the packages in
-`README.md`.
+`README.md`. A **Raspberry Pi** (64-bit Raspberry Pi OS, Pi 4 or 5) builds
+the same way, on the Pi itself; there's no ARM release download yet.
+
+**No window**: every build also runs as `whistlestop serve`, the station
+with no window, shared on the LAN and operated from another computer's
+🛰 Remote (the User Guide's "Remote operation → With no window" has the
+password, the systemd service and the Pi). `tests/headless_serve.rs` runs
+the real binary that way: it logs in with the remote client, checks that a
+wrong password is refused and that the station runs, then stops it with
+SIGTERM.
 
 **CI** (`.github/workflows/build.yml`) builds and tests every push on
 Windows, macOS and Linux and keeps the programs as artifacts on the run's
